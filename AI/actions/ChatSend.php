@@ -2,7 +2,7 @@
 
 namespace Modules\AI\Actions;
 
-require_once dirname(__DIR__).'/lib/bootstrap.php';
+require_once __DIR__.'/../lib/bootstrap.php';
 
 use CController,
     CControllerResponseData,
@@ -114,6 +114,7 @@ class ChatSend extends CController {
 
     private function respond(array $payload, int $http_status = 200): void {
         http_response_code($http_status);
+        header('Content-Type: application/json; charset=UTF-8');
 
         $this->setResponse(
             (new CControllerResponseData([

@@ -64,12 +64,17 @@
                 })
                     .then(function (response) {
                         return response.text().then(function (text) {
-                            try {
-                                return JSON.parse(text);
+                            var parsed = parseJsonSafe(text);
+
+                            if (parsed && typeof parsed === 'object' && typeof parsed.main_block === 'string') {
+                                var inner = parseJsonSafe(parsed.main_block);
+
+                                if (inner) {
+                                    parsed = inner;
+                                }
                             }
-                            catch (e) {
-                                return {ok: false, error: 'Unexpected response from server.'};
-                            }
+
+                            return parsed || {ok: false, error: 'Unexpected response from server.'};
                         });
                     })
                     .then(function (data) {
@@ -90,6 +95,15 @@
                         }
                     });
             });
+        }
+    }
+
+    function parseJsonSafe(text) {
+        try {
+            return JSON.parse(text);
+        }
+        catch (e) {
+            return null;
         }
     }
 

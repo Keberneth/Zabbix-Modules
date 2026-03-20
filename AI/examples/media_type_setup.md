@@ -1,29 +1,43 @@
-# Suggested Zabbix webhook media type setup
+# AI module fix bundle
 
-Use `examples/media_type_ai_webhook.js` as the JavaScript body of a Zabbix **Webhook** media type.
+This package fixes two separate problems:
 
-## Suggested parameters
+1. Zabbix module action controllers are placed under `actions/`, which is where Zabbix expects custom module action classes.
+2. The webhook controller and media type are updated so direct webhook POSTs work correctly and return clearer errors.
 
-Set these media type parameters:
+## What changed
 
-- `ai_webhook_url` = `https://your-zabbix-frontend/zabbix.php?action=ai.webhook`
-- `shared_secret` = `your-shared-secret` (optional but recommended)
-- `eventid` = `{EVENT.ID}`
-- `event_value` = `{EVENT.VALUE}`
-- `trigger_name` = `{EVENT.NAME}`
-- `hostname` = `{HOST.HOST}`
-- `severity` = `{EVENT.SEVERITY}`
-- `opdata` = `{EVENT.OPDATA}`
-- `event_url` = `https://your-zabbix-frontend/tr_events.php?triggerid={TRIGGER.ID}&eventid={EVENT.ID}`
-- `event_tags` = `{EVENT.TAGS}`
+- Added/placed module controllers in `actions/`:
+  - `ChatView.php`
+  - `SettingsView.php`
+  - `SettingsSave.php`
+  - `ChatSend.php`
+  - `EventComment.php`
+  - `Webhook.php`
+- `Webhook.php` now disables SID validation for direct-link access and accepts plain tags or JSON tags.
+- The webhook media type script now prints structured module errors properly.
+- The example YAML now prefers `hostname={HOST.HOST}` and `event_tags={EVENT.TAGS}`.
 
-## Notes
+## Installation
 
-- If you prefer JSON tags, add your own parameter like `event_tags_json` and populate it from a preprocessing step or a custom action format.
-- The module accepts both `X-AI-Webhook-Secret` header and `shared_secret` in the JSON body.
-- The module can ignore resolved events when `event_value=0` if that option is enabled in module settings.
-- The AI answer can be split into multiple problem update comments when it exceeds the configured chunk size.
+Copy the contents of this package into your module directory so the resulting tree looks like this:
 
-## Where the result appears
+- `AI/manifest.json`
+- `AI/Module.php`
+- `AI/actions/*.php`
+- `AI/assets/css/ai.css`
+- `AI/assets/js/ai.chat.js`
+- `AI/assets/js/ai.settings.js`
+- `AI/examples/media_type_ai_webhook.js`
+- `AI/examples/media_type_ai_webhook.yaml`
+- `AI/lib/*.php`
+- `AI/views/ai.chat.php`
+- `AI/views/ai.settings.php`
 
-If **Add problem update** is enabled in module settings, the AI response is written back to the originating Zabbix event as one or more problem update comments.
+If your module is already enabled, a frontend refresh is usually enough after replacing the files. If Zabbix still returns `Page not found` for `action=ai.webhook`, open **Administration -> General -> Modules**, confirm the module is enabled, and click **Scan directory** if needed.
+
+## Media type
+
+Re-import `examples/media_type_ai_webhook.yaml` or paste `examples/media_type_ai_webhook.js` into your Webhook media type.
+
+In the **Test** dialog, replace macros with real values. If **Add problem update** is enabled in module settings, use a real writable event ID.

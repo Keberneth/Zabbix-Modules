@@ -2,7 +2,7 @@
 
 namespace Modules\AI\Actions;
 
-require_once dirname(__DIR__).'/lib/bootstrap.php';
+require_once __DIR__.'/../lib/bootstrap.php';
 
 use CController,
     CControllerResponseData,
@@ -16,6 +16,9 @@ use CController,
 class Webhook extends CController {
 
     public function init(): void {
+        // This endpoint is called directly by the Zabbix webhook media type and therefore
+        // must not require a frontend SID.
+        $this->disableSIDValidation();
         $this->setPostContentType(self::POST_CONTENT_TYPE_JSON);
         $this->disableCsrfValidation();
     }
@@ -158,12 +161,38 @@ class Webhook extends CController {
             'shared_secret' => Util::cleanString($payload['shared_secret'] ?? '', 512)
         ];
 
-        $event_tags = $payload['event_tags'] ?? $payload['tags'] ?? [];
-        $normalized['event_tags_text'] = is_string($event_tags)
-            ? Util::cleanMultiline($event_tags, 4000)
-            : Util::formatTags($event_tags);
+        $event_tags = $payload['event_tags'] ?? $payload['tags'] ?? $payload['event_tags_json'] ?? [];
+        $normalized['event_tags_text'] = $this->normalizeEventTagsText($event_tags);
 
         return $normalized;
+    }
+
+    private function normalizeEventTagsText($event_tags): string {
+        if (is_string($event_tags)) {
+            $event_tags = trim($event_tags);
+
+            if ($event_tags === '' || preg_match('/^\{[A-Z0-9_.]+\}$/', $event_tags)) {
+                return '';
+            }
+
+            if ($this->looksLikeJson($event_tags)) {
+                $decoded = json_decode($event_tags, true);
+
+                if (is_array($decoded)) {
+                    return Util::formatTags($decoded);
+                }
+            }
+
+            return Util::cleanMultiline($event_tags, 4000);
+        }
+
+        return Util::formatTags($event_tags);
+    }
+
+    private function looksLikeJson(string $value): bool {
+        $value = ltrim($value);
+
+        return $value !== '' && ($value[0] === '[' || $value[0] === '{');
     }
 
     private function validateSharedSecret(array $config, array $payload): void {
@@ -185,6 +214,7 @@ class Webhook extends CController {
 
     private function respond(array $payload, int $http_status = 200): void {
         http_response_code($http_status);
+        header('Content-Type: application/json; charset=UTF-8');
 
         $this->setResponse(
             (new CControllerResponseData([

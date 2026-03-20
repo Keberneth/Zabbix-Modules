@@ -2,7 +2,7 @@
 
 namespace Modules\AI\Actions;
 
-require_once dirname(__DIR__).'/lib/bootstrap.php';
+require_once __DIR__.'/../lib/bootstrap.php';
 
 use CController,
     CControllerResponseData,

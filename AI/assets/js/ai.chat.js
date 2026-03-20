@@ -325,12 +325,17 @@
 
     function handleJsonResponse(response) {
         return response.text().then(function (text) {
-            var parsed = {};
+            var parsed = parseJsonSafe(text);
 
-            try {
-                parsed = JSON.parse(text);
+            if (parsed && typeof parsed === 'object' && typeof parsed.main_block === 'string') {
+                var inner = parseJsonSafe(parsed.main_block);
+
+                if (inner) {
+                    parsed = inner;
+                }
             }
-            catch (error) {
+
+            if (!parsed) {
                 parsed = { ok: false, error: text || 'Invalid JSON response.' };
             }
 
@@ -340,6 +345,15 @@
 
             return parsed;
         });
+    }
+
+    function parseJsonSafe(text) {
+        try {
+            return JSON.parse(text);
+        }
+        catch (error) {
+            return null;
+        }
     }
 
     function cssEscape(value) {
