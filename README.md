@@ -7,9 +7,9 @@ Download the module folder to the Zabbix Web frontend Server and place in:
 
 ## Set permissions
 ### Folders and Files Permissions
-sudo chown -R nginx:nginx /usr/share/zabbix/modules/MODULE_FOLDER_NAME
-sudo find /usr/share/zabbix/modules/MODULE_FOLDER_NAME -type d -exec chmod 755 {} \;
-sudo find /usr/share/zabbix/modules/MODULE_FOLDER_NAME -type f -exec chmod 644 {} \;
+sudo chown -R nginx:nginx /usr/share/zabbix/modules/MODULE_FOLDER_NAME<br>
+sudo find /usr/share/zabbix/modules/MODULE_FOLDER_NAME -type d -exec chmod 755 {} \;<br>
+sudo find /usr/share/zabbix/modules/MODULE_FOLDER_NAME -type f -exec chmod 644 {} \;<br>
 
 ### SELinux
 sudo semanage fcontext -a -t httpd_sys_content_t '/usr/share/zabbix/modules/MODULE_FOLDER_NAME(/.*)?'<br>
