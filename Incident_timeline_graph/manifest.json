@@ -1,0 +1,27 @@
+{
+  "manifest_version": 2.0,
+  "id": "incident_timeline_graph",
+  "name": "Incident Timeline Graph",
+  "namespace": "IncidentTimeline",
+  "version": "1.1.0",
+  "author": "Keberneth",
+  "description": "Displays trigger incidents over time with severity charts and export options.",
+  "actions": {
+    "incident.timeline.view": {
+      "class": "IncidentTimelineView",
+      "view": "incident.timeline.view"
+    },
+    "incident.timeline.data": {
+      "class": "IncidentTimelineData",
+      "layout": "layout.json"
+    }
+  },
+  "assets": {
+    "css": [
+      "incident-timeline.css"
+    ],
+    "js": [
+      "incident-timeline.js"
+    ]
+  }
+}

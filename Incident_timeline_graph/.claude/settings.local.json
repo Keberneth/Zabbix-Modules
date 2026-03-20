@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -c \"C:/Users/Niclas Skarnes/Downloads/Fixed/Incident_timeline_graph/assets/js/incident-timeline.js\")",
+      "Bash(\"/c/Program Files/nodejs/node.exe\" -c \"C:/Users/Niclas Skarnes/Downloads/Fixed/Incident_timeline_graph/assets/js/incident-timeline.js\")",
+      "Bash(where node:*)"
+    ]
+  }
+}
