@@ -5,27 +5,26 @@ zabbix_export:
       type: WEBHOOK
       parameters:
         - name: ai_webhook_url
-          value: 'https://zabbix.kt4-iver.se/zabbix.php?action=ai.webhook'
-        - name: shared_secret
-          value: ''
+          value: 'https://ZABBIX_FQDN/ai-webhook'
         - name: eventid
           value: '{EVENT.ID}'
-        - name: event_value
-          value: '{EVENT.VALUE}'
-        - name: trigger_name
-          value: '{EVENT.NAME}'
-        - name: hostname
-          value: '{HOST.HOST}'
-        - name: severity
-          value: '{EVENT.SEVERITY}'
-        - name: opdata
-          value: '{EVENT.OPDATA}'
-        - name: event_url
-          value: 'https://zabbix.kt4-iver.se/tr_events.php?triggerid={TRIGGER.ID}&eventid={EVENT.ID}'
         - name: event_tags
           value: '{EVENT.TAGS}'
         - name: event_tags_json
           value: '{EVENT.TAGSJSON}'
+        - name: event_url
+          value: 'https://ZABBIX_FQDN/tr_events.php?triggerid={TRIGGER.ID}&eventid={EVENT.ID}'
+        - name: event_value
+          value: '{EVENT.VALUE}'
+        - name: hostname
+          value: '{HOST.HOST}'
+        - name: opdata
+          value: '{EVENT.OPDATA}'
+        - name: severity
+          value: '{EVENT.SEVERITY}'
+        - name: shared_secret
+        - name: trigger_name
+          value: '{EVENT.NAME}'
       script: |
         function errorString(e) {
             if (typeof e === 'string') {
@@ -225,8 +224,6 @@ zabbix_export:
             throw 'AI webhook failed: ' + msg;
         }
       timeout: 60s
-      process_tags: 'NO'
-      show_event_menu: 'NO'
       description: 'Sends Zabbix problem events to the AI module webhook for automated first-line troubleshooting. AI response is posted back as a problem update comment.'
       message_templates:
         - event_source: TRIGGERS

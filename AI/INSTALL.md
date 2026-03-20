@@ -138,3 +138,12 @@ Check:
 ## 10. Notes on chat storage
 
 Chat history is stored in browser `sessionStorage` only. The module does not create tables and does not persist chat server-side.
+
+## Nginx conf
+Verify this is at the bottom om zabbix.conf in /etc/nginx/conf.d/zabbix.conf
+    }
+  location = /ai-webhook {
+      include fastcgi_params;
+      fastcgi_param SCRIPT_FILENAME /usr/share/zabbix/modules/AI/webhook.php;
+      fastcgi_pass unix:/run/php-fpm/zabbix.sock;
+  }}
