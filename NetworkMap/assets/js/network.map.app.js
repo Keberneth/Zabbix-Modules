@@ -65,19 +65,27 @@
         <div class="knm-form-grid">
           <label class="knm-form-field">
             <span>Host scope</span>
-            <select id="knm-hostSelect">
-              <option value="">All hosts</option>
-            </select>
+            <div class="knm-autocomplete">
+              <input id="knm-hostSelect" type="text" placeholder="All hosts" autocomplete="off">
+              <input id="knm-hostSelectValue" type="hidden" value="">
+              <ul id="knm-hostSelect-ac" class="knm-autocomplete-list"></ul>
+            </div>
           </label>
 
           <label class="knm-form-field">
             <span>Source filter</span>
-            <input id="knm-filterSrc" type="text" placeholder="hostname or IP">
+            <div class="knm-autocomplete">
+              <input id="knm-filterSrc" type="text" placeholder="hostname or IP" autocomplete="off">
+              <ul id="knm-filterSrc-ac" class="knm-autocomplete-list"></ul>
+            </div>
           </label>
 
           <label class="knm-form-field">
             <span>Destination filter</span>
-            <input id="knm-filterDst" type="text" placeholder="hostname or IP">
+            <div class="knm-autocomplete">
+              <input id="knm-filterDst" type="text" placeholder="hostname or IP" autocomplete="off">
+              <ul id="knm-filterDst-ac" class="knm-autocomplete-list"></ul>
+            </div>
           </label>
 
           <label class="knm-form-field">
@@ -253,49 +261,190 @@
     return normalized;
   }
 
-  function populateHostSelect(nodes) {
-    const select = getEl("knm-hostSelect");
+  /* ── Autocomplete helper ─────────────────────────────────── */
 
-    if (!select) {
+  function buildAutocomplete(inputEl, listEl, getItems, onSelect) {
+    let activeIndex = -1;
+
+    function renderList(query) {
+      const items = getItems(query);
+      listEl.innerHTML = "";
+      activeIndex = -1;
+
+      if (!items.length) {
+        listEl.classList.remove("knm-ac-open");
+        return;
+      }
+
+      const queryLc = (query || "").toLowerCase();
+      items.slice(0, 60).forEach((item, i) => {
+        const li = document.createElement("li");
+        li.dataset.value = item.value;
+        li.dataset.index = i;
+
+        // Highlight matching portion
+        if (queryLc) {
+          const idx = item.label.toLowerCase().indexOf(queryLc);
+          if (idx >= 0) {
+            li.innerHTML =
+              escapeHtml(item.label.slice(0, idx)) +
+              '<span class="knm-ac-match">' + escapeHtml(item.label.slice(idx, idx + queryLc.length)) + '</span>' +
+              escapeHtml(item.label.slice(idx + queryLc.length));
+          } else {
+            li.textContent = item.label;
+          }
+        } else {
+          li.textContent = item.label;
+        }
+
+        li.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          selectItem(item);
+        });
+        listEl.appendChild(li);
+      });
+
+      listEl.classList.add("knm-ac-open");
+    }
+
+    function selectItem(item) {
+      listEl.classList.remove("knm-ac-open");
+      onSelect(item);
+    }
+
+    function setActive(idx) {
+      const lis = listEl.querySelectorAll("li");
+      lis.forEach((li) => li.classList.remove("knm-ac-active"));
+      if (idx >= 0 && idx < lis.length) {
+        activeIndex = idx;
+        lis[idx].classList.add("knm-ac-active");
+        lis[idx].scrollIntoView({ block: "nearest" });
+      }
+    }
+
+    inputEl.addEventListener("input", () => {
+      renderList(inputEl.value);
+    });
+
+    inputEl.addEventListener("focus", () => {
+      renderList(inputEl.value);
+    });
+
+    inputEl.addEventListener("blur", () => {
+      // Delay to allow mousedown on list items
+      setTimeout(() => listEl.classList.remove("knm-ac-open"), 150);
+    });
+
+    inputEl.addEventListener("keydown", (e) => {
+      const lis = listEl.querySelectorAll("li");
+      if (!listEl.classList.contains("knm-ac-open") || !lis.length) return;
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setActive(activeIndex < lis.length - 1 ? activeIndex + 1 : 0);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setActive(activeIndex > 0 ? activeIndex - 1 : lis.length - 1);
+      } else if (e.key === "Enter" && activeIndex >= 0) {
+        e.preventDefault();
+        const li = lis[activeIndex];
+        const items = getItems(inputEl.value);
+        if (items[activeIndex]) selectItem(items[activeIndex]);
+      } else if (e.key === "Escape") {
+        listEl.classList.remove("knm-ac-open");
+      }
+    });
+
+    return { renderList };
+  }
+
+  /* ── Host scope data & autocomplete ────────────────────── */
+
+  let hostItems = []; // { value, label } sorted
+
+  function populateHostSelect(nodes) {
+    const input = getEl("knm-hostSelect");
+    const hiddenInput = getEl("knm-hostSelectValue");
+
+    if (!input) {
       return;
     }
 
-    const previousValue = select.value;
-    const validIds = new Set();
+    const previousValue = hiddenInput ? hiddenInput.value : "";
 
-    select.innerHTML = "";
-
-    const allOption = document.createElement("option");
-    allOption.value = "";
-    allOption.textContent = "All hosts";
-    select.appendChild(allOption);
+    hostItems = [{ value: "", label: "All hosts" }];
 
     (nodes || [])
       .slice()
       .sort((a, b) => {
         const left = String(a?.data?.label || a?.data?.id || "").toLowerCase();
         const right = String(b?.data?.label || b?.data?.id || "").toLowerCase();
-
         return left.localeCompare(right);
       })
       .forEach((node) => {
         const id = node?.data?.id;
+        if (!id) return;
 
-        if (!id) {
-          return;
-        }
-
-        validIds.add(id);
-
-        const option = document.createElement("option");
-        option.value = id;
-        option.textContent = node?.data?.label || id;
-        select.appendChild(option);
+        const label = node?.data?.label || id;
+        const ip = node?.data?.ip || "";
+        hostItems.push({ value: id, label, ip });
       });
 
-    if (previousValue && validIds.has(previousValue)) {
-      select.value = previousValue;
+    // Restore previous selection if still valid
+    if (previousValue) {
+      const found = hostItems.find((h) => h.value === previousValue);
+      if (found) {
+        input.value = found.label;
+        if (hiddenInput) hiddenInput.value = found.value;
+      }
     }
+
+    // Also populate source/destination suggestion lists
+    populateTrafficSuggestions();
+  }
+
+  /* ── Source / Destination suggestion data ───────────────── */
+
+  let srcSuggestions = []; // { value, label }
+  let dstSuggestions = [];
+
+  function populateTrafficSuggestions() {
+    if (!state.rawData) return;
+
+    const srcSet = new Map();
+    const dstSet = new Map();
+
+    (state.rawData.edges || []).forEach((edge) => {
+      const d = edge.data;
+      if (!d) return;
+
+      const srcId = d.source;
+      const dstId = d.target;
+      const srcLabel = d.sourceLabel || srcId;
+      const dstLabel = d.targetLabel || dstId;
+
+      if (srcId && !srcSet.has(srcId)) {
+        const node = state.rawNodeMap && state.rawNodeMap.get(srcId);
+        srcSet.set(srcId, {
+          value: (node && node.data && node.data.label) || srcLabel,
+          label: (node && node.data && node.data.label) || srcLabel,
+          ip: (node && node.data && node.data.ip) || d.srcIp || d.src_ip || "",
+        });
+      }
+
+      if (dstId && !dstSet.has(dstId)) {
+        const node = state.rawNodeMap && state.rawNodeMap.get(dstId);
+        dstSet.set(dstId, {
+          value: (node && node.data && node.data.label) || dstLabel,
+          label: (node && node.data && node.data.label) || dstLabel,
+          ip: (node && node.data && node.data.ip) || d.dstIp || d.dst_ip || "",
+        });
+      }
+    });
+
+    const sorter = (a, b) => a.label.toLowerCase().localeCompare(b.label.toLowerCase());
+    srcSuggestions = Array.from(srcSet.values()).sort(sorter);
+    dstSuggestions = Array.from(dstSet.values()).sort(sorter);
   }
 
   function formatLocalDate(value) {
@@ -418,7 +567,7 @@
 
   function readFilterSettings() {
     return {
-      host: (getEl("knm-hostSelect") || {}).value || "",
+      host: (getEl("knm-hostSelectValue") || {}).value || "",
       srcTokens: filters.parseListFilter
         ? filters.parseListFilter((getEl("knm-filterSrc") || {}).value || "")
         : [],
@@ -654,7 +803,14 @@
   function bindControls() {
     const applyButton = getEl("knm-btnApply");
     const refreshButton = getEl("knm-btnRefreshData");
-    const hostSelect = getEl("knm-hostSelect");
+    const hostInput = getEl("knm-hostSelect");
+    const hostHidden = getEl("knm-hostSelectValue");
+    const hostList = getEl("knm-hostSelect-ac");
+    const srcInput = getEl("knm-filterSrc");
+    const srcList = getEl("knm-filterSrc-ac");
+    const dstInput = getEl("knm-filterDst");
+    const dstList = getEl("knm-filterDst-ac");
+
     const filterInputs = [
       "knm-filterSrc",
       "knm-filterDst",
@@ -687,10 +843,70 @@
       });
     }
 
-    if (hostSelect) {
-      hostSelect.addEventListener("change", () => {
-        applyFiltersAndDraw({ showNoEdgesAlert: false });
+    // Host scope: searchable dropdown
+    if (hostInput && hostList) {
+      buildAutocomplete(
+        hostInput,
+        hostList,
+        (query) => {
+          const q = (query || "").toLowerCase();
+          return hostItems.filter((item) => {
+            if (!q) return true;
+            return item.label.toLowerCase().includes(q) ||
+              (item.ip && item.ip.toLowerCase().includes(q));
+          });
+        },
+        (item) => {
+          hostInput.value = item.value ? item.label : "";
+          if (hostHidden) hostHidden.value = item.value;
+          applyFiltersAndDraw({ showNoEdgesAlert: false });
+        }
+      );
+
+      // Clear host selection when input is emptied manually
+      hostInput.addEventListener("input", () => {
+        if (!hostInput.value.trim()) {
+          if (hostHidden) hostHidden.value = "";
+        }
       });
+    }
+
+    // Source filter: autocomplete suggestions
+    if (srcInput && srcList) {
+      buildAutocomplete(
+        srcInput,
+        srcList,
+        (query) => {
+          const q = (query || "").toLowerCase();
+          if (!q) return [];
+          return srcSuggestions.filter((item) =>
+            item.label.toLowerCase().includes(q) ||
+            (item.ip && item.ip.toLowerCase().includes(q))
+          );
+        },
+        (item) => {
+          srcInput.value = item.label;
+        }
+      );
+    }
+
+    // Destination filter: autocomplete suggestions
+    if (dstInput && dstList) {
+      buildAutocomplete(
+        dstInput,
+        dstList,
+        (query) => {
+          const q = (query || "").toLowerCase();
+          if (!q) return [];
+          return dstSuggestions.filter((item) =>
+            item.label.toLowerCase().includes(q) ||
+            (item.ip && item.ip.toLowerCase().includes(q))
+          );
+        },
+        (item) => {
+          dstInput.value = item.label;
+        }
+      );
     }
 
     [getEl("knm-excludeNoisePorts"), getEl("knm-excludePub")]
