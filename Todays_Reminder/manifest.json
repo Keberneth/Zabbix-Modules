@@ -1,0 +1,28 @@
+{
+  "manifest_version": 2.0,
+  "id": "Message_of_the_Day",
+  "name": "Today's Reminder",
+  "namespace": "MessageOfTheDay",
+  "version": "1.0.0",
+  "author": "Keberneth",
+  "description": "Displays a non-intrusive top banner with high/critical problem counts, software update status, and maintenance windows.",
+  "actions": {
+    "motd.view": {
+      "class": "BannerView",
+      "view": "motd.view",
+      "layout": "layout.htmlpage"
+    },
+    "motd.banner.data": {
+      "class": "BannerData",
+      "layout": "layout.json"
+    }
+  },
+  "assets": {
+    "css": [
+      "motd.css"
+    ],
+    "js": [
+      "motd.banner.js"
+    ]
+  }
+}

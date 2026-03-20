@@ -1,0 +1,26 @@
+{
+  "manifest_version": 2.0,
+  "id": "sla_uptime_report",
+  "name": "SLA & Uptime Report",
+  "description": "Rolling 12-month SLA heatmap and host availability report with HTML and CSV export.",
+  "version": "1.1.0",
+  "namespace": "SlaUptimeReport",
+  "author": "Keberneth",
+  "url": "",
+  "actions": {
+    "slareport.report.view": {
+      "class": "ReportView",
+      "layout": "layout.htmlpage",
+      "view": "slareport.report.view"
+    },
+    "slareport.report.download": {
+      "class": "ReportDownload",
+      "layout": null
+    }
+  },
+  "assets": {
+    "css": [
+      "slareport.css"
+    ]
+  }
+}
