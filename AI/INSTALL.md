@@ -7,14 +7,14 @@ Use the folder name exactly as `AI`.
 Typical package installs:
 
 ```bash
-sudo mkdir -p /usr/share/zabbix/ui/modules
-sudo cp -a AI /usr/share/zabbix/ui/modules/
+sudo mkdir -p /usr/share/zabbix/modules
+sudo cp -a AI /usr/share/zabbix/modules/
 ```
 
 Some distributions use a different frontend root. The key requirement is that `manifest.json` is directly inside the module directory:
 
 ```text
-<zabbix-frontend-root>/ui/modules/AI/manifest.json
+<zabbix-frontend-root>/modules/AI/manifest.json
 ```
 
 ## 2. Set ownership and permissions
@@ -22,17 +22,17 @@ Some distributions use a different frontend root. The key requirement is that `m
 For Apache/httpd on RHEL:
 
 ```bash
-sudo chown -R apache:apache /usr/share/zabbix/ui/modules/AI
-sudo find /usr/share/zabbix/ui/modules/AI -type d -exec chmod 755 {} \;
-sudo find /usr/share/zabbix/ui/modules/AI -type f -exec chmod 644 {} \;
+sudo chown -R apache:apache /usr/share/zabbix/modules/AI
+sudo find /usr/share/zabbix/modules/AI -type d -exec chmod 755 {} \;
+sudo find /usr/share/zabbix/modules/AI -type f -exec chmod 644 {} \;
 ```
 
 For nginx + php-fpm on RHEL:
 
 ```bash
-sudo chown -R nginx:nginx /usr/share/zabbix/ui/modules/AI
-sudo find /usr/share/zabbix/ui/modules/AI -type d -exec chmod 755 {} \;
-sudo find /usr/share/zabbix/ui/modules/AI -type f -exec chmod 644 {} \;
+sudo chown -R nginx:nginx /usr/share/zabbix/modules/AI
+sudo find /usr/share/zabbix/modules/AI -type d -exec chmod 755 {} \;
+sudo find /usr/share/zabbix/modules/AI -type f -exec chmod 644 {} \;
 ```
 
 ## 3. SELinux on RHEL 9
@@ -40,8 +40,8 @@ sudo find /usr/share/zabbix/ui/modules/AI -type f -exec chmod 644 {} \;
 If SELinux is enforcing:
 
 ```bash
-sudo semanage fcontext -a -t httpd_sys_content_t '/usr/share/zabbix/ui/modules/AI(/.*)?'
-sudo restorecon -Rv /usr/share/zabbix/ui/modules/AI
+sudo semanage fcontext -a -t httpd_sys_content_t '/usr/share/zabbix/modules/AI(/.*)?'
+sudo restorecon -Rv /usr/share/zabbix/modules/AI
 setsebool -P httpd_can_network_connect on
 ```
 
