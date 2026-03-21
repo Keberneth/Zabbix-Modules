@@ -15,3 +15,47 @@ sudo find /usr/share/zabbix/modules/MODULE_FOLDER_NAME -type f -exec chmod 644 {
 sudo semanage fcontext -a -t httpd_sys_content_t '/usr/share/zabbix/modules/MODULE_FOLDER_NAME(/.*)?'<br>
 sudo restorecon -Rv /usr/share/zabbix/modules/MODULE_FOLDER_NAME<br>
 setsebool -P httpd_can_network_connect on
+
+
+## Example Pictures
+
+<details>
+<summary>Click to expand example screenshots</summary>
+
+### AI features
+
+**AI providers**  
+![AI providers example](./Example%20Pictures/AI-providers.png)
+
+**Instructions and reference**  
+![Instructions and reference example](./Example%20Pictures/Instructions_and_reference.png)
+
+**AI chat**  
+![AI chat example](./Example%20Pictures/ai_chat.png)
+
+**AI webhook response**  
+![AI webhook response example](./Example%20Pictures/ai_webhook_response.png)
+
+### Network maps
+
+**Zabbix Network Map**  
+![Zabbix Network Map example](./Example%20Pictures/Zabbix%20Network%20Map.png)
+
+**Zabbix Network Map with filter**  
+![Zabbix Network Map with filter example](./Example%20Pictures/Zabbix%20Network%20Map_with_filter.png)
+
+### Branding and UI
+
+**Branding**  
+![Branding example](./Example%20Pictures/branding.png)
+
+**Branding login page**  
+![Branding login page example](./Example%20Pictures/branding_loginpage.png)
+
+**Branding menu bar**  
+![Branding menu bar example](./Example%20Pictures/branding_menubar.png)
+
+**Today's reminder top bar**  
+![Today's reminder top bar example](./Example%20Pictures/todays_reminder_topbar.png)
+
+</details>
