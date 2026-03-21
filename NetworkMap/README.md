@@ -19,6 +19,7 @@ This package is the **Zabbix-only** variant:
 - The connection data already present in Zabbix items named:
   - `linux-network-connections`
   - `windows-network-connections`
+- Download plugins here: https://github.com/Keberneth/Zabbix-Plugins
 - Web server / php-fpm user must be able to read the module files
 - Web server / php-fpm user must be able to write to the configured cache directory
 
