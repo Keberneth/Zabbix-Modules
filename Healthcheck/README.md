@@ -21,7 +21,7 @@ Each configured check performs the same sequence as the supplied health-check sc
 If one step fails, the run is marked as failed and the ping is not sent.
 
 ## Ping if working
-If the healtchecks return OK a ping can be sent. I recomend https://healthchecks.io/ 
+If the healtchecks return OK a ping can be sent. I recommend https://healthchecks.io/ 
 <br>
 healthchecks.io can be configured to sent triggered problems if ping is not recived within specified time period.
 <br>
