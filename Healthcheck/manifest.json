@@ -1,0 +1,47 @@
+{
+  "manifest_version": 2.0,
+  "id": "healthcheck_monitor",
+  "name": "Healthcheck",
+  "namespace": "Healthcheck",
+  "version": "1.0.0",
+  "author": "OpenAI for user request",
+  "description": "Zabbix frontend module for scheduled health checks, heartbeat visibility, and run history.",
+  "actions": {
+    "healthcheck.heartbeat": {
+      "class": "HeartbeatView",
+      "view": "healthcheck.heartbeat"
+    },
+    "healthcheck.history": {
+      "class": "HistoryView",
+      "view": "healthcheck.history"
+    },
+    "healthcheck.settings": {
+      "class": "SettingsView",
+      "view": "healthcheck.settings"
+    },
+    "healthcheck.settings.save": {
+      "class": "SettingsSave",
+      "layout": "layout.json"
+    },
+    "healthcheck.run": {
+      "class": "RunAction",
+      "layout": "layout.json"
+    }
+  },
+  "assets": {
+    "css": [
+      "healthcheck.css"
+    ],
+    "js": [
+      "healthcheck.js"
+    ]
+  },
+  "config": {
+    "checks": [],
+    "history": {
+      "retention_days": 90,
+      "default_period_days": 7,
+      "recent_runs_limit": 200
+    }
+  }
+}

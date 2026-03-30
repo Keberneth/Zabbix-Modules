@@ -1,0 +1,1 @@
+* * * * * /usr/bin/php /usr/share/zabbix/ui/modules/Healthcheck/bin/healthcheck-runner.php --json >/var/log/zabbix/healthcheck-runner.log 2>&1

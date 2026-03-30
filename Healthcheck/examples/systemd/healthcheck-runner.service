@@ -1,0 +1,15 @@
+[Unit]
+Description=Zabbix Healthcheck module runner
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Adjust the user/group to your web server account if needed.
+User=apache
+Group=apache
+ExecStart=/usr/bin/php /usr/share/zabbix/ui/modules/Healthcheck/bin/healthcheck-runner.php --json
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full

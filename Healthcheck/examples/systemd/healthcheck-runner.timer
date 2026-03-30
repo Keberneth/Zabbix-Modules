@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Zabbix Healthcheck module runner every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Unit=healthcheck-runner.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

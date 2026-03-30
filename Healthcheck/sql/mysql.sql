@@ -1,0 +1,42 @@
+CREATE TABLE IF NOT EXISTS module_healthcheck_run (
+    runid VARCHAR(64) NOT NULL,
+    checkid VARCHAR(128) NOT NULL,
+    check_name VARCHAR(255) NOT NULL,
+    started_at BIGINT NOT NULL,
+    finished_at BIGINT NOT NULL,
+    duration_ms INT NOT NULL,
+    status INT NOT NULL,
+    summary VARCHAR(512) NULL,
+    error_text TEXT NULL,
+    api_version VARCHAR(64) NULL,
+    hosts_count INT NULL,
+    triggers_count INT NULL,
+    items_count INT NULL,
+    freshest_age_sec INT NULL,
+    ping_sent INT NULL,
+    ping_http_status INT NULL,
+    ping_latency_ms INT NULL,
+    PRIMARY KEY (runid),
+    KEY idx_module_healthcheck_run_checkid_started_at (checkid, started_at),
+    KEY idx_module_healthcheck_run_status_started_at (status, started_at),
+    KEY idx_module_healthcheck_run_started_at (started_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE IF NOT EXISTS module_healthcheck_run_step (
+    stepid VARCHAR(64) NOT NULL,
+    runid VARCHAR(64) NOT NULL,
+    checkid VARCHAR(128) NOT NULL,
+    step_key VARCHAR(64) NOT NULL,
+    step_label VARCHAR(128) NOT NULL,
+    step_order INT NOT NULL,
+    status INT NOT NULL,
+    started_at BIGINT NOT NULL,
+    finished_at BIGINT NOT NULL,
+    duration_ms INT NOT NULL,
+    metric_value VARCHAR(255) NULL,
+    detail_text TEXT NULL,
+    PRIMARY KEY (stepid),
+    KEY idx_module_healthcheck_run_step_runid_order (runid, step_order),
+    KEY idx_module_healthcheck_run_step_checkid_started_at (checkid, started_at),
+    KEY idx_module_healthcheck_run_step_started_at (started_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
