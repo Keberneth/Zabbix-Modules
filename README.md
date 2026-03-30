@@ -58,8 +58,10 @@ setsebool -P httpd_can_network_connect on
 **Today's reminder top bar**  
 ![Today's reminder top bar example](./Example%20Pictures/todays_reminder_topbar.png)
 
+### Healthchecks
+
 **Healthchecks**  
-![Branding login page example](./Example%20Pictures/Healthchecks.png)
+![Healthchecks example](./Example%20Pictures/Healthchecks.png)
 
 **Healthchecks settings**  
 ![Branding menu bar example](./Example%20Pictures/Healthchecks_settings.png)
