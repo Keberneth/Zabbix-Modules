@@ -25,7 +25,7 @@ A self-contained Zabbix frontend module that adds:
 - Button to post the **last AI answer** back to a Zabbix event as problem update comments
 - **AI-powered Zabbix actions**: ask questions or give commands in natural language
 
-### Chat and AI Security - settings
+### Chat and AI Security
 - <b>Replaces sensitive values (hostnames, IPs, domains, URLs, OS names) with safe aliases before sending data to the AI provider. When the AI responds, aliases are restored locally so you see the real values.</b>
 - Example: prd-web-001 becomes ai-host-001 outbound. The AI works with the alias. When the reply comes back, ai-host-001 is replaced with prd-web-001 before you see it.
 - More information and setup if found in Security / redaction settings in the module
