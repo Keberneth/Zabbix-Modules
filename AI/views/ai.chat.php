@@ -20,6 +20,10 @@ $problems_url = (new CUrl('zabbix.php'))
     ->setArgument('action', 'ai.chat.problems')
     ->getUrl();
 
+$execute_url = (new CUrl('zabbix.php'))
+    ->setArgument('action', 'ai.chat.execute')
+    ->getUrl();
+
 $settings_url = (new CUrl('zabbix.php'))
     ->setArgument('action', 'ai.settings')
     ->getUrl();
@@ -49,6 +53,8 @@ ob_start();
     data-has-zabbix-api="<?= $h(($data['has_zabbix_api'] ?? false) ? '1' : '0') ?>"
     data-hosts-url="<?= $h($hosts_url) ?>"
     data-problems-url="<?= $h($problems_url) ?>"
+    data-execute-url="<?= $h($execute_url) ?>"
+    data-execute-csrf="<?= $h(CCsrfTokenHelper::get('ai.chat.execute')) ?>"
 >
     <div class="ai-header">
         <div>

@@ -42,6 +42,7 @@ $render_provider_row = static function(array $provider = []) use ($h, $config): 
                 <select class="ai-input" name="providers[<?= $h($id) ?>][type]">
                     <option value="openai_compatible" <?= (($provider['type'] ?? 'openai_compatible') === 'openai_compatible') ? 'selected' : '' ?>>openai_compatible</option>
                     <option value="ollama" <?= (($provider['type'] ?? '') === 'ollama') ? 'selected' : '' ?>>ollama</option>
+                    <option value="anthropic" <?= (($provider['type'] ?? '') === 'anthropic') ? 'selected' : '' ?>>anthropic</option>
                 </select>
             </div>
             <div>
@@ -55,6 +56,10 @@ $render_provider_row = static function(array $provider = []) use ($h, $config): 
             <div>
                 <label class="ai-label"><?= $h(_('Default for webhook')) ?></label>
                 <label class="ai-checkbox"><input class="ai-provider-default-webhook" type="radio" name="default_webhook_provider_id" value="<?= $h($id) ?>" <?= (($config['default_webhook_provider_id'] ?? '') === $id) ? 'checked' : '' ?>> <?= $h(_('Select')) ?></label>
+            </div>
+            <div>
+                <label class="ai-label"><?= $h(_('Default for Zabbix actions')) ?></label>
+                <label class="ai-checkbox"><input class="ai-provider-default-actions" type="radio" name="default_actions_provider_id" value="<?= $h($id) ?>" <?= (($config['default_actions_provider_id'] ?? '') === $id) ? 'checked' : '' ?>> <?= $h(_('Select')) ?></label>
             </div>
             <div>
                 <label class="ai-label"><?= $h(_('Timeout (seconds)')) ?></label>
@@ -356,6 +361,61 @@ ob_start();
             </div>
         </section>
 
+        <section class="ai-card">
+            <h2><?= $h(_('Zabbix Actions (AI-powered)')) ?></h2>
+            <p class="ai-muted">
+                When enabled, the AI chat can query and modify Zabbix via natural language.
+                Read actions (list problems, host info, unsupported items) are available to all users.
+                Write actions require explicit permission per category and can be restricted to Super Admins.
+            </p>
+            <div class="ai-repeat-grid ai-settings-grid">
+                <div>
+                    <label class="ai-label"><?= $h(_('Zabbix actions enabled')) ?></label>
+                    <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[enabled]" value="1" <?= !empty($config['zabbix_actions']['enabled']) ? 'checked' : '' ?>> <?= $h(_('Allow AI to interact with Zabbix')) ?></label>
+                </div>
+                <div>
+                    <label class="ai-label"><?= $h(_('Mode')) ?></label>
+                    <select class="ai-input" name="zabbix_actions[mode]" id="ai-actions-mode">
+                        <option value="read" <?= (($config['zabbix_actions']['mode'] ?? 'read') === 'read') ? 'selected' : '' ?>>Read only</option>
+                        <option value="readwrite" <?= (($config['zabbix_actions']['mode'] ?? '') === 'readwrite') ? 'selected' : '' ?>>Read &amp; Write</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="ai-label"><?= $h(_('Require Super Admin for write')) ?></label>
+                    <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[require_super_admin_for_write]" value="1" <?= !empty($config['zabbix_actions']['require_super_admin_for_write']) ? 'checked' : '' ?>> <?= $h(_('Only Super Admins can execute write actions')) ?></label>
+                </div>
+            </div>
+
+            <div id="ai-write-permissions" class="ai-write-permissions-block" <?= (($config['zabbix_actions']['mode'] ?? 'read') !== 'readwrite') ? 'style="display:none"' : '' ?>>
+                <h3 style="margin: 16px 0 8px;"><?= $h(_('Write permissions')) ?></h3>
+                <p class="ai-muted" style="margin-bottom: 10px;">
+                    Select which write operations the AI is allowed to perform. Each category controls a specific set of Zabbix API actions.
+                </p>
+                <div class="ai-repeat-grid ai-settings-grid">
+                    <div>
+                        <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[write_permissions][maintenance]" value="1" <?= !empty($config['zabbix_actions']['write_permissions']['maintenance']) ? 'checked' : '' ?>> <?= $h(_('Maintenance windows')) ?></label>
+                        <div class="ai-muted" style="font-size: 12px; margin-top: 4px;"><?= $h(_('Create maintenance windows for hosts')) ?></div>
+                    </div>
+                    <div>
+                        <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[write_permissions][items]" value="1" <?= !empty($config['zabbix_actions']['write_permissions']['items']) ? 'checked' : '' ?>> <?= $h(_('Items')) ?></label>
+                        <div class="ai-muted" style="font-size: 12px; margin-top: 4px;"><?= $h(_('Enable/disable items, change intervals')) ?></div>
+                    </div>
+                    <div>
+                        <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[write_permissions][triggers]" value="1" <?= !empty($config['zabbix_actions']['write_permissions']['triggers']) ? 'checked' : '' ?>> <?= $h(_('Triggers')) ?></label>
+                        <div class="ai-muted" style="font-size: 12px; margin-top: 4px;"><?= $h(_('Modify trigger expressions, priority, status')) ?></div>
+                    </div>
+                    <div>
+                        <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[write_permissions][users]" value="1" <?= !empty($config['zabbix_actions']['write_permissions']['users']) ? 'checked' : '' ?>> <?= $h(_('Users')) ?></label>
+                        <div class="ai-muted" style="font-size: 12px; margin-top: 4px;"><?= $h(_('Create new Zabbix users')) ?></div>
+                    </div>
+                    <div>
+                        <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[write_permissions][problems]" value="1" <?= !empty($config['zabbix_actions']['write_permissions']['problems']) ? 'checked' : '' ?>> <?= $h(_('Problems')) ?></label>
+                        <div class="ai-muted" style="font-size: 12px; margin-top: 4px;"><?= $h(_('Acknowledge, close, or comment on problems')) ?></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <div class="ai-form-actions">
             <button type="submit" class="btn"><?= $h(_('Save settings')) ?></button>
         </div>
@@ -373,7 +433,8 @@ ob_start();
             'api_key_present' => false,
             'api_key_env' => '',
             'headers_json' => '',
-            'verify_peer' => true
+            'verify_peer' => true,
+            'default_actions' => false
         ]) ?>
     </template>
 

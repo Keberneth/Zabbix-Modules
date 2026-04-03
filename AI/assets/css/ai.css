@@ -244,6 +244,47 @@ html[theme="hc-dark"] .ai-page,
     color: var(--ai-fg);
 }
 
+/* ── Action messages ── */
+.ai-msg-action .ai-msg-title {
+    background: #e8f5e9;
+    border-left: 4px solid #4caf50;
+    color: var(--ai-fg);
+}
+
+html[theme="dark-theme"] .ai-msg-action .ai-msg-title,
+html[theme="hc-dark"] .ai-msg-action .ai-msg-title,
+.ai-page[data-ai-theme="dark"] .ai-msg-action .ai-msg-title {
+    background: #1b3b20;
+    border-left: 4px solid #4caf50;
+}
+
+/* ── Action confirm buttons ── */
+.ai-action-confirm-buttons {
+    display: flex;
+    gap: 10px;
+    padding: 12px;
+    justify-content: center;
+    border: 1px dashed var(--ai-border);
+    border-radius: 6px;
+    margin-bottom: 12px;
+    background: var(--ai-bg-accent);
+}
+
+.ai-confirm-btn {
+    min-width: 120px;
+}
+
+.ai-cancel-btn {
+    min-width: 100px;
+}
+
+/* ── Write permissions block ── */
+.ai-write-permissions-block {
+    border-top: 1px solid var(--ai-border-light);
+    padding-top: 12px;
+    margin-top: 12px;
+}
+
 /* ── Compose / Actions ── */
 .ai-compose-form {
     margin-top: 16px;

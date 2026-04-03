@@ -44,6 +44,16 @@
             addRow('provider');
         }
 
+        // Toggle write permissions visibility based on mode selection.
+        var actionsMode = document.getElementById('ai-actions-mode');
+        var writePermsBlock = document.getElementById('ai-write-permissions');
+
+        if (actionsMode && writePermsBlock) {
+            actionsMode.addEventListener('change', function () {
+                writePermsBlock.style.display = actionsMode.value === 'readwrite' ? '' : 'none';
+            });
+        }
+
         // AJAX form submission
         var form = document.getElementById('ai-settings-form');
 

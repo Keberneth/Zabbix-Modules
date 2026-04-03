@@ -133,4 +133,34 @@ class PromptBuilder {
 
         return implode("\n\n", $lines);
     }
+
+    /**
+     * Build the system prompt that includes Zabbix action tool definitions.
+     * This is appended to the regular system prompt when zabbix_actions is enabled.
+     */
+    public static function buildActionsSystemPrompt(array $config, array $permissions): string {
+        $tool_block = ZabbixActionExecutor::buildToolSystemPrompt($permissions);
+
+        if ($tool_block === '') {
+            return '';
+        }
+
+        $blocks = [];
+        $blocks[] = $tool_block;
+        $blocks[] = 'Important rules for tool calls:';
+        $blocks[] = '- For read tools: output ONLY the JSON tool call, no surrounding text.';
+        $blocks[] = '- For write tools: output ONLY the JSON tool call with "confirm": true and a "confirm_message" describing the action.';
+        $blocks[] = '- If a multi-step action is needed (e.g. find a trigger then update it), do ONE step at a time. First call the read tool, then after getting results, call the write tool.';
+        $blocks[] = '- If the user asks something that does not require a Zabbix tool, respond with normal text — do not output JSON.';
+        $blocks[] = '- Never invent data. Only report what the tools return.';
+        $blocks[] = '';
+        $blocks[] = 'CRITICAL Zabbix terminology for triggers:';
+        $blocks[] = '- In Zabbix API, a trigger\'s "description" field is the TRIGGER NAME (e.g. "{HOST.NAME} has uptime over 60 days"). Do NOT change it unless the user explicitly wants to rename the trigger.';
+        $blocks[] = '- The "comments" field is the operational notes / comment text. When the user says "update comment", "change comment", "add notes", or "set description to..." they almost always mean the "comments" field.';
+        $blocks[] = '- The "expression" field is the trigger logic formula. NEVER change it unless the user explicitly asks to modify the expression or threshold.';
+        $blocks[] = '- When the user mentions a template name (e.g. "Windows Monitoring Zabbix Agent Active"), use the "template" parameter in get_triggers, NOT "hostname".';
+        $blocks[] = '- Templates and hosts are different in Zabbix. A template name looks like "Windows Monitoring Zabbix Agent Active" or "Linux by Zabbix agent". A hostname is the actual server name like "db-01" or "web-server-03".';
+
+        return implode("\n", $blocks);
+    }
 }

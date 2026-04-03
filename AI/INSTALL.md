@@ -42,8 +42,10 @@ If SELinux is enforcing:
 ```bash
 sudo semanage fcontext -a -t httpd_sys_content_t '/usr/share/zabbix/modules/AI(/.*)?'
 sudo restorecon -Rv /usr/share/zabbix/modules/AI
-setsebool -P httpd_can_network_connect on
+sudo setsebool -P httpd_can_network_connect on
 ```
+
+The `httpd_can_network_connect` boolean is required for the module to make outbound HTTP requests to AI providers (OpenAI, Anthropic, Ollama, etc.) and to the Zabbix API.
 
 ## 4. Required PHP modules
 
@@ -53,7 +55,7 @@ The module uses cURL and JSON. Verify:
 php -m | egrep 'curl|json|mbstring'
 ```
 
-Install missing pieces if needed.
+All three should be listed. These are typically installed by default with Zabbix's PHP dependencies.
 
 ## 5. Enable the module in Zabbix
 
@@ -66,6 +68,8 @@ Administration -> General -> Modules
 Then:
 1. Click **Scan directory**
 2. Enable **AI**
+
+That is all. No database migrations, no external services, no additional packages.
 
 ## 6. Open the module pages
 
@@ -98,8 +102,34 @@ Configure at least one provider.
 - Endpoint: `http://localhost:11434/api/chat`
 - Model: e.g. `llama3.2:3b`
 
+### Anthropic (Claude)
+- Type: `anthropic`
+- Endpoint: `https://api.anthropic.com` (or leave empty for default)
+- Model: e.g. `claude-sonnet-4-20250514`
+- API key: your Anthropic API key or env var
+
+### Provider defaults
+
+You can set different default providers for each purpose:
+- **Default for chat** - normal troubleshooting conversations
+- **Default for webhook** - automated webhook responses
+- **Default for Zabbix actions** - AI-powered Zabbix queries and modifications
+
+### Zabbix API
+
+Required for AI-powered Zabbix actions. Configure:
+- API URL and token (or token env var)
+- The token needs read permissions for read actions, and write permissions for write actions on the relevant Zabbix objects
+
+### Zabbix Actions
+
+In AI Settings > Zabbix Actions:
+- **Enabled**: Allow AI to interact with Zabbix via natural language
+- **Mode**: "Read only" (safe default) or "Read & Write"
+- **Write permissions**: Enable per category (maintenance, items, triggers, users, problems)
+- **Require Super Admin for write**: Enabled by default
+
 Optional integrations:
-- Zabbix API token for event comments and OS lookup
 - NetBox URL/token for CMDB enrichment
 - Webhook shared secret for internal webhook protection
 
@@ -126,12 +156,25 @@ Usually means one of these:
 - `USER_TYPE_SUPER_ADMIN` for settings
 - `USER_TYPE_ZABBIX_USER` or higher for chat
 
+### Write actions denied for a user
+Write actions require:
+1. Zabbix Actions mode set to "Read & Write"
+2. The specific category enabled (maintenance, items, triggers, users, or problems)
+3. Super Admin role (if "Require Super Admin for write" is checked)
+
+### AI does not execute Zabbix actions
+Check:
+- Zabbix Actions is enabled in settings
+- Zabbix API URL and token are configured
+- The API token has sufficient permissions
+- The AI model is capable enough (larger models handle tool calls better)
+
 ### Static assets not loading
 Check web server file permissions and SELinux context.
 
 ### API calls fail
 Check:
-- frontend server can reach provider URL / Ollama URL / NetBox URL
+- frontend server can reach provider URL / Ollama URL / Anthropic URL / NetBox URL
 - TLS validation setting matches the endpoint certificate state
 - tokens and env vars are visible to php-fpm/httpd
 
@@ -139,11 +182,37 @@ Check:
 
 Chat history is stored in browser `sessionStorage` only. The module does not create tables and does not persist chat server-side.
 
-## Nginx conf
-Verify this is at the bottom om zabbix.conf in /etc/nginx/conf.d/zabbix.conf
-    }
-  location = /ai-webhook {
-      include fastcgi_params;
-      fastcgi_param SCRIPT_FILENAME /usr/share/zabbix/modules/AI/webhook.php;
-      fastcgi_pass unix:/run/php-fpm/zabbix.sock;
-  }}
+## 11. Nginx conf
+
+If using the standalone webhook endpoint, verify this is in `/etc/nginx/conf.d/zabbix.conf`:
+
+```nginx
+location = /ai-webhook {
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME /usr/share/zabbix/modules/AI/webhook.php;
+    fastcgi_pass unix:/run/php-fpm/zabbix.sock;
+}
+```
+
+## Complete install commands (nginx + RHEL 9)
+
+For a quick copy-paste install:
+
+```bash
+# Copy module
+sudo cp -a AI /usr/share/zabbix/modules/
+
+# Set ownership
+sudo chown -R nginx:nginx /usr/share/zabbix/modules/AI
+
+# Set permissions
+sudo find /usr/share/zabbix/modules/AI -type d -exec chmod 755 {} \;
+sudo find /usr/share/zabbix/modules/AI -type f -exec chmod 644 {} \;
+
+# SELinux
+sudo semanage fcontext -a -t httpd_sys_content_t '/usr/share/zabbix/modules/AI(/.*)?'
+sudo restorecon -Rv /usr/share/zabbix/modules/AI
+sudo setsebool -P httpd_can_network_connect on
+```
+
+Then in Zabbix frontend: Administration > General > Modules > Scan directory > Enable AI.

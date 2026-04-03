@@ -16,6 +16,7 @@ class Config {
             'providers' => [],
             'default_chat_provider_id' => '',
             'default_webhook_provider_id' => '',
+            'default_actions_provider_id' => '',
             'instructions' => [[
                 'id' => 'default_firstline_policy',
                 'title' => 'Default first-line policy',
@@ -66,6 +67,18 @@ class Config {
             'chat' => [
                 'max_history_messages' => 12,
                 'temperature' => 0.2
+            ],
+            'zabbix_actions' => [
+                'enabled' => true,
+                'mode' => 'read',
+                'write_permissions' => [
+                    'maintenance' => false,
+                    'items' => false,
+                    'triggers' => false,
+                    'users' => false,
+                    'problems' => false
+                ],
+                'require_super_admin_for_write' => true
             ]
         ];
     }
@@ -199,12 +212,21 @@ class Config {
             ? $default_webhook_provider_id
             : '';
 
+        $default_actions_provider_id = Util::cleanString($post['default_actions_provider_id'] ?? '', 128);
+        $new_config['default_actions_provider_id'] = in_array($default_actions_provider_id, $provider_ids, true)
+            ? $default_actions_provider_id
+            : '';
+
         if ($new_config['default_chat_provider_id'] === '' && $provider_ids) {
             $new_config['default_chat_provider_id'] = $provider_ids[0];
         }
 
         if ($new_config['default_webhook_provider_id'] === '' && $provider_ids) {
             $new_config['default_webhook_provider_id'] = $provider_ids[0];
+        }
+
+        if ($new_config['default_actions_provider_id'] === '' && $provider_ids) {
+            $new_config['default_actions_provider_id'] = $provider_ids[0];
         }
 
         $new_config['instructions'] = [];
@@ -307,6 +329,22 @@ class Config {
             'temperature' => Util::cleanFloat($post['chat']['temperature'] ?? 0.2, 0.2, 0, 2)
         ];
 
+        $za = $post['zabbix_actions'] ?? [];
+        $new_config['zabbix_actions'] = [
+            'enabled' => Util::truthy($za['enabled'] ?? false),
+            'mode' => in_array(($za['mode'] ?? 'read'), ['read', 'readwrite'], true)
+                ? $za['mode']
+                : 'read',
+            'write_permissions' => [
+                'maintenance' => Util::truthy($za['write_permissions']['maintenance'] ?? false),
+                'items' => Util::truthy($za['write_permissions']['items'] ?? false),
+                'triggers' => Util::truthy($za['write_permissions']['triggers'] ?? false),
+                'users' => Util::truthy($za['write_permissions']['users'] ?? false),
+                'problems' => Util::truthy($za['write_permissions']['problems'] ?? false)
+            ],
+            'require_super_admin_for_write' => Util::truthy($za['require_super_admin_for_write'] ?? true)
+        ];
+
         return self::mergeWithDefaults($new_config);
     }
 
@@ -314,9 +352,16 @@ class Config {
         $config = self::mergeWithDefaults($config);
 
         if ($provider_id === '') {
-            $provider_id = ($purpose === 'webhook')
-                ? (string) $config['default_webhook_provider_id']
-                : (string) $config['default_chat_provider_id'];
+            if ($purpose === 'webhook') {
+                $provider_id = (string) $config['default_webhook_provider_id'];
+            } elseif ($purpose === 'actions') {
+                $provider_id = (string) ($config['default_actions_provider_id'] ?? '');
+                if ($provider_id === '') {
+                    $provider_id = (string) $config['default_chat_provider_id'];
+                }
+            } else {
+                $provider_id = (string) $config['default_chat_provider_id'];
+            }
         }
 
         foreach ($config['providers'] as $provider) {
@@ -410,7 +455,7 @@ class Config {
     private static function normalizeProviderType($value): string {
         $value = strtolower(trim((string) $value));
 
-        return in_array($value, ['openai_compatible', 'ollama'], true)
+        return in_array($value, ['openai_compatible', 'ollama', 'anthropic'], true)
             ? $value
             : 'openai_compatible';
     }

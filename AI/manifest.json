@@ -38,6 +38,10 @@
     "ai.webhook": {
       "class": "Webhook",
       "layout": "layout.json"
+    },
+    "ai.chat.execute": {
+      "class": "ChatExecute",
+      "layout": "layout.json"
     }
   },
   "assets": {
@@ -53,6 +57,7 @@
     "providers": [],
     "default_chat_provider_id": "",
     "default_webhook_provider_id": "",
+    "default_actions_provider_id": "",
     "instructions": [
       {
         "id": "default_firstline_policy",
@@ -92,6 +97,18 @@
     "chat": {
       "max_history_messages": 12,
       "temperature": 0.2
+    },
+    "zabbix_actions": {
+      "enabled": true,
+      "mode": "read",
+      "write_permissions": {
+        "maintenance": false,
+        "items": false,
+        "triggers": false,
+        "users": false,
+        "problems": false
+      },
+      "require_super_admin_for_write": true
     }
   }
 }

@@ -30,11 +30,16 @@
         var commentUrl = root.dataset.commentUrl;
         var hostsUrl = root.dataset.hostsUrl;
         var problemsUrl = root.dataset.problemsUrl;
+        var executeUrl = root.dataset.executeUrl || '';
         var chatCsrf = root.dataset.chatCsrf;
         var commentCsrf = root.dataset.commentCsrf;
+        var executeCsrf = root.dataset.executeCsrf || '';
         var historyLimit = parseInt(root.dataset.historyLimit || '12', 10);
         var hasZabbixApi = root.dataset.hasZabbixApi === '1';
         var csrfFieldName = root.dataset.csrfFieldName || '_csrf_token';
+
+        // Tracks a pending write action awaiting user confirmation.
+        var pendingAction = null;
 
         var HISTORY_KEY = 'zbx_ai_chat_history_v1';
         var CONTEXT_KEY = 'zbx_ai_chat_context_v1';
@@ -284,10 +289,39 @@
                         throw new Error(response.error || 'Chat request failed.');
                     }
 
-                    history = normalizeHistory(history.concat([{ role: 'assistant', content: response.reply || '' }]), historyLimit);
+                    // Handle pending write action that needs confirmation.
+                    if (response.action_pending) {
+                        pendingAction = {
+                            tool: response.pending_tool,
+                            params: response.pending_params,
+                            provider_id: providerField ? providerField.value : ''
+                        };
+
+                        history = normalizeHistory(history.concat([{ role: 'assistant', content: response.reply || '' }]), historyLimit);
+                        persistHistory();
+                        renderHistory();
+                        showActionConfirmButtons();
+                        showSideStatus('Action requires confirmation.', false);
+                        updatePostButtonState();
+                        return;
+                    }
+
+                    pendingAction = null;
+
+                    var replyPrefix = '';
+                    if (response.action_executed) {
+                        replyPrefix = '[Zabbix Action: ' + (response.action_tool || 'executed') + ']\n\n';
+                    }
+
+                    history = normalizeHistory(history.concat([{ role: 'assistant', content: replyPrefix + (response.reply || '') }]), historyLimit);
                     persistHistory();
                     renderHistory();
-                    showSideStatus('Reply received from ' + (response.provider_name || 'AI') + '.', false);
+
+                    var statusText = 'Reply received from ' + (response.provider_name || 'AI') + '.';
+                    if (response.action_executed) {
+                        statusText = 'Zabbix action "' + (response.action_tool || '') + '" executed. ' + statusText;
+                    }
+                    showSideStatus(statusText, false);
                     updatePostButtonState();
                 })
                 .catch(function (error) {
@@ -329,6 +363,8 @@
             }
             allProblems = [];
             problemsLoaded = false;
+            pendingAction = null;
+            removeConfirmBar();
             renderHistory();
             showSideStatus('Session cleared.', false);
             updatePostButtonState();
@@ -405,12 +441,14 @@
             }
 
             history.forEach(function (message) {
+                var isAction = message.role === 'assistant' && message.content && message.content.indexOf('[Zabbix Action:') === 0;
+
                 var item = document.createElement('div');
-                item.className = 'ai-msg ai-msg-' + message.role;
+                item.className = 'ai-msg ai-msg-' + message.role + (isAction ? ' ai-msg-action' : '');
 
                 var title = document.createElement('div');
                 title.className = 'ai-msg-title';
-                title.textContent = message.role === 'assistant' ? 'AI' : 'You';
+                title.textContent = isAction ? 'AI (Zabbix Action)' : (message.role === 'assistant' ? 'AI' : 'You');
 
                 var body = document.createElement('pre');
                 body.className = 'ai-msg-body';
@@ -470,6 +508,103 @@
             }
 
             postButton.disabled = !hasZabbixApi || !(eventidField.value || '').trim() || !getLastAssistantMessage();
+        }
+
+        /**
+         * Show Confirm / Cancel buttons in the transcript for a pending write action.
+         */
+        function showActionConfirmButtons() {
+            var btns = document.createElement('div');
+            btns.className = 'ai-action-confirm-buttons';
+            btns.id = 'ai-action-confirm-bar';
+
+            var confirmBtn = document.createElement('button');
+            confirmBtn.type = 'button';
+            confirmBtn.className = 'btn ai-confirm-btn';
+            confirmBtn.textContent = 'Confirm';
+
+            var cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.className = 'btn-alt ai-cancel-btn';
+            cancelBtn.textContent = 'Cancel';
+
+            confirmBtn.addEventListener('click', function () {
+                removeConfirmBar();
+                executeConfirmedAction();
+            });
+
+            cancelBtn.addEventListener('click', function () {
+                removeConfirmBar();
+                pendingAction = null;
+                history = normalizeHistory(history.concat([{ role: 'assistant', content: 'Action cancelled by user.' }]), historyLimit);
+                persistHistory();
+                renderHistory();
+                showSideStatus('Action cancelled.', false);
+            });
+
+            btns.appendChild(confirmBtn);
+            btns.appendChild(cancelBtn);
+            transcript.appendChild(btns);
+            transcript.scrollTop = transcript.scrollHeight;
+        }
+
+        function removeConfirmBar() {
+            var bar = document.getElementById('ai-action-confirm-bar');
+            if (bar) bar.remove();
+        }
+
+        /**
+         * Execute a confirmed write action via the ChatExecute endpoint.
+         */
+        function executeConfirmedAction() {
+            if (!pendingAction || !executeUrl) {
+                showSideStatus('No pending action to execute.', true);
+                return;
+            }
+
+            setBusy(true);
+            showSideStatus('Executing Zabbix action...', false);
+
+            var params = new URLSearchParams();
+            params.set('tool', pendingAction.tool);
+            params.set('params_json', JSON.stringify(pendingAction.params));
+            params.set('provider_id', pendingAction.provider_id || '');
+            params.set(csrfFieldName, executeCsrf);
+
+            var actionTool = pendingAction.tool;
+            pendingAction = null;
+
+            fetch(executeUrl, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                },
+                body: params.toString()
+            })
+                .then(handleJsonResponse)
+                .then(function (response) {
+                    if (!response.ok) {
+                        throw new Error(response.error || 'Action execution failed.');
+                    }
+
+                    var prefix = '[Zabbix Action: ' + (response.action_tool || actionTool) + ']\n\n';
+                    history = normalizeHistory(history.concat([{ role: 'assistant', content: prefix + (response.reply || '') }]), historyLimit);
+                    persistHistory();
+                    renderHistory();
+                    showSideStatus('Zabbix action "' + (response.action_tool || actionTool) + '" executed successfully.', false);
+                    updatePostButtonState();
+                })
+                .catch(function (error) {
+                    history = normalizeHistory(history.concat([{ role: 'assistant', content: '[Error] ' + error.message }]), historyLimit);
+                    persistHistory();
+                    renderHistory();
+                    showSideStatus(error.message, true);
+                })
+                .finally(function () {
+                    setBusy(false);
+                    messageField.focus();
+                });
         }
     }
 
