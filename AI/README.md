@@ -3,10 +3,14 @@
 A self-contained Zabbix frontend module that adds:
 
 - **Monitoring > AI > Chat** for operator chat inside Zabbix
-- **Monitoring > AI > Settings** for provider, instruction, secret and integration management
+- **Monitoring > AI > Settings** for provider, instruction, secret, privacy, logging and integration management
+- **Monitoring > AI > Logs** for local audit log review
 - **AI-powered Zabbix actions** via natural language (query problems, create maintenance, modify triggers, etc.)
 - **`zabbix.php?action=ai.webhook`** as an internal webhook endpoint for problem enrichment and AI-generated first-line guidance
 - **Problem update posting** back to the originating event through the Zabbix API
+- **Local outbound redaction / inbound restore** for hostnames, IPs, domains, URLs, OS hints and custom replacements
+- **Server-side pending write confirmations** so write-action parameters are not trusted from the browser
+- **Local JSONL audit logging** with retention and archive support
 - **Optional NetBox enrichment** for VM/device/service context
 
 ## What this module does
@@ -16,6 +20,7 @@ A self-contained Zabbix frontend module that adds:
 - Session-only chat UI inside Zabbix
 - Chat history is stored in **browser `sessionStorage` only**
 - No server-side chat persistence is implemented by the module
+- A separate server-side alias map is used only when redaction is enabled so masked values can be restored safely during the same chat session
 - Optional context fields: Event ID, hostname, problem summary, extra operator context
 - Button to post the **last AI answer** back to a Zabbix event as problem update comments
 - **AI-powered Zabbix actions**: ask questions or give commands in natural language
@@ -78,6 +83,8 @@ When enabled, you can type natural language commands in the chat and the AI will
 
 ### Settings page
 
+Every settings section has a **?** button that shows inline help with a short explanation of the feature, what each setting does, and the Linux commands needed to set up directories and permissions.
+
 You can add/remove/manage:
 
 - Providers (with separate defaults for chat, webhook, and Zabbix actions)
@@ -87,6 +94,8 @@ You can add/remove/manage:
 - NetBox settings
 - Webhook behavior
 - Chat behavior
+- **Security / redaction** (enable/disable masking, categories, custom exact/regex/domain-suffix rules, local alias-state path, strict mode)
+- **Logging** (enable/disable, categories, log path, archive path, retention, payload logging, mapping-detail logging)
 - **Zabbix Actions** (enabled/disabled, read/readwrite mode, granular write permissions)
 
 ### Provider types supported
@@ -104,8 +113,10 @@ Quick summary:
 1. Copy the `AI` directory into your Zabbix modules folder (e.g. `/usr/share/zabbix/modules/`)
 2. Set ownership and permissions
 3. Configure SELinux if applicable
-4. In Zabbix frontend: Administration > General > Modules > Scan directory > Enable AI
-5. Open Monitoring > AI > Settings and configure at least one provider
+4. **Create writable directories** for redaction state and logging (see `INSTALL.md` section 6)
+5. In Zabbix frontend: Administration > General > Modules > Scan directory > Enable AI
+6. Open Monitoring > AI > Settings and configure at least one provider
+7. **Enable logging** in Settings > Logging if you want audit logs (disabled by default)
 
 ## Recommended initial configuration
 
@@ -185,13 +196,13 @@ You can protect it with a shared secret.
 An example Zabbix webhook script is included in:
 
 ```text
-examples/media_type_ai_webhook.js
+mediatype/media_type_ai_webhook.js
 ```
 
 Suggested media type parameters are documented in:
 
 ```text
-examples/media_type_setup.md
+mediatype/media_type_setup.md
 ```
 
 ## Webhook payload compatibility
@@ -212,13 +223,19 @@ The module accepts either:
 - Prefer **environment variables** for secrets over storing them directly in module config.
 - Enable TLS verification unless you have a specific internal reason not to.
 - The webhook endpoint does **not** require a logged-in Zabbix UI session, so use a shared secret if you expose it beyond localhost/internal networks.
-- Write actions are protected by multiple layers: settings mode, per-category permissions, user role checks, and mandatory user confirmation.
+- Write actions are protected by multiple layers: settings mode, per-category permissions, user role checks, server-side pending action storage, and mandatory user confirmation.
+- When Security / redaction is enabled, outbound AI requests can replace hostnames, IPs, FQDNs, URLs, OS hints, and any custom rules you define. Replies are restored locally before operators see them.
+- Logging is local file-based and redacted by default. Storing alias-to-original mapping details is available but intentionally off by default because it is higher risk.
 
 ## Important limitations
 
 - No chat persistence by design
 - No external FastAPI service required
 - The module does **not** create any new Zabbix DB tables
+- Local redaction state and pending write confirmations are stored as files under the configured state path (default `/tmp/zabbix-ai-module/state`)
+- Local logs are stored as JSONL files under the configured log path (default `/tmp/zabbix-ai-module/logs`) with optional archive path (default `/tmp/zabbix-ai-module/archive`)
+- **Logging is disabled by default.** Enable it in Settings > Logging after setting up writable directories.
+- **Writable directories must exist and be accessible by the web server process.** On systems with `PrivateTmp=yes` (common on RHEL/systemd), the default `/tmp` paths may not work. See `INSTALL.md` section 6 for setup instructions.
 - AI-powered Zabbix actions depend on the AI model correctly interpreting your request and generating valid tool calls. More capable models (GPT-4, Claude Sonnet/Opus) produce better results than smaller models.
 
 ## Files of interest
@@ -243,8 +260,8 @@ views/ai.settings.php             Settings page view (with Zabbix actions sectio
 assets/js/ai.chat.js              Session-only chat logic (with action handling)
 assets/js/ai.settings.js          Dynamic settings rows
 assets/css/ai.css                 Module styling
-examples/media_type_ai_webhook.js Example Zabbix webhook media type script
-examples/media_type_setup.md      Suggested media type parameters/macros
+mediatype/media_type_ai_webhook.js  Example Zabbix webhook media type script
+mediatype/media_type_setup.md       Media type setup guide and parameters
 ```
 
 ## Quick webhook smoke test

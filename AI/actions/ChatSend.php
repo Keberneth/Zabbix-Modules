@@ -6,10 +6,13 @@ require_once __DIR__.'/../lib/bootstrap.php';
 
 use CController,
     CControllerResponseData,
+    Modules\AI\Lib\AuditLogger,
     Modules\AI\Lib\Config,
     Modules\AI\Lib\NetBoxClient,
+    Modules\AI\Lib\PendingActionStore,
     Modules\AI\Lib\PromptBuilder,
     Modules\AI\Lib\ProviderClient,
+    Modules\AI\Lib\Redactor,
     Modules\AI\Lib\Util,
     Modules\AI\Lib\ZabbixActionExecutor,
     Modules\AI\Lib\ZabbixApiClient;
@@ -25,17 +28,19 @@ class ChatSend extends CController {
     }
 
     protected function doAction(): void {
+        $started_at = microtime(true);
+
         try {
+            $config = Config::get();
             $post = $_POST;
             $message = Util::cleanMultiline($post['message'] ?? '', 20000);
+            $chat_session_id = Util::cleanId($post['chat_session_id'] ?? '', 'chat');
 
             if ($message === '') {
                 throw new \RuntimeException('Message cannot be empty.');
             }
 
-            $config = Config::get();
             $provider = Config::getProvider($config, $post['provider_id'] ?? '', 'chat');
-
             if ($provider === null) {
                 throw new \RuntimeException('No provider is configured.');
             }
@@ -52,6 +57,7 @@ class ChatSend extends CController {
                 'extra_context' => Util::cleanMultiline($post['extra_context'] ?? '', 6000)
             ];
 
+            $redactor = $this->buildRedactor($config, $chat_session_id);
             $zabbix_api = ZabbixApiClient::fromConfig($config);
 
             if ($context['hostname'] !== '' && $zabbix_api !== null) {
@@ -59,7 +65,6 @@ class ChatSend extends CController {
             }
 
             $netbox = NetBoxClient::fromConfig($config);
-
             if ($context['hostname'] !== '' && $netbox !== null) {
                 $context['netbox_info'] = $netbox->getContextForHostname($context['hostname']);
             }
@@ -70,19 +75,16 @@ class ChatSend extends CController {
             ]);
 
             $context_block = PromptBuilder::buildChatContextBlock($context);
-
             if ($context_block !== '') {
                 $system_prompt .= "\n\nCurrent chat context:\n".$context_block;
             }
 
-            // Append Zabbix action tools if enabled and Zabbix API is configured.
             $actions_config = $config['zabbix_actions'] ?? [];
             $actions_enabled = Util::truthy($actions_config['enabled'] ?? false) && $zabbix_api !== null;
 
             if ($actions_enabled) {
                 $permissions = $this->buildActionPermissions($actions_config);
                 $actions_prompt = PromptBuilder::buildActionsSystemPrompt($config, $permissions);
-
                 if ($actions_prompt !== '') {
                     $system_prompt .= "\n\n".$actions_prompt;
                 }
@@ -102,33 +104,59 @@ class ChatSend extends CController {
                 'content' => $message
             ];
 
-            // Use the actions provider if configured and actions are enabled.
             $actions_provider = null;
             if ($actions_enabled) {
                 $actions_provider = Config::getProvider($config, '', 'actions');
             }
             $active_provider = $actions_provider ?? $provider;
+            $outbound_messages = $redactor !== null ? $redactor->redactMessages($messages, 'chat') : $messages;
 
-            $reply = ProviderClient::chat(
+            $reply_masked = ProviderClient::chat(
                 $active_provider,
-                $messages,
+                $outbound_messages,
                 (float) ($config['chat']['temperature'] ?? 0.2)
             );
 
-            // Check if the AI response is a tool call.
+            if ($redactor !== null) {
+                $redactor->save();
+            }
+
+            $reply = $redactor !== null ? $redactor->restoreText($reply_masked) : $reply_masked;
+
+            AuditLogger::log($config, 'translations', [
+                'event' => 'redaction.apply',
+                'source' => 'ai.chat.send',
+                'status' => 'ok',
+                'provider' => $this->providerInfo($active_provider),
+                'security' => $this->securityInfo($redactor),
+                'payload' => [
+                    'messages' => $outbound_messages,
+                    'reply' => $reply_masked
+                ],
+                'meta' => [
+                    'chat_session_id' => $chat_session_id,
+                    'context_keys' => array_keys(array_filter($context, static function($value) {
+                        return trim((string) $value) !== '';
+                    }))
+                ]
+            ]);
+
             if ($actions_enabled && $zabbix_api !== null) {
                 $tool_call = ZabbixActionExecutor::parseToolCall($reply);
 
                 if ($tool_call !== null) {
                     $tool_name = $tool_call['tool'];
-                    $tool_params = $tool_call['params'];
+                    $tool_params = is_array($tool_call['params']) ? $tool_call['params'] : [];
                     $write_category = ZabbixActionExecutor::getWriteCategory($tool_name);
 
-                    // Check permissions for write actions.
                     if ($write_category !== '') {
                         $permissions = $this->buildActionPermissions($actions_config);
 
                         if (($permissions['mode'] ?? 'read') !== 'readwrite') {
+                            $this->logChatEvent($config, $active_provider, $redactor, 'denied', $started_at, [
+                                'tool' => $tool_name,
+                                'reason' => 'read_only_mode'
+                            ]);
                             $this->respond([
                                 'ok' => true,
                                 'reply' => 'This action requires write access, but the current mode is read-only. An administrator can enable write mode in AI Settings > Zabbix Actions.',
@@ -139,6 +167,11 @@ class ChatSend extends CController {
                         }
 
                         if (empty($permissions['write_permissions'][$write_category])) {
+                            $this->logChatEvent($config, $active_provider, $redactor, 'denied', $started_at, [
+                                'tool' => $tool_name,
+                                'reason' => 'category_disabled',
+                                'category' => $write_category
+                            ]);
                             $this->respond([
                                 'ok' => true,
                                 'reply' => 'This action requires "'.$write_category.'" write permission, which is not enabled. An administrator can enable it in AI Settings > Zabbix Actions.',
@@ -150,6 +183,10 @@ class ChatSend extends CController {
 
                         if (Util::truthy($actions_config['require_super_admin_for_write'] ?? true)
                             && $this->getUserType() < USER_TYPE_SUPER_ADMIN) {
+                            $this->logChatEvent($config, $active_provider, $redactor, 'denied', $started_at, [
+                                'tool' => $tool_name,
+                                'reason' => 'super_admin_required'
+                            ]);
                             $this->respond([
                                 'ok' => true,
                                 'reply' => 'Write actions are restricted to Super Admin users. Please contact your administrator.',
@@ -159,23 +196,45 @@ class ChatSend extends CController {
                             return;
                         }
 
-                        // Write action — return confirmation request to user.
                         $confirm_msg = $tool_call['confirm_message'] !== ''
                             ? $tool_call['confirm_message']
                             : 'I want to execute the "'.$tool_name.'" action. Should I proceed?';
+
+                        $action_id = PendingActionStore::create($config, $this->serverSessionKey(), [
+                            'tool' => $tool_name,
+                            'params' => $tool_params,
+                            'provider_id' => (string) ($active_provider['id'] ?? ''),
+                            'chat_session_id' => $chat_session_id,
+                            'created_at' => time()
+                        ]);
+
+                        AuditLogger::log($config, 'writes', [
+                            'event' => 'zabbix.write.pending',
+                            'source' => 'ai.chat.send',
+                            'status' => 'pending',
+                            'tool' => $tool_name,
+                            'provider' => $this->providerInfo($active_provider),
+                            'security' => $this->securityInfo($redactor),
+                            'payload' => [
+                                'confirm_message' => $redactor !== null ? $redactor->redactText($confirm_msg, 'action_writes') : $confirm_msg
+                            ],
+                            'meta' => [
+                                'action_id' => $action_id,
+                                'category' => $write_category
+                            ]
+                        ]);
 
                         $this->respond([
                             'ok' => true,
                             'reply' => $confirm_msg,
                             'action_pending' => true,
+                            'pending_action_id' => $action_id,
                             'pending_tool' => $tool_name,
-                            'pending_params' => $tool_params,
                             'provider_name' => $active_provider['name'] ?? 'AI'
                         ]);
                         return;
                     }
 
-                    // Read action — execute immediately.
                     try {
                         $tool_result = ZabbixActionExecutor::execute($tool_name, $tool_params, $zabbix_api);
                     }
@@ -183,22 +242,47 @@ class ChatSend extends CController {
                         $tool_result = 'Error executing '.$tool_name.': '.$e->getMessage();
                     }
 
-                    // Send the result back to the AI for a human-readable summary.
-                    $format_messages = $messages;
+                    $tool_result_masked = $redactor !== null
+                        ? $redactor->redactText($tool_result, 'action_reads')
+                        : $tool_result;
+
+                    $format_messages = $outbound_messages;
                     $format_messages[] = [
                         'role' => 'assistant',
-                        'content' => $reply
+                        'content' => $reply_masked
                     ];
                     $format_messages[] = [
                         'role' => 'user',
-                        'content' => "Tool result for ".$tool_name.":\n\n".$tool_result."\n\nPlease format this result for the user in a clear, readable way using Markdown. Do not output a JSON tool call."
+                        'content' => "Tool result for ".$tool_name.":\n\n".$tool_result_masked."\n\nPlease format this result for the user in a clear, readable way using Markdown. Do not output a JSON tool call."
                     ];
 
-                    $formatted_reply = ProviderClient::chat(
+                    $formatted_masked = ProviderClient::chat(
                         $active_provider,
                         $format_messages,
                         (float) ($config['chat']['temperature'] ?? 0.2)
                     );
+
+                    if ($redactor !== null) {
+                        $redactor->save();
+                    }
+
+                    $formatted_reply = $redactor !== null ? $redactor->restoreText($formatted_masked) : $formatted_masked;
+
+                    AuditLogger::log($config, 'reads', [
+                        'event' => 'zabbix.read.executed',
+                        'source' => 'ai.chat.send',
+                        'status' => 'ok',
+                        'tool' => $tool_name,
+                        'provider' => $this->providerInfo($active_provider),
+                        'security' => $this->securityInfo($redactor),
+                        'payload' => [
+                            'tool_result' => $tool_result_masked,
+                            'formatted_reply' => $formatted_masked
+                        ],
+                        'meta' => [
+                            'action_type' => 'read'
+                        ]
+                    ]);
 
                     $this->respond([
                         'ok' => true,
@@ -215,6 +299,11 @@ class ChatSend extends CController {
                 }
             }
 
+            $this->logChatEvent($config, $active_provider, $redactor, 'ok', $started_at, [
+                'reply' => $reply_masked,
+                'message_count' => count($outbound_messages)
+            ]);
+
             $this->respond([
                 'ok' => true,
                 'reply' => $reply,
@@ -226,6 +315,16 @@ class ChatSend extends CController {
             ]);
         }
         catch (\Throwable $e) {
+            if (isset($config)) {
+                AuditLogger::log($config, 'errors', [
+                    'event' => 'chat.send.failed',
+                    'source' => 'ai.chat.send',
+                    'status' => 'error',
+                    'message' => $e->getMessage(),
+                    'duration_ms' => (int) round((microtime(true) - $started_at) * 1000)
+                ]);
+            }
+
             $this->respond([
                 'ok' => false,
                 'error' => $e->getMessage()
@@ -233,24 +332,93 @@ class ChatSend extends CController {
         }
     }
 
-    /**
-     * Build the effective permissions array for Zabbix actions,
-     * taking user type into account.
-     */
     private function buildActionPermissions(array $actions_config): array {
         $permissions = [
-            'mode' => $actions_config['mode'] ?? 'read',
-            'write_permissions' => $actions_config['write_permissions'] ?? []
+            'mode' => (($actions_config['mode'] ?? 'read') === 'readwrite') ? 'readwrite' : 'read',
+            'write_permissions' => [
+                'maintenance' => false,
+                'items' => false,
+                'triggers' => false,
+                'users' => false,
+                'problems' => false
+            ],
+            'require_confirmation' => true,
+            'current_user_type' => $this->getUserType()
         ];
 
-        // If write requires super admin and user is not, downgrade to read.
-        if ($permissions['mode'] === 'readwrite'
-            && Util::truthy($actions_config['require_super_admin_for_write'] ?? true)
-            && $this->getUserType() < USER_TYPE_SUPER_ADMIN) {
-            $permissions['mode'] = 'read';
+        if (($permissions['mode'] ?? 'read') === 'readwrite') {
+            foreach ($permissions['write_permissions'] as $category => $enabled) {
+                $permissions['write_permissions'][$category] = Util::truthy($actions_config['write_permissions'][$category] ?? false);
+            }
         }
 
         return $permissions;
+    }
+
+    private function buildRedactor(array $config, string $chat_session_id): ?Redactor {
+        if ($chat_session_id === '') {
+            return null;
+        }
+
+        return Redactor::forChatSession($config, $this->serverSessionKey(), $chat_session_id);
+    }
+
+    private function serverSessionKey(): string {
+        $sid = (string) session_id();
+        if ($sid !== '') {
+            return $sid;
+        }
+
+        if (class_exists('CWebUser') && isset(\CWebUser::$data) && is_array(\CWebUser::$data)) {
+            $uid = (string) (\CWebUser::$data['userid'] ?? '');
+            if ($uid !== '') {
+                return 'user:'.$uid;
+            }
+        }
+
+        return 'remote:'.Util::cleanString($_SERVER['REMOTE_ADDR'] ?? 'unknown', 128);
+    }
+
+    private function providerInfo(?array $provider): array {
+        if (!is_array($provider)) {
+            return [];
+        }
+
+        return array_filter([
+            'id' => (string) ($provider['id'] ?? ''),
+            'name' => (string) ($provider['name'] ?? ''),
+            'type' => (string) ($provider['type'] ?? ''),
+            'model' => (string) ($provider['model'] ?? '')
+        ], static function($value) {
+            return trim((string) $value) !== '';
+        });
+    }
+
+    private function securityInfo(?Redactor $redactor): array {
+        if ($redactor === null) {
+            return [];
+        }
+
+        return [
+            'enabled' => $redactor->isEnabled(),
+            'stats' => $redactor->stats(),
+            'mapping_details' => $redactor->mappingDetails(100)
+        ];
+    }
+
+    private function logChatEvent(array $config, array $provider, ?Redactor $redactor, string $status, float $started_at, array $meta = []): void {
+        AuditLogger::log($config, 'chat', [
+            'event' => 'chat.send',
+            'source' => 'ai.chat.send',
+            'status' => $status,
+            'provider' => $this->providerInfo($provider),
+            'duration_ms' => (int) round((microtime(true) - $started_at) * 1000),
+            'security' => $this->securityInfo($redactor),
+            'payload' => [
+                'reply' => $meta['reply'] ?? ''
+            ],
+            'meta' => $meta
+        ]);
     }
 
     private function respond(array $payload, int $http_status = 200): void {

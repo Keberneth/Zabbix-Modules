@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \":*)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/Keberneth/Zabbix-Modules/main/AI/views/ai.chat.php\" -o \"/c/Users/Niclas Skarnes/Downloads/AI/zabbix-ai-original/AI/views/ai.chat.php\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/Keberneth/Zabbix-Modules/main/AI/views/ai.settings.php\" -o \"/c/Users/Niclas Skarnes/Downloads/AI/zabbix-ai-original/AI/views/ai.settings.php\")"
+    ]
+  }
+}

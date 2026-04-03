@@ -427,3 +427,208 @@ html[theme="hc-dark"] .ai-msg-action .ai-msg-title,
         flex-direction: column;
     }
 }
+
+.ai-note-box {
+    padding: 12px 14px;
+    border: 1px solid var(--ai-border);
+    background: var(--ai-bg-subtle);
+    border-radius: 6px;
+}
+
+.ai-check-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(180px, 1fr));
+    gap: 10px 16px;
+    margin-top: 12px;
+}
+
+.ai-top-margin {
+    margin-top: 12px;
+}
+
+.ai-bottom-margin {
+    margin-bottom: 20px;
+}
+
+.ai-sticky-actions {
+    position: sticky;
+    bottom: 0;
+    padding: 12px 0 4px;
+    background: linear-gradient(to bottom, rgba(255,255,255,0), var(--ai-bg) 22%);
+}
+
+html[theme="dark-theme"] .ai-sticky-actions,
+html[theme="hc-dark"] .ai-sticky-actions,
+.ai-page[data-ai-theme="dark"] .ai-sticky-actions {
+    background: linear-gradient(to bottom, rgba(43,54,72,0), var(--ai-bg) 22%);
+}
+
+.ai-filter-form {
+    align-items: end;
+}
+
+.ai-filter-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 12px;
+}
+
+.ai-log-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.ai-log-entry {
+    border: 1px solid var(--ai-border);
+    border-radius: 6px;
+    background: var(--ai-bg-subtle);
+}
+
+.ai-log-entry > summary {
+    cursor: pointer;
+    padding: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    align-items: center;
+}
+
+.ai-log-entry[open] > summary {
+    border-bottom: 1px solid var(--ai-border-light);
+}
+
+.ai-log-body {
+    padding: 12px;
+}
+
+.ai-log-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--ai-bg-accent);
+    border: 1px solid var(--ai-border);
+    font-size: 12px;
+}
+
+.ai-log-title {
+    font-weight: 700;
+}
+
+.ai-log-meta,
+.ai-log-ts {
+    color: var(--ai-fg-muted);
+    font-size: 12px;
+}
+
+@media (max-width: 1200px) {
+    .ai-check-grid {
+        grid-template-columns: repeat(2, minmax(180px, 1fr));
+    }
+}
+
+@media (max-width: 800px) {
+    .ai-check-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ── FAQ toggle buttons ── */
+.ai-section-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.ai-section-header h2 {
+    margin: 0;
+}
+
+.ai-faq-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 1px solid var(--ai-border);
+    background: var(--ai-bg-accent);
+    color: var(--ai-fg-muted);
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    line-height: 1;
+    padding: 0;
+    flex-shrink: 0;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.ai-faq-toggle:hover,
+.ai-faq-toggle.ai-faq-active {
+    background: var(--ai-user-bg);
+    color: var(--ai-fg);
+    border-color: var(--ai-input-border);
+}
+
+.ai-faq-box {
+    display: none;
+    margin: 12px 0;
+    padding: 14px 16px;
+    border: 1px solid var(--ai-border);
+    border-left: 3px solid var(--ai-input-border);
+    border-radius: 4px;
+    background: var(--ai-bg-subtle);
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--ai-fg);
+}
+
+.ai-faq-box.ai-faq-visible {
+    display: block;
+}
+
+.ai-faq-box p {
+    margin: 0 0 8px;
+}
+
+.ai-faq-box p:last-child {
+    margin-bottom: 0;
+}
+
+.ai-faq-box strong {
+    color: var(--ai-fg);
+}
+
+.ai-faq-box code {
+    display: inline;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: var(--ai-bg-accent);
+    border: 1px solid var(--ai-border-light);
+    font-size: 12px;
+    word-break: break-all;
+}
+
+.ai-faq-box pre {
+    margin: 8px 0;
+    padding: 10px 12px;
+    border-radius: 4px;
+    background: var(--ai-bg-accent);
+    border: 1px solid var(--ai-border-light);
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.ai-faq-box ul {
+    margin: 6px 0;
+    padding-left: 20px;
+}
+
+.ai-faq-box li {
+    margin-bottom: 4px;
+}

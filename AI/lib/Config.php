@@ -68,6 +68,50 @@ class Config {
                 'max_history_messages' => 12,
                 'temperature' => 0.2
             ],
+            'security' => [
+                'enabled' => true,
+                'strict_mode' => true,
+                'session_ttl_hours' => 12,
+                'state_path' => '/tmp/zabbix-ai-module/state',
+                'apply_to' => [
+                    'chat' => true,
+                    'webhook' => true,
+                    'action_reads' => true,
+                    'action_writes' => true,
+                    'action_formatting' => true
+                ],
+                'categories' => [
+                    'hostnames' => true,
+                    'ipv4' => true,
+                    'ipv6' => true,
+                    'fqdns' => true,
+                    'urls' => true,
+                    'strip_url_query' => false,
+                    'os_mode' => 'family_only'
+                ],
+                'custom_rules' => []
+            ],
+            'logging' => [
+                'enabled' => false,
+                'path' => '/tmp/zabbix-ai-module/logs',
+                'archive_path' => '/tmp/zabbix-ai-module/archive',
+                'archive_enabled' => true,
+                'compress_archives' => true,
+                'retention_days' => 30,
+                'max_payload_chars' => 8000,
+                'include_payloads' => true,
+                'include_mapping_details' => false,
+                'categories' => [
+                    'chat' => true,
+                    'webhook' => true,
+                    'reads' => true,
+                    'writes' => true,
+                    'translations' => true,
+                    'user_activity' => true,
+                    'settings_changes' => true,
+                    'errors' => true
+                ]
+            ],
             'zabbix_actions' => [
                 'enabled' => true,
                 'mode' => 'read',
@@ -85,9 +129,9 @@ class Config {
 
     public static function getModuleRecord(): ?array {
         $result = DBselect(
-            'SELECT moduleid,id,relative_path,status,config'.
-            ' FROM module'.
-            ' WHERE id='.zbx_dbstr(self::MODULE_ID)
+            'SELECT moduleid,id,relative_path,status,config'
+            .' FROM module'
+            .' WHERE id='.zbx_dbstr(self::MODULE_ID)
         );
 
         $row = DBfetch($result);
@@ -152,6 +196,11 @@ class Config {
         $config['webhook']['shared_secret_present'] = trim((string) ($config['webhook']['shared_secret'] ?? '')) !== '';
         $config['webhook']['shared_secret'] = '';
 
+        foreach ($config['security']['custom_rules'] as &$rule) {
+            $rule['id'] = Util::cleanId($rule['id'] ?? '', 'rule');
+        }
+        unset($rule);
+
         return $config;
     }
 
@@ -203,16 +252,14 @@ class Config {
 
         $default_chat_provider_id = Util::cleanString($post['default_chat_provider_id'] ?? '', 128);
         $default_webhook_provider_id = Util::cleanString($post['default_webhook_provider_id'] ?? '', 128);
+        $default_actions_provider_id = Util::cleanString($post['default_actions_provider_id'] ?? '', 128);
 
         $new_config['default_chat_provider_id'] = in_array($default_chat_provider_id, $provider_ids, true)
             ? $default_chat_provider_id
             : '';
-
         $new_config['default_webhook_provider_id'] = in_array($default_webhook_provider_id, $provider_ids, true)
             ? $default_webhook_provider_id
             : '';
-
-        $default_actions_provider_id = Util::cleanString($post['default_actions_provider_id'] ?? '', 128);
         $new_config['default_actions_provider_id'] = in_array($default_actions_provider_id, $provider_ids, true)
             ? $default_actions_provider_id
             : '';
@@ -220,11 +267,9 @@ class Config {
         if ($new_config['default_chat_provider_id'] === '' && $provider_ids) {
             $new_config['default_chat_provider_id'] = $provider_ids[0];
         }
-
         if ($new_config['default_webhook_provider_id'] === '' && $provider_ids) {
             $new_config['default_webhook_provider_id'] = $provider_ids[0];
         }
-
         if ($new_config['default_actions_provider_id'] === '' && $provider_ids) {
             $new_config['default_actions_provider_id'] = $provider_ids[0];
         }
@@ -238,7 +283,6 @@ class Config {
             }
 
             $content = Util::cleanMultiline($instruction['content'] ?? '', 50000);
-
             if ($content === '') {
                 continue;
             }
@@ -263,7 +307,6 @@ class Config {
             }
 
             $url = Util::cleanUrl($link['url'] ?? '');
-
             if ($url === '') {
                 continue;
             }
@@ -329,6 +372,54 @@ class Config {
             'temperature' => Util::cleanFloat($post['chat']['temperature'] ?? 0.2, 0.2, 0, 2)
         ];
 
+        $security = $post['security'] ?? [];
+        $new_config['security'] = [
+            'enabled' => Util::truthy($security['enabled'] ?? false),
+            'strict_mode' => Util::truthy($security['strict_mode'] ?? false),
+            'session_ttl_hours' => Util::cleanInt($security['session_ttl_hours'] ?? 12, 12, 1, 720),
+            'state_path' => self::normalizePathOrDefault($security['state_path'] ?? '', '/tmp/zabbix-ai-module/state'),
+            'apply_to' => [
+                'chat' => Util::truthy($security['apply_to']['chat'] ?? false),
+                'webhook' => Util::truthy($security['apply_to']['webhook'] ?? false),
+                'action_reads' => Util::truthy($security['apply_to']['action_reads'] ?? false),
+                'action_writes' => Util::truthy($security['apply_to']['action_writes'] ?? false),
+                'action_formatting' => Util::truthy($security['apply_to']['action_formatting'] ?? false)
+            ],
+            'categories' => [
+                'hostnames' => Util::truthy($security['categories']['hostnames'] ?? false),
+                'ipv4' => Util::truthy($security['categories']['ipv4'] ?? false),
+                'ipv6' => Util::truthy($security['categories']['ipv6'] ?? false),
+                'fqdns' => Util::truthy($security['categories']['fqdns'] ?? false),
+                'urls' => Util::truthy($security['categories']['urls'] ?? false),
+                'strip_url_query' => Util::truthy($security['categories']['strip_url_query'] ?? false),
+                'os_mode' => Util::cleanEnum($security['categories']['os_mode'] ?? 'family_only', ['off', 'family_only', 'full_alias'], 'family_only')
+            ],
+            'custom_rules' => self::buildCustomRules($security['custom_rules'] ?? [])
+        ];
+
+        $logging = $post['logging'] ?? [];
+        $new_config['logging'] = [
+            'enabled' => Util::truthy($logging['enabled'] ?? false),
+            'path' => self::normalizePathOrDefault($logging['path'] ?? '', '/tmp/zabbix-ai-module/logs'),
+            'archive_path' => self::normalizePathOrDefault($logging['archive_path'] ?? '', '/tmp/zabbix-ai-module/archive'),
+            'archive_enabled' => Util::truthy($logging['archive_enabled'] ?? false),
+            'compress_archives' => Util::truthy($logging['compress_archives'] ?? false),
+            'retention_days' => Util::cleanInt($logging['retention_days'] ?? 30, 30, 1, 3650),
+            'max_payload_chars' => Util::cleanInt($logging['max_payload_chars'] ?? 8000, 8000, 200, 500000),
+            'include_payloads' => Util::truthy($logging['include_payloads'] ?? false),
+            'include_mapping_details' => Util::truthy($logging['include_mapping_details'] ?? false),
+            'categories' => [
+                'chat' => Util::truthy($logging['categories']['chat'] ?? false),
+                'webhook' => Util::truthy($logging['categories']['webhook'] ?? false),
+                'reads' => Util::truthy($logging['categories']['reads'] ?? false),
+                'writes' => Util::truthy($logging['categories']['writes'] ?? false),
+                'translations' => Util::truthy($logging['categories']['translations'] ?? false),
+                'user_activity' => Util::truthy($logging['categories']['user_activity'] ?? false),
+                'settings_changes' => Util::truthy($logging['categories']['settings_changes'] ?? false),
+                'errors' => Util::truthy($logging['categories']['errors'] ?? false)
+            ]
+        ];
+
         $za = $post['zabbix_actions'] ?? [];
         $new_config['zabbix_actions'] = [
             'enabled' => Util::truthy($za['enabled'] ?? false),
@@ -354,12 +445,14 @@ class Config {
         if ($provider_id === '') {
             if ($purpose === 'webhook') {
                 $provider_id = (string) $config['default_webhook_provider_id'];
-            } elseif ($purpose === 'actions') {
+            }
+            elseif ($purpose === 'actions') {
                 $provider_id = (string) ($config['default_actions_provider_id'] ?? '');
                 if ($provider_id === '') {
                     $provider_id = (string) $config['default_chat_provider_id'];
                 }
-            } else {
+            }
+            else {
                 $provider_id = (string) $config['default_chat_provider_id'];
             }
         }
@@ -415,6 +508,10 @@ class Config {
             }
         }
 
+        $merged['security']['custom_rules'] = array_values(is_array($merged['security']['custom_rules'] ?? null)
+            ? $merged['security']['custom_rules']
+            : []);
+
         return $merged;
     }
 
@@ -432,6 +529,32 @@ class Config {
         $decoded = json_decode($config, true);
 
         return is_array($decoded) ? $decoded : self::defaults();
+    }
+
+    private static function buildCustomRules($rows): array {
+        $rules = [];
+
+        foreach ((array) $rows as $rule) {
+            if (!is_array($rule)) {
+                continue;
+            }
+
+            $match = Util::cleanMultiline($rule['match'] ?? '', 1000);
+            $replace = Util::cleanMultiline($rule['replace'] ?? '', 1000);
+            if ($match === '' || $replace === '') {
+                continue;
+            }
+
+            $rules[] = [
+                'id' => Util::cleanId($rule['id'] ?? '', 'rule'),
+                'type' => Util::cleanEnum($rule['type'] ?? 'exact', ['exact', 'regex', 'domain_suffix'], 'exact'),
+                'match' => $match,
+                'replace' => $replace,
+                'enabled' => Util::truthy($rule['enabled'] ?? false)
+            ];
+        }
+
+        return $rules;
     }
 
     private static function indexById(array $rows): array {
@@ -466,5 +589,11 @@ class Config {
         return in_array($value, ['auto', 'bearer', 'legacy_auth_field'], true)
             ? $value
             : 'auto';
+    }
+
+    private static function normalizePathOrDefault($value, string $default): string {
+        $value = Util::cleanPath($value);
+
+        return $value !== '' ? $value : $default;
     }
 }

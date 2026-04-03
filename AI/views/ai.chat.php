@@ -28,6 +28,10 @@ $settings_url = (new CUrl('zabbix.php'))
     ->setArgument('action', 'ai.settings')
     ->getUrl();
 
+$logs_url = (new CUrl('zabbix.php'))
+    ->setArgument('action', 'ai.logs')
+    ->getUrl();
+
 $providers = is_array($data['providers'] ?? null) ? $data['providers'] : [];
 
 $ai_theme = 'light';
@@ -55,18 +59,27 @@ ob_start();
     data-problems-url="<?= $h($problems_url) ?>"
     data-execute-url="<?= $h($execute_url) ?>"
     data-execute-csrf="<?= $h(CCsrfTokenHelper::get('ai.chat.execute')) ?>"
+    data-security-enabled="<?= $h(($data['security_enabled'] ?? false) ? '1' : '0') ?>"
 >
     <div class="ai-header">
         <div>
             <h1><?= $h($data['title'] ?? _('AI chat')) ?></h1>
-            <p class="ai-muted">
-                Session-only chat. Conversation history stays in this browser tab via sessionStorage and is not written by the module.
-            </p>
+            <p class="ai-muted">Conversation history stays in this browser tab. Sensitive values can be masked locally before they are sent to the provider when redaction is enabled.</p>
         </div>
         <div class="ai-header-actions">
             <a class="btn-alt" href="<?= $h($settings_url) ?>"><?= $h(_('Open settings')) ?></a>
+            <?php if (!empty($data['can_view_logs'])): ?>
+                <a class="btn-alt" href="<?= $h($logs_url) ?>"><?= $h(_('Open logs')) ?></a>
+            <?php endif; ?>
         </div>
     </div>
+
+    <?php if (!empty($data['security_enabled'])): ?>
+        <div class="ai-note-box ai-bottom-margin">
+            <strong><?= $h(_('Privacy mode is enabled.')) ?></strong>
+            <div class="ai-muted"><?= $h(_('Hostnames, IPs, domains, URLs, OS hints, and any custom replacement rules can be masked before outbound AI requests.')) ?></div>
+        </div>
+    <?php endif; ?>
 
     <div class="ai-grid">
         <section class="ai-card ai-context-card">
@@ -116,7 +129,7 @@ ob_start();
             <textarea id="ai-problem-summary" class="ai-textarea" rows="4" placeholder="<?= $h(_('Short problem description or trigger text')) ?>"><?= $h($data['initial_problem_summary'] ?? '') ?></textarea>
 
             <label class="ai-label" for="ai-extra-context"><?= $h(_('Extra operator context (optional)')) ?></label>
-            <textarea id="ai-extra-context" class="ai-textarea" rows="6" placeholder="<?= $h(_('Anything useful for the model: recent changes, error text, environment notes, links to internal docs, etc.')) ?>"></textarea>
+            <textarea id="ai-extra-context" class="ai-textarea" rows="6" placeholder="<?= $h(_('Recent changes, error text, environment notes, internal docs, or other useful context.')) ?>"></textarea>
 
             <div class="ai-side-actions">
                 <button type="button" class="btn-alt" id="ai-clear-session"><?= $h(_('Clear session')) ?></button>
@@ -140,7 +153,7 @@ ob_start();
 
             <form id="ai-compose-form" class="ai-compose-form">
                 <label class="ai-label" for="ai-message"><?= $h(_('Message')) ?></label>
-                <textarea id="ai-message" class="ai-textarea ai-compose-box" rows="6" placeholder="<?= $h(_('Ask for troubleshooting help, escalation text, log review guidance, or a safer next step.')) ?>"></textarea>
+                <textarea id="ai-message" class="ai-textarea ai-compose-box" rows="6" placeholder="<?= $h(_('Ask for troubleshooting help, log review guidance, escalation text, or the safest next step.')) ?>"></textarea>
                 <div class="ai-compose-actions">
                     <button type="submit" class="btn" id="ai-send-button" <?= $providers ? '' : 'disabled' ?>><?= $h(_('Send')) ?></button>
                 </div>

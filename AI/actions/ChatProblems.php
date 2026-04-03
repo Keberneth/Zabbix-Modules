@@ -6,6 +6,7 @@ require_once __DIR__.'/../lib/bootstrap.php';
 
 use CController,
     CControllerResponseData,
+    Modules\AI\Lib\AuditLogger,
     Modules\AI\Lib\Config,
     Modules\AI\Lib\Util,
     Modules\AI\Lib\ZabbixApiClient;
@@ -35,11 +36,18 @@ class ChatProblems extends CController {
 
             $hostid = Util::cleanString($_GET['hostid'] ?? '', 128);
             $search = Util::cleanString($_GET['search'] ?? '', 255);
-            $problems = $zabbix_api->getProblems(
-                $hostid !== '' ? $hostid : null,
-                $search,
-                50
-            );
+            $problems = $zabbix_api->getProblems($hostid !== '' ? $hostid : null, $search, 50);
+
+            AuditLogger::log($config, 'reads', [
+                'event' => 'zabbix.read.problems',
+                'source' => 'ai.chat.problems',
+                'status' => 'ok',
+                'meta' => [
+                    'hostid_supplied' => $hostid !== '',
+                    'search_supplied' => $search !== '',
+                    'problem_count' => count($problems)
+                ]
+            ]);
 
             $this->respond([
                 'ok' => true,
@@ -47,6 +55,15 @@ class ChatProblems extends CController {
             ]);
         }
         catch (\Throwable $e) {
+            if (isset($config)) {
+                AuditLogger::log($config, 'errors', [
+                    'event' => 'zabbix.read.problems.failed',
+                    'source' => 'ai.chat.problems',
+                    'status' => 'error',
+                    'message' => $e->getMessage()
+                ]);
+            }
+
             $this->respond([
                 'ok' => false,
                 'error' => $e->getMessage()

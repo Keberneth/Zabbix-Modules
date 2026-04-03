@@ -17,7 +17,8 @@ class Module extends CModule {
                 (new CMenuItem(_('AI')))->setSubMenu(
                     new CMenu([
                         (new CMenuItem(_('Chat')))->setAction('ai.chat'),
-                        (new CMenuItem(_('Settings')))->setAction('ai.settings')
+                        (new CMenuItem(_('Settings')))->setAction('ai.settings'),
+                        (new CMenuItem(_('Logs')))->setAction('ai.logs')
                     ])
                 )
             );

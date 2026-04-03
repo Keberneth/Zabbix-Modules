@@ -8,9 +8,10 @@ use CController,
     CControllerResponseData,
     Modules\AI\Lib\AuditLogger,
     Modules\AI\Lib\Config,
-    Modules\AI\Lib\ZabbixApiClient;
+    Modules\AI\Lib\Util,
+    Modules\AI\Lib\WebhookHandler;
 
-class ChatHosts extends CController {
+class Webhook extends CController {
 
     public function init(): void {
         $this->disableCsrfValidation();
@@ -21,43 +22,34 @@ class ChatHosts extends CController {
     }
 
     protected function checkPermissions(): bool {
-        return $this->getUserType() >= USER_TYPE_ZABBIX_USER;
+        return true;
     }
 
     protected function doAction(): void {
-        try {
-            $config = Config::get();
-            $zabbix_api = ZabbixApiClient::fromConfig($config);
+        $config = Config::get();
 
-            if ($zabbix_api === null) {
-                throw new \RuntimeException('Zabbix API is not configured.');
+        try {
+            $raw = file_get_contents('php://input');
+            $decoded = json_decode((string) $raw, true);
+            if (!is_array($decoded)) {
+                throw new \RuntimeException('Invalid JSON payload.');
             }
 
-            $hosts = $zabbix_api->getHosts();
-
-            AuditLogger::log($config, 'reads', [
-                'event' => 'zabbix.read.hosts',
-                'source' => 'ai.chat.hosts',
-                'status' => 'ok',
-                'meta' => [
-                    'host_count' => count($hosts)
-                ]
-            ]);
-
+            $result = WebhookHandler::process($config, $decoded);
             $this->respond([
                 'ok' => true,
-                'hosts' => $hosts
+                'posted_chunks' => (int) ($result['posted_chunks'] ?? 0),
+                'reply' => (string) ($result['reply'] ?? ''),
+                'result' => (string) ($result['result'] ?? '')
             ]);
         }
         catch (\Throwable $e) {
-            if (isset($config)) {
-                AuditLogger::log($config, 'errors', [
-                    'event' => 'zabbix.read.hosts.failed',
-                    'source' => 'ai.chat.hosts',
-                    'status' => 'error',
-                    'message' => $e->getMessage()
-                ]);
-            }
+            AuditLogger::log($config, 'errors', [
+                'event' => 'webhook.failed',
+                'source' => 'ai.webhook',
+                'status' => 'error',
+                'message' => Util::truncate($e->getMessage(), 1000)
+            ]);
 
             $this->respond([
                 'ok' => false,

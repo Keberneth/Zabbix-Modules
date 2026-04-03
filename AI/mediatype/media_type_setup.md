@@ -28,8 +28,8 @@ Copy the contents of this package into your module directory so the resulting tr
 - `AI/assets/css/ai.css`
 - `AI/assets/js/ai.chat.js`
 - `AI/assets/js/ai.settings.js`
-- `AI/examples/media_type_ai_webhook.js`
-- `AI/examples/media_type_ai_webhook.yaml`
+- `AI/mediatype/media_type_ai_webhook.js`
+- `AI/mediatype/media_type_ai_webhook.yaml`
 - `AI/lib/*.php`
 - `AI/views/ai.chat.php`
 - `AI/views/ai.settings.php`
@@ -38,6 +38,6 @@ If your module is already enabled, a frontend refresh is usually enough after re
 
 ## Media type
 
-Re-import `examples/media_type_ai_webhook.yaml` or paste `examples/media_type_ai_webhook.js` into your Webhook media type.
+Re-import `mediatype/media_type_ai_webhook.yaml` or paste `mediatype/media_type_ai_webhook.js` into your Webhook media type.
 
 In the **Test** dialog, replace macros with real values. If **Add problem update** is enabled in module settings, use a real writable event ID.

@@ -23,8 +23,8 @@ class Util {
     public static function cleanString($value, int $max_length = 0): string {
         $value = trim((string) $value);
 
-        if ($max_length > 0 && mb_strlen($value) > $max_length) {
-            $value = mb_substr($value, 0, $max_length);
+        if ($max_length > 0 && self::strLen($value) > $max_length) {
+            $value = self::subStr($value, 0, $max_length);
         }
 
         return $value;
@@ -33,8 +33,8 @@ class Util {
     public static function cleanMultiline($value, int $max_length = 0): string {
         $value = str_replace(["\r\n", "\r"], "\n", trim((string) $value));
 
-        if ($max_length > 0 && mb_strlen($value) > $max_length) {
-            $value = mb_substr($value, 0, $max_length);
+        if ($max_length > 0 && self::strLen($value) > $max_length) {
+            $value = self::subStr($value, 0, $max_length);
         }
 
         return $value;
@@ -42,6 +42,17 @@ class Util {
 
     public static function cleanUrl($value): string {
         return trim((string) $value);
+    }
+
+    public static function cleanPath($value, int $max_length = 1024): string {
+        $value = str_replace(["\0"], '', trim((string) $value));
+        $value = preg_replace('#/+#', '/', $value);
+
+        if ($max_length > 0 && self::strLen($value) > $max_length) {
+            $value = self::subStr($value, 0, $max_length);
+        }
+
+        return $value;
     }
 
     public static function cleanInt($value, int $default = 0, ?int $min = null, ?int $max = null): int {
@@ -88,6 +99,12 @@ class Util {
         }
 
         return $value;
+    }
+
+    public static function cleanEnum($value, array $allowed, string $default): string {
+        $value = trim((string) $value);
+
+        return in_array($value, $allowed, true) ? $value : $default;
     }
 
     public static function generateId(string $prefix = 'id'): string {
@@ -146,11 +163,11 @@ class Util {
     public static function truncate(string $value, int $max_length = 800): string {
         $value = trim($value);
 
-        if (mb_strlen($value) <= $max_length) {
+        if (self::strLen($value) <= $max_length) {
             return $value;
         }
 
-        return rtrim(mb_substr($value, 0, $max_length - 1)).'…';
+        return rtrim(self::subStr($value, 0, $max_length - 1)).'…';
     }
 
     public static function chunkText(string $text, int $max_length = 1900): array {
@@ -174,7 +191,7 @@ class Util {
 
             $candidate = ($buffer === '') ? $paragraph : $buffer."\n\n".$paragraph;
 
-            if (mb_strlen($candidate) <= $max_length) {
+            if (self::strLen($candidate) <= $max_length) {
                 $buffer = $candidate;
                 continue;
             }
@@ -184,16 +201,16 @@ class Util {
                 $buffer = '';
             }
 
-            while (mb_strlen($paragraph) > $max_length) {
-                $slice = mb_substr($paragraph, 0, $max_length);
+            while (self::strLen($paragraph) > $max_length) {
+                $slice = self::subStr($paragraph, 0, $max_length);
                 $cut_positions = array_filter([
-                    mb_strrpos($slice, "\n"),
-                    mb_strrpos($slice, '. '),
-                    mb_strrpos($slice, '; '),
-                    mb_strrpos($slice, ', '),
-                    mb_strrpos($slice, ' ')
-                ], static function($value) {
-                    return $value !== false;
+                    self::strrPos($slice, "\n"),
+                    self::strrPos($slice, '. '),
+                    self::strrPos($slice, '; '),
+                    self::strrPos($slice, ', '),
+                    self::strrPos($slice, ' ')
+                ], static function($candidate) {
+                    return $candidate !== false;
                 });
 
                 $cut = $cut_positions ? max($cut_positions) : false;
@@ -202,8 +219,8 @@ class Util {
                     $cut = $max_length;
                 }
 
-                $chunks[] = trim(mb_substr($paragraph, 0, (int) $cut));
-                $paragraph = trim(mb_substr($paragraph, (int) $cut));
+                $chunks[] = trim(self::subStr($paragraph, 0, (int) $cut));
+                $paragraph = trim(self::subStr($paragraph, (int) $cut));
             }
 
             $buffer = $paragraph;
@@ -239,5 +256,78 @@ class Util {
         }
 
         return implode("\n", $lines);
+    }
+
+    /**
+     * Recursively apply a callback to every string in an array/scalar value.
+     */
+    public static function mapStrings($value, callable $callback) {
+        if (is_string($value)) {
+            return $callback($value);
+        }
+
+        if (is_array($value)) {
+            $mapped = [];
+            foreach ($value as $key => $item) {
+                $mapped[$key] = self::mapStrings($item, $callback);
+            }
+            return $mapped;
+        }
+
+        return $value;
+    }
+
+    /**
+     * Truncate nested data for logging without breaking structure.
+     */
+    public static function truncateMixed($value, int $max_string_length = 2000, int $max_items = 100) {
+        if (is_string($value)) {
+            return self::truncate($value, $max_string_length);
+        }
+
+        if (is_array($value)) {
+            $result = [];
+            $count = 0;
+            foreach ($value as $key => $item) {
+                if ($count >= $max_items) {
+                    $result['__truncated__'] = 'Additional items omitted.';
+                    break;
+                }
+                $result[$key] = self::truncateMixed($item, $max_string_length, $max_items);
+                $count++;
+            }
+            return $result;
+        }
+
+        if (is_object($value)) {
+            return self::truncateMixed((array) $value, $max_string_length, $max_items);
+        }
+
+        return $value;
+    }
+
+
+    private static function strLen(string $value): int {
+        return function_exists('mb_strlen') ? (int) mb_strlen($value) : strlen($value);
+    }
+
+    private static function subStr(string $value, int $start, ?int $length = null): string {
+        if (function_exists('mb_substr')) {
+            return $length === null ? (string) mb_substr($value, $start) : (string) mb_substr($value, $start, $length);
+        }
+
+        return $length === null ? substr($value, $start) : substr($value, $start, $length);
+    }
+
+    private static function strrPos(string $haystack, string $needle) {
+        return function_exists('mb_strrpos') ? mb_strrpos($haystack, $needle) : strrpos($haystack, $needle);
+    }
+
+    public static function sortByLengthDesc(array $values): array {
+        usort($values, static function($a, $b) {
+            return self::strLen((string) $b) <=> self::strLen((string) $a);
+        });
+
+        return $values;
     }
 }

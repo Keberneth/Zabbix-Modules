@@ -44,6 +44,22 @@
             addRow('provider');
         }
 
+        // FAQ toggle buttons
+        root.addEventListener('click', function (event) {
+            var faqBtn = event.target.closest('.ai-faq-toggle');
+            if (faqBtn) {
+                event.preventDefault();
+                var targetId = faqBtn.getAttribute('data-faq-target');
+                var box = targetId ? document.getElementById(targetId) : null;
+                if (box) {
+                    var isVisible = box.classList.contains('ai-faq-visible');
+                    box.classList.toggle('ai-faq-visible', !isVisible);
+                    faqBtn.classList.toggle('ai-faq-active', !isVisible);
+                }
+                return;
+            }
+        });
+
         // Toggle write permissions visibility based on mode selection.
         var actionsMode = document.getElementById('ai-actions-mode');
         var writePermsBlock = document.getElementById('ai-write-permissions');

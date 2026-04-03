@@ -7,9 +7,10 @@ require_once __DIR__.'/../lib/bootstrap.php';
 use CController,
     CControllerResponseData,
     Modules\AI\Lib\AuditLogger,
-    Modules\AI\Lib\Config;
+    Modules\AI\Lib\Config,
+    Modules\AI\Lib\Util;
 
-class SettingsView extends CController {
+class LogsView extends CController {
 
     public function init(): void {
         $this->disableCsrfValidation();
@@ -24,18 +25,18 @@ class SettingsView extends CController {
     }
 
     protected function doAction(): void {
-        $config = Config::sanitizeForView(Config::get());
-
-        AuditLogger::log($config, 'user_activity', [
-            'event' => 'settings.view',
-            'source' => 'ai.settings',
-            'status' => 'ok'
-        ]);
+        $config = Config::get();
+        $filters = [
+            'source' => Util::cleanString($_GET['source'] ?? '', 128),
+            'status' => Util::cleanString($_GET['status'] ?? '', 32),
+            'search' => Util::cleanString($_GET['search'] ?? '', 255)
+        ];
 
         $response = new CControllerResponseData([
-            'title' => _('AI settings'),
-            'config' => $config,
-            'log_summary' => AuditLogger::summary($config),
+            'title' => _('AI logs'),
+            'summary' => AuditLogger::summary($config),
+            'entries' => AuditLogger::listEntries($config, $filters, 200),
+            'filters' => $filters,
             'permission_note' => AuditLogger::permissionNote()
         ]);
 

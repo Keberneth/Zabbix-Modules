@@ -6,6 +6,7 @@ require_once __DIR__.'/../lib/bootstrap.php';
 
 use CController,
     CControllerResponseData,
+    Modules\AI\Lib\AuditLogger,
     Modules\AI\Lib\Config,
     Modules\AI\Lib\Util,
     Modules\AI\Lib\ZabbixApiClient;
@@ -30,7 +31,6 @@ class ChatView extends CController {
 
     protected function doAction(): void {
         $config = Config::get();
-
         $providers = [];
 
         foreach ($config['providers'] as $provider) {
@@ -47,6 +47,16 @@ class ChatView extends CController {
             ];
         }
 
+        AuditLogger::log($config, 'user_activity', [
+            'event' => 'chat.view',
+            'source' => 'ai.chat',
+            'status' => 'ok',
+            'meta' => [
+                'initial_eventid' => Util::cleanString($this->getInput('eventid', ''), 128) !== '',
+                'initial_hostname' => Util::cleanString($this->getInput('hostname', ''), 255) !== ''
+            ]
+        ]);
+
         $response = new CControllerResponseData([
             'title' => _('AI chat'),
             'providers' => $providers,
@@ -55,10 +65,12 @@ class ChatView extends CController {
             'initial_hostname' => $this->getInput('hostname', ''),
             'initial_problem_summary' => $this->getInput('problem_summary', ''),
             'has_zabbix_api' => (ZabbixApiClient::fromConfig($config) !== null),
-            'history_limit' => (int) ($config['chat']['max_history_messages'] ?? 12)
+            'history_limit' => (int) ($config['chat']['max_history_messages'] ?? 12),
+            'security_enabled' => Util::truthy($config['security']['enabled'] ?? false),
+            'logging_enabled' => Util::truthy($config['logging']['enabled'] ?? false),
+            'can_view_logs' => $this->getUserType() == USER_TYPE_SUPER_ADMIN
         ]);
 
         $this->setResponse($response);
     }
 }
-

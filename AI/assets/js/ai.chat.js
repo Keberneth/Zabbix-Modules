@@ -43,7 +43,10 @@
 
         var HISTORY_KEY = 'zbx_ai_chat_history_v1';
         var CONTEXT_KEY = 'zbx_ai_chat_context_v1';
+        var CHAT_SESSION_KEY = 'zbx_ai_chat_session_id_v1';
         var SEVERITY_LABELS = ['Not classified', 'Information', 'Warning', 'Average', 'High', 'Disaster'];
+
+        var chatSessionId = ensureChatSessionId();
 
         var allHosts = [];
         var allProblems = [];
@@ -273,6 +276,7 @@
             params.set('hostname', hostnameField.value || '');
             params.set('problem_summary', problemSummaryField.value || '');
             params.set('extra_context', extraContextField.value || '');
+            params.set('chat_session_id', chatSessionId);
             params.set(csrfFieldName, chatCsrf);
 
             fetch(sendUrl, {
@@ -292,8 +296,8 @@
                     // Handle pending write action that needs confirmation.
                     if (response.action_pending) {
                         pendingAction = {
-                            tool: response.pending_tool,
-                            params: response.pending_params,
+                            action_id: response.pending_action_id || '',
+                            tool: response.pending_tool || '',
                             provider_id: providerField ? providerField.value : ''
                         };
 
@@ -340,6 +344,8 @@
             history = [];
             sessionStorage.removeItem(HISTORY_KEY);
             sessionStorage.removeItem(CONTEXT_KEY);
+            sessionStorage.removeItem(CHAT_SESSION_KEY);
+            chatSessionId = ensureChatSessionId(true);
             if (eventidField) {
                 eventidField.value = '';
             }
@@ -396,6 +402,7 @@
                 var params = new URLSearchParams();
                 params.set('eventid', eventid);
                 params.set('message', lastAssistant);
+                params.set('chat_session_id', chatSessionId);
                 params.set(csrfFieldName, commentCsrf);
 
                 fetch(commentUrl, {
@@ -566,12 +573,12 @@
             showSideStatus('Executing Zabbix action...', false);
 
             var params = new URLSearchParams();
-            params.set('tool', pendingAction.tool);
-            params.set('params_json', JSON.stringify(pendingAction.params));
+            params.set('action_id', pendingAction.action_id || '');
             params.set('provider_id', pendingAction.provider_id || '');
+            params.set('chat_session_id', chatSessionId);
             params.set(csrfFieldName, executeCsrf);
 
-            var actionTool = pendingAction.tool;
+            var actionTool = pendingAction.tool || 'executed';
             pendingAction = null;
 
             fetch(executeUrl, {
@@ -606,6 +613,27 @@
                     messageField.focus();
                 });
         }
+    }
+
+    function generateId(prefix) {
+        return prefix + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+    }
+
+    function ensureChatSessionId(reset) {
+        var key = 'zbx_ai_chat_session_id_v1';
+
+        if (reset) {
+            sessionStorage.removeItem(key);
+        }
+
+        var current = sessionStorage.getItem(key);
+        if (current) {
+            return current;
+        }
+
+        current = generateId('chat');
+        sessionStorage.setItem(key, current);
+        return current;
     }
 
     function loadJson(key, fallback) {

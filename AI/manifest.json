@@ -3,9 +3,9 @@
   "id": "custom_ai",
   "name": "AI",
   "namespace": "AI",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Keberneth",
-  "description": "Ephemeral chat and webhook-driven AI troubleshooting assistant for Zabbix 7.",
+  "description": "Ephemeral chat and webhook-driven AI troubleshooting assistant for Zabbix 7 with local redaction state and audit logging.",
   "actions": {
     "ai.chat": {
       "class": "ChatView",
@@ -14,6 +14,10 @@
     "ai.settings": {
       "class": "SettingsView",
       "view": "ai.settings"
+    },
+    "ai.logs": {
+      "class": "LogsView",
+      "view": "ai.logs"
     },
     "ai.settings.save": {
       "class": "SettingsSave",
@@ -97,6 +101,50 @@
     "chat": {
       "max_history_messages": 12,
       "temperature": 0.2
+    },
+    "security": {
+      "enabled": true,
+      "strict_mode": true,
+      "session_ttl_hours": 12,
+      "state_path": "/tmp/zabbix-ai-module/state",
+      "apply_to": {
+        "chat": true,
+        "webhook": true,
+        "action_reads": true,
+        "action_writes": true,
+        "action_formatting": true
+      },
+      "categories": {
+        "hostnames": true,
+        "ipv4": true,
+        "ipv6": true,
+        "fqdns": true,
+        "urls": true,
+        "strip_url_query": false,
+        "os_mode": "family_only"
+      },
+      "custom_rules": []
+    },
+    "logging": {
+      "enabled": false,
+      "path": "/tmp/zabbix-ai-module/logs",
+      "archive_path": "/tmp/zabbix-ai-module/archive",
+      "archive_enabled": true,
+      "compress_archives": true,
+      "retention_days": 30,
+      "max_payload_chars": 8000,
+      "include_payloads": true,
+      "include_mapping_details": false,
+      "categories": {
+        "chat": true,
+        "webhook": true,
+        "reads": true,
+        "writes": true,
+        "translations": true,
+        "user_activity": true,
+        "settings_changes": true,
+        "errors": true
+      }
     },
     "zabbix_actions": {
       "enabled": true,
