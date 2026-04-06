@@ -4,7 +4,7 @@
   "name": "Healthcheck",
   "namespace": "Healthcheck",
   "version": "1.0.0",
-  "author": "OpenAI for user request",
+  "author": "Keberneth",
   "description": "Zabbix frontend module for scheduled health checks, heartbeat visibility, and run history.",
   "actions": {
     "healthcheck.heartbeat": {
