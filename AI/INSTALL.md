@@ -405,12 +405,3 @@ sudo semanage fcontext -a -t httpd_sys_rw_content_t '/var/lib/zabbix-ai(/.*)?'
 sudo semanage fcontext -a -t httpd_sys_rw_content_t '/var/log/zabbix-ai(/.*)?'
 sudo restorecon -Rv /var/lib/zabbix-ai /var/log/zabbix-ai
 ```
-
-## 16. New security and logging menus
-
-In **Monitoring -> AI -> Settings** you now have:
-- Security / redaction
-- Logging
-- Zabbix Actions
-
-In **Monitoring -> AI -> Logs** you can review recent JSONL audit entries.
