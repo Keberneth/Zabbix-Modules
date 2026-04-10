@@ -54,7 +54,7 @@ class ChatSend extends CController {
                 'eventid' => Util::cleanString($post['eventid'] ?? '', 128),
                 'hostname' => Util::cleanString($post['hostname'] ?? '', 255),
                 'problem_summary' => Util::cleanMultiline($post['problem_summary'] ?? '', 2000),
-                'extra_context' => Util::cleanMultiline($post['extra_context'] ?? '', 6000)
+                'extra_context' => Util::cleanMultiline($post['extra_context'] ?? '', 60000)
             ];
 
             $redactor = $this->buildRedactor($config, $chat_session_id);

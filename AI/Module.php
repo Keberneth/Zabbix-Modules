@@ -28,20 +28,21 @@ class Module extends CModule {
     public function getAssets(): array {
         $assets = parent::getAssets();
 
-        // Only inject inline problem assets on the Problems page (problem.view)
-        // and only if the user has at least regular Zabbix user access.
-        $action = $this->getCurrentAction();
-
-        if ($action !== 'problem.view') {
-            return $assets;
-        }
-
         if (!$this->userHasModuleAccess()) {
             return $assets;
         }
 
-        $assets['js'][] = 'ai.problem.inline.js';
-        $assets['css'][] = 'ai.problem.inline.css';
+        $action = $this->getCurrentAction();
+
+        // Inject inline problem assets on the Problems page.
+        if ($action === 'problem.view') {
+            $assets['js'][] = 'ai.problem.inline.js';
+            $assets['css'][] = 'ai.problem.inline.css';
+        }
+
+        // ai.config.inline.js/css are loaded globally via manifest.json
+        // so they work on all pages (including history.php, host_discovery.php,
+        // and other direct PHP scripts that bypass zabbix.php routing).
 
         return $assets;
     }

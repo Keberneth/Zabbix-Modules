@@ -146,7 +146,7 @@ class PromptBuilder {
         }
 
         if (!empty($context['extra_context'])) {
-            $lines[] = "Additional operator context:\n".Util::cleanMultiline($context['extra_context'], 6000);
+            $lines[] = "Additional operator context:\n".Util::cleanMultiline($context['extra_context'], 60000);
         }
 
         return trim(implode("\n\n", $lines));

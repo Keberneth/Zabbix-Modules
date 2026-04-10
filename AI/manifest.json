@@ -50,15 +50,21 @@
     "ai.problem.context": {
       "class": "ProblemContext",
       "layout": "layout.json"
+    },
+    "ai.config.context": {
+      "class": "ConfigContext",
+      "layout": "layout.json"
     }
   },
   "assets": {
     "css": [
-      "ai.css"
+      "ai.css",
+      "ai.config.inline.css"
     ],
     "js": [
       "ai.chat.js",
-      "ai.settings.js"
+      "ai.settings.js",
+      "ai.config.inline.js"
     ]
   },
   "config": {
