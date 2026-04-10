@@ -4,13 +4,10 @@
 
 Use the folder name exactly as `AI`.
 
-Typical package installs:
-
-```bash
-sudo mkdir -p /usr/share/zabbix/modules
-sudo cp -a AI /usr/share/zabbix/modules/
-```
-
+Download the AI folder and content from the git to the zabbix module folder
+<br>
+Usually: /usr/share/zabbix/modules/
+<br>
 Some distributions use a different frontend root. The key requirement is that `manifest.json` is directly inside the module directory:
 
 ```text
