@@ -24,6 +24,7 @@
         var extraContextField = document.getElementById('ai-extra-context');
         var clearButton = document.getElementById('ai-clear-session');
         var postButton = document.getElementById('ai-post-last-answer');
+        var historyButton = document.getElementById('ai-include-history');
         var sideStatus = document.getElementById('ai-side-status');
 
         var sendUrl = root.dataset.sendUrl;
@@ -37,6 +38,9 @@
         var historyLimit = parseInt(root.dataset.historyLimit || '12', 10);
         var hasZabbixApi = root.dataset.hasZabbixApi === '1';
         var csrfFieldName = root.dataset.csrfFieldName || '_csrf_token';
+        var contextUrl = root.dataset.contextUrl || '';
+        var historyPeriod = parseInt(root.dataset.historyPeriod || '24', 10);
+        var historyMaxRows = parseInt(root.dataset.historyMaxRows || '50', 10);
 
         // Tracks a pending write action awaiting user confirmation.
         var pendingAction = null;
@@ -44,7 +48,11 @@
         var HISTORY_KEY = 'zbx_ai_chat_history_v1';
         var CONTEXT_KEY = 'zbx_ai_chat_context_v1';
         var CHAT_SESSION_KEY = 'zbx_ai_chat_session_id_v1';
+        var TRANSFER_KEY = 'zbx_ai_chat_transfer';
         var SEVERITY_LABELS = ['Not classified', 'Information', 'Warning', 'Average', 'High', 'Disaster'];
+
+        // Check for state transferred from the problem drawer (via localStorage).
+        importTransferredState();
 
         var chatSessionId = ensureChatSessionId();
 
@@ -430,6 +438,76 @@
             });
         }
 
+        if (historyButton) {
+            historyButton.addEventListener('click', function () {
+                if (!hasZabbixApi || !contextUrl) {
+                    showSideStatus('Configure Zabbix API settings first.', true);
+                    return;
+                }
+
+                var eventid = (eventidField.value || '').trim();
+
+                if (!eventid) {
+                    showSideStatus('Select an event/problem first to include its item history.', true);
+                    return;
+                }
+
+                historyButton.disabled = true;
+                showSideStatus('Fetching item history...', false);
+
+                var url = contextUrl;
+                var sep = url.indexOf('?') !== -1 ? '&' : '?';
+                url += sep + 'eventid=' + encodeURIComponent(eventid);
+                url += '&include_history=1';
+                url += '&history_limit=' + encodeURIComponent(historyMaxRows);
+
+                fetch(url, { method: 'GET', credentials: 'same-origin' })
+                    .then(handleJsonResponse)
+                    .then(function (response) {
+                        if (!response.ok) {
+                            throw new Error(response.error || 'Failed to fetch item history.');
+                        }
+
+                        var items = response.item_history || [];
+
+                        if (!items.length) {
+                            showSideStatus('No item history data available for this event.', true);
+                            historyButton.disabled = false;
+                            return;
+                        }
+
+                        var lines = ['Here is the recent item history/trend data for the related items of this problem. Please analyze the trends and incorporate this data into your assessment:\n'];
+
+                        for (var i = 0; i < items.length; i++) {
+                            var item = items[i];
+                            lines.push('## ' + (item.label || 'Unknown item'));
+                            for (var j = 0; j < (item.values || []).length; j++) {
+                                lines.push('  ' + item.values[j].time + '  \u2192  ' + item.values[j].value);
+                            }
+                            lines.push('');
+                        }
+
+                        var historyMessage = lines.join('\n');
+
+                        // Insert into message field so user can review before sending,
+                        // or auto-send if the field was empty.
+                        if ((messageField.value || '').trim() === '') {
+                            messageField.value = historyMessage;
+                            showSideStatus('Item history loaded (' + items.length + ' item(s)). Review and click Send.', false);
+                        }
+                        else {
+                            messageField.value = messageField.value + '\n\n' + historyMessage;
+                            showSideStatus('Item history appended (' + items.length + ' item(s)).', false);
+                        }
+
+                        historyButton.disabled = false;
+                    })
+                    .catch(function (error) {
+                        showSideStatus(error.message, true);
+                        historyButton.disabled = false;
+                    });
+            });
+        }
 
         function setBusy(isBusy) {
             sendButton.disabled = isBusy;
@@ -634,6 +712,48 @@
         current = generateId('chat');
         sessionStorage.setItem(key, current);
         return current;
+    }
+
+    /**
+     * Import state transferred from the problem drawer via localStorage.
+     * The drawer writes a temporary entry; we move it into sessionStorage
+     * and delete the localStorage key so it's single-use.
+     */
+    function importTransferredState() {
+        var TRANSFER_KEY = 'zbx_ai_chat_transfer';
+
+        try {
+            var raw = localStorage.getItem(TRANSFER_KEY);
+            if (!raw) return;
+
+            var data = JSON.parse(raw);
+
+            // Only import if the transfer is recent (< 30 seconds).
+            if (!data || !data.timestamp || (Date.now() - data.timestamp) > 30000) {
+                localStorage.removeItem(TRANSFER_KEY);
+                return;
+            }
+
+            // Write to sessionStorage using the chat page's keys.
+            if (data.history && Array.isArray(data.history) && data.history.length > 0) {
+                sessionStorage.setItem('zbx_ai_chat_history_v1', JSON.stringify(data.history));
+            }
+
+            if (data.sessionId) {
+                sessionStorage.setItem('zbx_ai_chat_session_id_v1', data.sessionId);
+            }
+
+            if (data.context && typeof data.context === 'object') {
+                sessionStorage.setItem('zbx_ai_chat_context_v1', JSON.stringify(data.context));
+            }
+
+            // Clean up — single use.
+            localStorage.removeItem(TRANSFER_KEY);
+        }
+        catch (e) {
+            // Ignore errors — graceful fallback to empty chat.
+            try { localStorage.removeItem(TRANSFER_KEY); } catch (e2) {}
+        }
     }
 
     function loadJson(key, fallback) {

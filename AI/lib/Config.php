@@ -67,7 +67,12 @@ class Config {
             ],
             'chat' => [
                 'max_history_messages' => 12,
-                'temperature' => 0.2
+                'temperature' => 0.2,
+                'item_history_period_hours' => 24,
+                'item_history_max_rows' => 50
+            ],
+            'problem_inline' => [
+                'auto_analyze' => true
             ],
             'security' => [
                 'enabled' => true,
@@ -123,7 +128,8 @@ class Config {
                     'items' => false,
                     'triggers' => false,
                     'users' => false,
-                    'problems' => false
+                    'problems' => false,
+                    'hostgroups' => false
                 ],
                 'require_super_admin_for_write' => true
             ]
@@ -247,7 +253,9 @@ class Config {
                 'headers_json' => Util::cleanMultiline($provider['headers_json'] ?? '', 10000),
                 'verify_peer' => Util::truthy($provider['verify_peer'] ?? false),
                 'timeout' => Util::cleanInt($provider['timeout'] ?? 60, 60, 5, 300),
-                'enabled' => Util::truthy($provider['enabled'] ?? false)
+                'enabled' => Util::truthy($provider['enabled'] ?? false),
+                'temperature' => Util::cleanFloat($provider['temperature'] ?? '', -1, 0, 2),
+                'max_tokens' => Util::cleanInt($provider['max_tokens'] ?? 0, 0, 0, 128000)
             ];
         }
 
@@ -373,7 +381,13 @@ class Config {
 
         $new_config['chat'] = [
             'max_history_messages' => Util::cleanInt($post['chat']['max_history_messages'] ?? 12, 12, 0, 50),
-            'temperature' => Util::cleanFloat($post['chat']['temperature'] ?? 0.2, 0.2, 0, 2)
+            'temperature' => Util::cleanFloat($post['chat']['temperature'] ?? 0.2, 0.2, 0, 2),
+            'item_history_period_hours' => Util::cleanInt($post['chat']['item_history_period_hours'] ?? 24, 24, 1, 720),
+            'item_history_max_rows' => Util::cleanInt($post['chat']['item_history_max_rows'] ?? 50, 50, 5, 500)
+        ];
+
+        $new_config['problem_inline'] = [
+            'auto_analyze' => Util::truthy($post['problem_inline']['auto_analyze'] ?? true)
         ];
 
         $security = $post['security'] ?? [];
@@ -437,7 +451,8 @@ class Config {
                 'items' => Util::truthy($za['write_permissions']['items'] ?? false),
                 'triggers' => Util::truthy($za['write_permissions']['triggers'] ?? false),
                 'users' => Util::truthy($za['write_permissions']['users'] ?? false),
-                'problems' => Util::truthy($za['write_permissions']['problems'] ?? false)
+                'problems' => Util::truthy($za['write_permissions']['problems'] ?? false),
+                'hostgroups' => Util::truthy($za['write_permissions']['hostgroups'] ?? false)
             ],
             'require_super_admin_for_write' => Util::truthy($za['require_super_admin_for_write'] ?? true)
         ];

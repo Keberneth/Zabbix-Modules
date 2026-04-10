@@ -154,6 +154,24 @@ class ZabbixActionExecutor {
                 ],
                 'rw' => 'write',
                 'category' => 'problems'
+            ],
+            'add_hosts_to_group' => [
+                'description' => 'Add one or more hosts to a host group. If the host group does not exist, you can create it automatically by setting create_group to true. Useful for organizing hosts (e.g. "add all MSSQL hosts to a Microsoft SQL Server group"). First use get_host_info or get_triggers with a template filter to identify the relevant hosts, then use this tool to add them.',
+                'params' => [
+                    'hostnames' => '(array of strings, required) List of technical hostnames to add to the group.',
+                    'group_name' => '(string, required) The name of the host group.',
+                    'create_group' => '(bool, optional) If true, create the host group if it does not exist. Default false — will ask for confirmation first if group is missing.'
+                ],
+                'rw' => 'write',
+                'category' => 'hostgroups'
+            ],
+            'create_host_group' => [
+                'description' => 'Create a new host group in Zabbix.',
+                'params' => [
+                    'name' => '(string, required) The name for the new host group.'
+                ],
+                'rw' => 'write',
+                'category' => 'hostgroups'
             ]
         ];
     }
@@ -201,7 +219,7 @@ class ZabbixActionExecutor {
         $lines[] = 'You have access to Zabbix tools. When you need to query or modify Zabbix, respond with ONLY a JSON tool call in this exact format (no other text):';
         $lines[] = '{"tool": "tool_name", "params": {"param1": "value1"}}';
         $lines[] = '';
-        $lines[] = 'For WRITE actions (create_maintenance, update_trigger, update_item, create_user, acknowledge_problem), you MUST first describe what you will do and ask for confirmation. Respond with:';
+        $lines[] = 'For WRITE actions (create_maintenance, update_trigger, update_item, create_user, acknowledge_problem, add_hosts_to_group, create_host_group), you MUST first describe what you will do and ask for confirmation. Respond with:';
         $lines[] = '{"tool": "tool_name", "params": {...}, "confirm": true, "confirm_message": "I will [describe exactly what will be changed, including which field]. Should I proceed?"}';
         $lines[] = '';
         $lines[] = 'For update_trigger, ALWAYS specify in the confirm_message which Zabbix field you will change (e.g. "comments", "expression", "priority") and what the new value will be.';
@@ -288,6 +306,53 @@ class ZabbixActionExecutor {
     }
 
     /**
+     * Strip all JSON tool call blocks from a response string.
+     *
+     * Removes any {"tool":"...",...} blocks (including markdown-fenced ones)
+     * so that raw tool JSON is never shown to the user.
+     */
+    public static function stripToolCalls(string $response): string {
+        // Remove markdown-fenced tool calls.
+        $cleaned = preg_replace('/```(?:json)?\s*\{"tool"\s*:[\s\S]*?\}\s*```/', '', $response);
+
+        // Remove bare {"tool":...} blocks.
+        $result = '';
+        $len = strlen($cleaned);
+        $i = 0;
+
+        while ($i < $len) {
+            $next = strpos($cleaned, '{"tool"', $i);
+
+            if ($next === false) {
+                $result .= substr($cleaned, $i);
+                break;
+            }
+
+            $result .= substr($cleaned, $i, $next - $i);
+
+            // Find the matching closing brace.
+            $depth = 0;
+            $end = $next;
+
+            for ($j = $next; $j < $len; $j++) {
+                if ($cleaned[$j] === '{') $depth++;
+                if ($cleaned[$j] === '}') $depth--;
+                if ($depth === 0) {
+                    $end = $j + 1;
+                    break;
+                }
+            }
+
+            $i = $end;
+        }
+
+        // Clean up excessive whitespace left behind.
+        $result = preg_replace('/\n{3,}/', "\n\n", $result);
+
+        return trim($result);
+    }
+
+    /**
      * Check if a tool is a write action and return its category.
      * Returns '' for read tools, or the category name for write tools.
      */
@@ -342,6 +407,12 @@ class ZabbixActionExecutor {
 
             case 'acknowledge_problem':
                 return self::executeAcknowledgeProblem($params, $zabbix_api);
+
+            case 'add_hosts_to_group':
+                return self::executeAddHostsToGroup($params, $zabbix_api);
+
+            case 'create_host_group':
+                return self::executeCreateHostGroup($params, $zabbix_api);
 
             default:
                 throw new RuntimeException('Unknown tool: '.$tool_name);
@@ -779,5 +850,60 @@ class ZabbixActionExecutor {
         if ($action & 8) $actions_taken[] = 'severity changed';
 
         return 'Event '.$eventid.' updated: '.implode(', ', $actions_taken ?: ['action '.$action]).'.';
+    }
+
+    private static function executeAddHostsToGroup(array $params, ZabbixApiClient $api): string {
+        $hostnames = (array) ($params['hostnames'] ?? []);
+
+        if (!$hostnames) {
+            return 'Error: hostnames parameter is required (array of hostnames).';
+        }
+
+        $group_name = trim((string) ($params['group_name'] ?? ''));
+
+        if ($group_name === '') {
+            return 'Error: group_name parameter is required.';
+        }
+
+        $create_group = !empty($params['create_group']);
+
+        $result = $api->addHostsToGroup($hostnames, $group_name, $create_group);
+
+        $lines = [];
+
+        if ($result['group_created']) {
+            $lines[] = 'Host group "'.$result['group_name'].'" created (ID: '.$result['groupid'].').';
+        }
+        else {
+            $lines[] = 'Using existing host group "'.$result['group_name'].'" (ID: '.$result['groupid'].').';
+        }
+
+        $lines[] = 'Hosts added: '.implode(', ', $result['hosts_added']);
+
+        if ($result['hosts_not_found']) {
+            $lines[] = 'Hosts not found (skipped): '.implode(', ', $result['hosts_not_found']);
+        }
+
+        return implode("\n", $lines);
+    }
+
+    private static function executeCreateHostGroup(array $params, ZabbixApiClient $api): string {
+        $name = trim((string) ($params['name'] ?? ''));
+
+        if ($name === '') {
+            return 'Error: name parameter is required.';
+        }
+
+        // Check if it already exists.
+        $existing = $api->getHostGroupByName($name);
+
+        if ($existing !== null) {
+            return 'Host group "'.$name.'" already exists (ID: '.$existing['groupid'].').';
+        }
+
+        $result = $api->createHostGroup($name);
+        $groupid = $result['groupids'][0] ?? 'unknown';
+
+        return 'Host group "'.$name.'" created successfully (ID: '.$groupid.').';
     }
 }

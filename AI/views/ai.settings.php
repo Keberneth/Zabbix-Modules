@@ -57,7 +57,7 @@ $render_provider_row = static function(array $provider = []) use ($h): string {
             </div>
             <div class="ai-span-3">
                 <label class="ai-label"><?= $h(_('Endpoint')) ?></label>
-                <input class="ai-input" type="text" name="providers[<?= $h($id) ?>][endpoint]" value="<?= $h($provider['endpoint'] ?? '') ?>" placeholder="https://api.openai.com/v1 or http://localhost:11434/api/chat">
+                <input class="ai-input" type="text" name="providers[<?= $h($id) ?>][endpoint]" value="<?= $h($provider['endpoint'] ?? '') ?>" placeholder="Leave blank for default (OpenAI: api.openai.com, Ollama: localhost:11434, Anthropic: api.anthropic.com)">
             </div>
             <div>
                 <label class="ai-label"><?= $h(_('Model')) ?></label>
@@ -66,6 +66,16 @@ $render_provider_row = static function(array $provider = []) use ($h): string {
             <div>
                 <label class="ai-label"><?= $h(_('Timeout')) ?></label>
                 <input class="ai-input" type="number" min="5" max="300" name="providers[<?= $h($id) ?>][timeout]" value="<?= $h($provider['timeout'] ?? 60) ?>">
+            </div>
+            <div>
+                <label class="ai-label"><?= $h(_('Temperature')) ?></label>
+                <input class="ai-input" type="number" min="0" max="2" step="0.1" name="providers[<?= $h($id) ?>][temperature]" value="<?= $h(($provider['temperature'] ?? -1) >= 0 ? $provider['temperature'] : '') ?>" placeholder="Global default">
+                <span class="ai-muted"><?= $h(_('Leave blank to use global chat temperature.')) ?></span>
+            </div>
+            <div>
+                <label class="ai-label"><?= $h(_('Max tokens')) ?></label>
+                <input class="ai-input" type="number" min="0" max="128000" step="1" name="providers[<?= $h($id) ?>][max_tokens]" value="<?= $h(($provider['max_tokens'] ?? 0) > 0 ? $provider['max_tokens'] : '') ?>" placeholder="Provider default">
+                <span class="ai-muted"><?= $h(_('Leave blank for provider default (4096 for Anthropic).')) ?></span>
             </div>
             <div>
                 <label class="ai-label"><?= $h(_('Verify TLS')) ?></label>
@@ -475,7 +485,9 @@ ob_start();
                 <p><strong>What is this?</strong> Controls for the chat page behavior.</p>
                 <ul>
                     <li><strong>Max history messages</strong> &mdash; How many previous messages are sent to the AI for context. Higher = more context but slower and more tokens. Default 12.</li>
-                    <li><strong>Temperature</strong> &mdash; Controls AI randomness. 0 = deterministic, 1 = creative, 2 = very random. Default 0.2 (focused and consistent).</li>
+                    <li><strong>Temperature</strong> &mdash; Controls AI randomness. 0 = deterministic, 1 = creative, 2 = very random. Default 0.2 (focused and consistent). Can be overridden per provider.</li>
+                    <li><strong>Item history period</strong> &mdash; How far back to fetch item history when the "Include history" button is clicked. Default 24 hours.</li>
+                    <li><strong>Item history max rows</strong> &mdash; Maximum number of data points per item to include. Default 50.</li>
                 </ul>
                 <p>Chat history is stored in your browser only (sessionStorage). Nothing is saved server-side.</p>
             </div>
@@ -487,6 +499,35 @@ ob_start();
                 <div>
                     <label class="ai-label"><?= $h(_('Temperature')) ?></label>
                     <input class="ai-input" type="number" min="0" max="2" step="0.1" name="chat[temperature]" value="<?= $h($config['chat']['temperature'] ?? 0.2) ?>">
+                </div>
+                <div>
+                    <label class="ai-label"><?= $h(_('Item history period (hours)')) ?></label>
+                    <input class="ai-input" type="number" min="1" max="720" name="chat[item_history_period_hours]" value="<?= $h($config['chat']['item_history_period_hours'] ?? 24) ?>">
+                    <span class="ai-muted"><?= $h(_('How far back to fetch when "Include history" is clicked.')) ?></span>
+                </div>
+                <div>
+                    <label class="ai-label"><?= $h(_('Item history max rows')) ?></label>
+                    <input class="ai-input" type="number" min="5" max="500" name="chat[item_history_max_rows]" value="<?= $h($config['chat']['item_history_max_rows'] ?? 50) ?>">
+                    <span class="ai-muted"><?= $h(_('Max data points per item.')) ?></span>
+                </div>
+            </div>
+        </section>
+
+        <section class="ai-card">
+            <div class="ai-section-header">
+                <h2><?= $h(_('Problem page integration')) ?></h2>
+                <button type="button" class="ai-faq-toggle" data-faq-target="faq-problem-inline" title="<?= $h(_('Help')) ?>">?</button>
+            </div>
+            <div id="faq-problem-inline" class="ai-faq-box">
+                <p><strong>What is this?</strong> Controls the AI button that appears next to problems on the Problems page.</p>
+                <ul>
+                    <li><strong>Auto-analyze</strong> &mdash; When enabled, the AI drawer automatically sends a starter analysis prompt when opened. Disable this if you prefer to type your own first message.</li>
+                </ul>
+            </div>
+            <div class="ai-repeat-grid ai-settings-grid">
+                <div>
+                    <label class="ai-label"><?= $h(_('Auto-analyze on open')) ?></label>
+                    <label class="ai-checkbox"><input type="checkbox" name="problem_inline[auto_analyze]" value="1" <?= !empty($config['problem_inline']['auto_analyze']) ? 'checked' : '' ?>> <?= $h(_('Automatically start AI analysis when drawer opens')) ?></label>
                 </div>
             </div>
         </section>
@@ -727,7 +768,7 @@ restorecon -Rv /var/log/zabbix-ai</pre>
             <div id="ai-write-permissions" style="<?= (($config['zabbix_actions']['mode'] ?? 'read') === 'readwrite') ? '' : 'display:none;' ?>">
                 <h3><?= $h(_('Write permissions')) ?></h3>
                 <div class="ai-check-grid">
-                    <?php foreach (['maintenance', 'items', 'triggers', 'users', 'problems'] as $perm): ?>
+                    <?php foreach (['maintenance', 'items', 'triggers', 'users', 'problems', 'hostgroups'] as $perm): ?>
                         <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[write_permissions][<?= $h($perm) ?>]" value="1" <?= !empty($config['zabbix_actions']['write_permissions'][$perm]) ? 'checked' : '' ?>> <?= $h(ucfirst($perm)) ?></label>
                     <?php endforeach; ?>
                 </div>

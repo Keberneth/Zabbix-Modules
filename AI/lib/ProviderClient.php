@@ -9,6 +9,12 @@ class ProviderClient {
     public static function chat(array $provider, array $messages, float $temperature = 0.2): string {
         $type = strtolower(trim((string) ($provider['type'] ?? 'openai_compatible')));
 
+        // Per-provider temperature override: -1 or unset means use the global default.
+        $provider_temp = (float) ($provider['temperature'] ?? -1);
+        if ($provider_temp >= 0) {
+            $temperature = $provider_temp;
+        }
+
         switch ($type) {
             case 'ollama':
                 return self::chatOllama($provider, $messages, $temperature);
@@ -68,7 +74,7 @@ class ProviderClient {
         $endpoint = trim((string) ($provider['endpoint'] ?? ''));
 
         if ($endpoint === '') {
-            throw new RuntimeException('The selected provider has no endpoint configured.');
+            $endpoint = 'https://api.openai.com/v1/chat/completions';
         }
 
         if (!preg_match('#/chat/completions/?$#', $endpoint)) {
@@ -80,6 +86,11 @@ class ProviderClient {
             'messages' => $messages,
             'temperature' => $temperature
         ];
+
+        $max_tokens = (int) ($provider['max_tokens'] ?? 0);
+        if ($max_tokens > 0) {
+            $payload['max_tokens'] = $max_tokens;
+        }
 
         if ($payload['model'] === '') {
             throw new RuntimeException('The selected provider has no model configured.');
@@ -156,9 +167,14 @@ class ProviderClient {
             throw new RuntimeException('No user messages to send to Anthropic.');
         }
 
+        $max_tokens = (int) ($provider['max_tokens'] ?? 0);
+        if ($max_tokens <= 0) {
+            $max_tokens = 4096;
+        }
+
         $payload = [
             'model' => $model,
-            'max_tokens' => (int) ($provider['max_tokens'] ?? 4096),
+            'max_tokens' => $max_tokens,
             'temperature' => $temperature,
             'messages' => $api_messages
         ];

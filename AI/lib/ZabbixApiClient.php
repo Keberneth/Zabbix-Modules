@@ -589,6 +589,265 @@ class ZabbixApiClient {
         return $this->call('trigger.get', $params);
     }
 
+    /**
+     * Get recent history values for an item.
+     *
+     * Returns the last $limit values with timestamps. Tries numeric history
+     * first (history=0), then falls back to text/string types.
+     */
+    public function getItemHistory(string $itemid, int $limit = 50, int $history_type = 0, int $period_hours = 0): array {
+        $params = [
+            'itemids' => [$itemid],
+            'output' => ['clock', 'value', 'ns'],
+            'sortfield' => 'clock',
+            'sortorder' => 'DESC',
+            'limit' => min($limit, 500),
+            'history' => $history_type
+        ];
+
+        if ($period_hours > 0) {
+            $params['time_from'] = time() - ($period_hours * 3600);
+        }
+
+        $result = $this->call('history.get', $params);
+
+        // If numeric float returned nothing, try unsigned int, then text.
+        if (!$result && $history_type === 0) {
+            $result = $this->getItemHistory($itemid, $limit, 3, $period_hours); // unsigned
+            if (!$result) {
+                $result = $this->getItemHistory($itemid, $limit, 1, $period_hours); // string
+                if (!$result) {
+                    $result = $this->getItemHistory($itemid, $limit, 4, $period_hours); // text
+                }
+            }
+            return $result;
+        }
+
+        return array_reverse($result); // oldest first
+    }
+
+    /**
+     * Get history for all items related to a problem event.
+     *
+     * Returns an array keyed by item name with recent values.
+     */
+    public function getProblemItemHistory(string $eventid, int $limit_per_item = 30, int $period_hours = 0): array {
+        $context = $this->getProblemContext($eventid);
+
+        if ($context === null || empty($context['items'])) {
+            return [];
+        }
+
+        $result = [];
+
+        foreach ($context['items'] as $item) {
+            $itemid = $item['itemid'] ?? '';
+            if ($itemid === '') {
+                continue;
+            }
+
+            $history = $this->getItemHistory($itemid, $limit_per_item, 0, $period_hours);
+            $label = ($item['name'] ?? 'Item '.$itemid).' ('.$item['key_'].')';
+
+            $values = [];
+            foreach ($history as $h) {
+                $values[] = [
+                    'time' => date('Y-m-d H:i:s', (int) ($h['clock'] ?? 0)),
+                    'value' => $h['value'] ?? ''
+                ];
+            }
+
+            if ($values) {
+                $result[] = [
+                    'item_name' => $item['name'] ?? '',
+                    'item_key' => $item['key_'] ?? '',
+                    'label' => $label,
+                    'values' => $values
+                ];
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Resolve full problem context for an event: trigger, items, hosts, templates.
+     *
+     * Returns a structured array suitable for AI enrichment. All data is
+     * authoritative (fetched from the API, not the browser DOM).
+     */
+    public function getProblemContext(string $eventid): ?array {
+        $problems = $this->call('problem.get', [
+            'eventids' => [$eventid],
+            'output' => ['eventid', 'name', 'severity', 'clock', 'objectid'],
+            'source' => 0,
+            'object' => 0,
+            'recent' => true,
+            'limit' => 1
+        ]);
+
+        if (!$problems) {
+            return null;
+        }
+
+        $problem = $problems[0];
+        $triggerid = $problem['objectid'] ?? '';
+
+        $result = [
+            'eventid' => $problem['eventid'],
+            'problem_summary' => $problem['name'] ?? '',
+            'severity' => $problem['severity'] ?? '0',
+            'hostname' => '',
+            'triggerid' => $triggerid,
+            'trigger_name' => '',
+            'trigger_expression' => '',
+            'trigger_comments' => '',
+            'items' => [],
+            'template_names' => []
+        ];
+
+        if ($triggerid === '') {
+            return $result;
+        }
+
+        $triggers = $this->call('trigger.get', [
+            'triggerids' => [$triggerid],
+            'output' => ['triggerid', 'description', 'expression', 'comments', 'priority', 'status', 'value'],
+            'selectHosts' => ['hostid', 'host', 'name'],
+            'selectItems' => ['itemid', 'name', 'key_', 'description'],
+            'expandDescription' => true,
+            'expandExpression' => true,
+            'limit' => 1
+        ]);
+
+        if ($triggers) {
+            $trigger = $triggers[0];
+            $result['trigger_name'] = $trigger['description'] ?? '';
+            $result['trigger_expression'] = $trigger['expression'] ?? '';
+            $result['trigger_comments'] = $trigger['comments'] ?? '';
+
+            $hosts = $trigger['hosts'] ?? [];
+            if ($hosts) {
+                $result['hostname'] = $hosts[0]['host'] ?? '';
+            }
+
+            foreach ($trigger['items'] ?? [] as $item) {
+                $result['items'][] = [
+                    'itemid' => $item['itemid'] ?? '',
+                    'name' => $item['name'] ?? '',
+                    'key_' => $item['key_'] ?? '',
+                    'description' => $item['description'] ?? ''
+                ];
+            }
+        }
+
+        $templates = $this->call('template.get', [
+            'triggerids' => [$triggerid],
+            'output' => ['templateid', 'name']
+        ]);
+
+        foreach ($templates as $tpl) {
+            $result['template_names'][] = $tpl['name'] ?? '';
+        }
+
+        return $result;
+    }
+
+    /**
+     * Get a host group by name. Returns the group or null.
+     */
+    public function getHostGroupByName(string $name): ?array {
+        $result = $this->call('hostgroup.get', [
+            'output' => ['groupid', 'name'],
+            'filter' => ['name' => [$name]]
+        ]);
+
+        return $result[0] ?? null;
+    }
+
+    /**
+     * Create a host group.
+     */
+    public function createHostGroup(string $name): array {
+        return $this->call('hostgroup.create', [
+            'name' => $name
+        ]);
+    }
+
+    /**
+     * Add hosts to a host group. Creates the group if it does not exist.
+     *
+     * @param string[] $hostnames  Technical hostnames to add.
+     * @param string   $group_name Host group name.
+     * @param bool     $create_if_missing  Create group if it doesn't exist.
+     *
+     * @return array   Result with groupid, hosts added, and whether group was created.
+     */
+    public function addHostsToGroup(array $hostnames, string $group_name, bool $create_if_missing = false): array {
+        $group = $this->getHostGroupByName($group_name);
+        $created = false;
+
+        if ($group === null) {
+            if (!$create_if_missing) {
+                throw new RuntimeException(
+                    'Host group "'.$group_name.'" does not exist. '
+                    .'Set create_group=true to create it automatically.'
+                );
+            }
+
+            $result = $this->createHostGroup($group_name);
+            $groupid = $result['groupids'][0] ?? null;
+
+            if ($groupid === null) {
+                throw new RuntimeException('Failed to create host group "'.$group_name.'".');
+            }
+
+            $created = true;
+        }
+        else {
+            $groupid = $group['groupid'];
+        }
+
+        // Resolve host IDs.
+        $host_ids = [];
+        $resolved = [];
+        $not_found = [];
+
+        foreach ($hostnames as $hostname) {
+            $hostname = trim((string) $hostname);
+            if ($hostname === '') {
+                continue;
+            }
+
+            $hid = $this->getHostIdByName($hostname);
+            if ($hid !== null) {
+                $host_ids[] = ['hostid' => $hid];
+                $resolved[] = $hostname;
+            }
+            else {
+                $not_found[] = $hostname;
+            }
+        }
+
+        if (!$host_ids) {
+            throw new RuntimeException('None of the specified hosts were found.');
+        }
+
+        // Zabbix API: massadd to add hosts to the group without removing existing members.
+        $this->call('hostgroup.massadd', [
+            'groups' => [['groupid' => $groupid]],
+            'hosts' => $host_ids
+        ]);
+
+        return [
+            'groupid' => $groupid,
+            'group_name' => $group_name,
+            'group_created' => $created,
+            'hosts_added' => $resolved,
+            'hosts_not_found' => $not_found
+        ];
+    }
+
     public function addProblemComment(string $eventid, string $message, int $action = 4, int $chunk_size = 1900): array {
         $chunks = Util::chunkText($message, max(200, $chunk_size - 32));
         $count = count($chunks);

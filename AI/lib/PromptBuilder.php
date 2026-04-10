@@ -100,6 +100,51 @@ class PromptBuilder {
             $lines[] = "NetBox / CMDB context:\n".$context['netbox_info'];
         }
 
+        if (!empty($context['problem_context']) && is_array($context['problem_context'])) {
+            $pc = $context['problem_context'];
+
+            if (!empty($pc['trigger_name'])) {
+                $lines[] = 'Trigger name: '.Util::cleanString($pc['trigger_name'], 2000);
+            }
+
+            if (!empty($pc['trigger_expression'])) {
+                $lines[] = 'Trigger expression: '.Util::cleanString($pc['trigger_expression'], 4000);
+            }
+
+            if (!empty($pc['trigger_comments'])) {
+                $lines[] = 'Trigger description/comments: '.Util::cleanMultiline($pc['trigger_comments'], 4000);
+            }
+
+            if (!empty($pc['items']) && is_array($pc['items'])) {
+                $item_lines = [];
+                foreach ($pc['items'] as $item) {
+                    $parts = [];
+                    if (!empty($item['name'])) {
+                        $parts[] = 'name: '.$item['name'];
+                    }
+                    if (!empty($item['key_'])) {
+                        $parts[] = 'key: '.$item['key_'];
+                    }
+                    if (!empty($item['description'])) {
+                        $parts[] = 'description: '.$item['description'];
+                    }
+                    if ($parts) {
+                        $item_lines[] = '  - '.implode(', ', $parts);
+                    }
+                }
+                if ($item_lines) {
+                    $lines[] = "Related items:\n".implode("\n", $item_lines);
+                }
+            }
+
+            if (!empty($pc['template_names']) && is_array($pc['template_names'])) {
+                $tpl_names = array_filter($pc['template_names'], function($n) { return trim((string) $n) !== ''; });
+                if ($tpl_names) {
+                    $lines[] = 'Template(s): '.implode(', ', $tpl_names);
+                }
+            }
+        }
+
         if (!empty($context['extra_context'])) {
             $lines[] = "Additional operator context:\n".Util::cleanMultiline($context['extra_context'], 6000);
         }

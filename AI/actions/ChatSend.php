@@ -64,6 +64,27 @@ class ChatSend extends CController {
                 $redactor->loadZabbixHostInventory($zabbix_api);
             }
 
+            if ($context['eventid'] !== '' && $zabbix_api !== null) {
+                try {
+                    $problem_context = $zabbix_api->getProblemContext($context['eventid']);
+
+                    if ($problem_context !== null) {
+                        $context['problem_context'] = $problem_context;
+
+                        if ($context['hostname'] === '' && !empty($problem_context['hostname'])) {
+                            $context['hostname'] = $problem_context['hostname'];
+                        }
+
+                        if ($context['problem_summary'] === '' && !empty($problem_context['problem_summary'])) {
+                            $context['problem_summary'] = $problem_context['problem_summary'];
+                        }
+                    }
+                }
+                catch (\Throwable $e) {
+                    // Problem context enrichment is best-effort; do not break chat.
+                }
+            }
+
             if ($context['hostname'] !== '' && $zabbix_api !== null) {
                 $context['os_type'] = $zabbix_api->getOsTypeByHostname($context['hostname']);
             }
@@ -267,7 +288,7 @@ class ChatSend extends CController {
                     ];
                     $format_messages[] = [
                         'role' => 'user',
-                        'content' => "Tool result for ".$tool_name.":\n\n".$tool_result_masked."\n\nPlease format this result for the user in a clear, readable way using Markdown. Do not output a JSON tool call."
+                        'content' => "Tool result for ".$tool_name.":\n\n".$tool_result_masked."\n\nPlease format this result for the user in a clear, readable way using Markdown. Do NOT output any JSON tool calls. Do NOT include any {\"tool\":...} blocks. Only output human-readable text."
                     ];
 
                     $formatted_masked = ProviderClient::chat(
@@ -281,6 +302,9 @@ class ChatSend extends CController {
                     }
 
                     $formatted_reply = $redactor !== null ? $redactor->restoreText($formatted_masked) : $formatted_masked;
+
+                    // Strip any remaining raw tool call JSON the AI may have leaked.
+                    $formatted_reply = ZabbixActionExecutor::stripToolCalls($formatted_reply);
 
                     AuditLogger::log($config, 'reads', [
                         'event' => 'zabbix.read.executed',
@@ -354,7 +378,8 @@ class ChatSend extends CController {
                 'items' => false,
                 'triggers' => false,
                 'users' => false,
-                'problems' => false
+                'problems' => false,
+                'hostgroups' => false
             ],
             'require_confirmation' => true,
             'current_user_type' => $this->getUserType()

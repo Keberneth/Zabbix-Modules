@@ -1,0 +1,370 @@
+/* ── AI Problem Inline Button ── */
+.ai-problem-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 6px;
+    padding: 1px 7px;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.6;
+    border: 1px solid #b0bec5;
+    border-radius: 3px;
+    background: linear-gradient(to bottom, #fafafa, #eceff1);
+    color: #37474f;
+    cursor: pointer;
+    vertical-align: middle;
+    white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+.ai-problem-btn:hover {
+    background: linear-gradient(to bottom, #e3f2fd, #bbdefb);
+    border-color: #64b5f6;
+    color: #1565c0;
+    box-shadow: 0 1px 3px rgba(25, 118, 210, 0.18);
+}
+
+.ai-problem-btn:active {
+    background: #bbdefb;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+/* ── Dark theme ── */
+html[theme="dark-theme"] .ai-problem-btn,
+html[theme="hc-dark"] .ai-problem-btn {
+    background: linear-gradient(to bottom, #37474f, #263238);
+    border-color: #546e7a;
+    color: #b0bec5;
+}
+
+html[theme="dark-theme"] .ai-problem-btn:hover,
+html[theme="hc-dark"] .ai-problem-btn:hover {
+    background: linear-gradient(to bottom, #1a3352, #0d47a1);
+    border-color: #42a5f5;
+    color: #90caf9;
+}
+
+/* ── Side Drawer ── */
+.ai-problem-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 520px;
+    max-width: 90vw;
+    height: 100vh;
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    border-left: 1px solid #cfd8dc;
+    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.12);
+    animation: ai-drawer-slide-in 0.2s ease-out;
+}
+
+@keyframes ai-drawer-slide-in {
+    from { transform: translateX(100%); }
+    to   { transform: translateX(0); }
+}
+
+/* ── Drawer header ── */
+.ai-drawer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid #cfd8dc;
+    background: #eceff1;
+    flex-shrink: 0;
+}
+
+.ai-drawer-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.ai-drawer-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    background: #1565c0;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    flex-shrink: 0;
+}
+
+.ai-drawer-label {
+    font-weight: 700;
+    font-size: 14px;
+    color: #263238;
+}
+
+.ai-drawer-eventid {
+    font-size: 12px;
+    color: #78909c;
+}
+
+.ai-drawer-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.ai-drawer-open-chat {
+    font-size: 11px;
+    padding: 3px 8px;
+    text-decoration: none;
+}
+
+.ai-drawer-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: none;
+    background: transparent;
+    font-size: 20px;
+    color: #546e7a;
+    cursor: pointer;
+    border-radius: 4px;
+    flex-shrink: 0;
+}
+
+.ai-drawer-close:hover {
+    background: #cfd8dc;
+    color: #263238;
+}
+
+/* ── Drawer context ── */
+.ai-drawer-context {
+    padding: 10px 16px;
+    border-bottom: 1px solid #e0e0e0;
+    background: #fafafa;
+    font-size: 12px;
+    flex-shrink: 0;
+    max-height: 160px;
+    overflow-y: auto;
+}
+
+.ai-ctx-row {
+    margin-bottom: 4px;
+    line-height: 1.45;
+    color: #37474f;
+    word-break: break-word;
+}
+
+.ai-ctx-row strong {
+    color: #263238;
+}
+
+.ai-drawer-loading {
+    color: #78909c;
+    font-style: italic;
+}
+
+.ai-drawer-context-error {
+    color: #c62828;
+}
+
+.ai-drawer-context-empty {
+    color: #78909c;
+    font-style: italic;
+}
+
+/* ── Drawer transcript ── */
+.ai-drawer-transcript {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 12px 16px;
+    background: #fafbfd;
+    min-height: 0;
+}
+
+/* Reuse existing .ai-msg styles from ai.css — they inherit via the
+   global module CSS. We only need minor drawer-specific overrides. */
+.ai-problem-drawer .ai-msg {
+    font-size: 13px;
+}
+
+.ai-problem-drawer .ai-msg-body {
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.ai-problem-drawer .ai-empty-state {
+    color: #90a4ae;
+    font-style: italic;
+    padding: 20px 0;
+    text-align: center;
+}
+
+/* ── Drawer status ── */
+.ai-drawer-status {
+    padding: 6px 16px;
+    font-size: 12px;
+    flex-shrink: 0;
+}
+
+/* ── Drawer compose ── */
+.ai-drawer-compose {
+    padding: 12px 16px;
+    border-top: 1px solid #cfd8dc;
+    background: #eceff1;
+    flex-shrink: 0;
+}
+
+.ai-drawer-input {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid #b0bec5;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 13px;
+    resize: vertical;
+    background: #fff;
+    color: #263238;
+}
+
+.ai-drawer-input::placeholder {
+    color: #90a4ae;
+}
+
+.ai-drawer-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.ai-drawer-send {
+    min-width: 80px;
+}
+
+.ai-drawer-post {
+    font-size: 12px;
+}
+
+.ai-drawer-history-btn {
+    font-size: 12px;
+}
+
+/* ── Confirm buttons inside drawer ── */
+.ai-problem-drawer .ai-action-confirm-buttons {
+    border: 1px dashed #b0bec5;
+    border-radius: 6px;
+    margin-bottom: 12px;
+    padding: 10px;
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    background: #eceff1;
+}
+
+/* ── Dark theme for drawer ── */
+html[theme="dark-theme"] .ai-problem-drawer,
+html[theme="hc-dark"] .ai-problem-drawer {
+    background: #1f2c3d;
+    border-left-color: #4a5568;
+    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.35);
+}
+
+html[theme="dark-theme"] .ai-drawer-header,
+html[theme="hc-dark"] .ai-drawer-header {
+    background: #263545;
+    border-bottom-color: #4a5568;
+}
+
+html[theme="dark-theme"] .ai-drawer-label,
+html[theme="hc-dark"] .ai-drawer-label {
+    color: #dadee3;
+}
+
+html[theme="dark-theme"] .ai-drawer-eventid,
+html[theme="hc-dark"] .ai-drawer-eventid {
+    color: #768d99;
+}
+
+html[theme="dark-theme"] .ai-drawer-close,
+html[theme="hc-dark"] .ai-drawer-close {
+    color: #90a4ae;
+}
+
+html[theme="dark-theme"] .ai-drawer-close:hover,
+html[theme="hc-dark"] .ai-drawer-close:hover {
+    background: #37474f;
+    color: #eceff1;
+}
+
+html[theme="dark-theme"] .ai-drawer-context,
+html[theme="hc-dark"] .ai-drawer-context {
+    background: #263545;
+    border-bottom-color: #4a5568;
+}
+
+html[theme="dark-theme"] .ai-ctx-row,
+html[theme="hc-dark"] .ai-ctx-row {
+    color: #b0bec5;
+}
+
+html[theme="dark-theme"] .ai-ctx-row strong,
+html[theme="hc-dark"] .ai-ctx-row strong {
+    color: #dadee3;
+}
+
+html[theme="dark-theme"] .ai-drawer-loading,
+html[theme="dark-theme"] .ai-drawer-context-empty,
+html[theme="hc-dark"] .ai-drawer-loading,
+html[theme="hc-dark"] .ai-drawer-context-empty {
+    color: #768d99;
+}
+
+html[theme="dark-theme"] .ai-drawer-transcript,
+html[theme="hc-dark"] .ai-drawer-transcript {
+    background: #1a2636;
+}
+
+html[theme="dark-theme"] .ai-drawer-compose,
+html[theme="hc-dark"] .ai-drawer-compose {
+    background: #263545;
+    border-top-color: #4a5568;
+}
+
+html[theme="dark-theme"] .ai-drawer-input,
+html[theme="hc-dark"] .ai-drawer-input {
+    background: #1f2c3d;
+    border-color: #4a5568;
+    color: #dadee3;
+}
+
+html[theme="dark-theme"] .ai-drawer-input::placeholder,
+html[theme="hc-dark"] .ai-drawer-input::placeholder {
+    color: #768d99;
+}
+
+html[theme="dark-theme"] .ai-problem-drawer .ai-action-confirm-buttons,
+html[theme="hc-dark"] .ai-problem-drawer .ai-action-confirm-buttons {
+    border-color: #4a5568;
+    background: #263545;
+}
+
+html[theme="dark-theme"] .ai-problem-drawer .ai-empty-state,
+html[theme="hc-dark"] .ai-problem-drawer .ai-empty-state {
+    color: #768d99;
+}
+
+/* ── Responsive ── */
+@media (max-width: 600px) {
+    .ai-problem-drawer {
+        width: 100vw;
+        max-width: 100vw;
+    }
+}

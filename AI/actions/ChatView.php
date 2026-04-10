@@ -68,7 +68,9 @@ class ChatView extends CController {
             'history_limit' => (int) ($config['chat']['max_history_messages'] ?? 12),
             'security_enabled' => Util::truthy($config['security']['enabled'] ?? false),
             'logging_enabled' => Util::truthy($config['logging']['enabled'] ?? false),
-            'can_view_logs' => $this->getUserType() == USER_TYPE_SUPER_ADMIN
+            'can_view_logs' => $this->getUserType() == USER_TYPE_SUPER_ADMIN,
+            'item_history_period_hours' => (int) ($config['chat']['item_history_period_hours'] ?? 24),
+            'item_history_max_rows' => (int) ($config['chat']['item_history_max_rows'] ?? 50)
         ]);
 
         $this->setResponse($response);

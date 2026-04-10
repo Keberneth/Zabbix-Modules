@@ -46,6 +46,10 @@
     "ai.chat.execute": {
       "class": "ChatExecute",
       "layout": "layout.json"
+    },
+    "ai.problem.context": {
+      "class": "ProblemContext",
+      "layout": "layout.json"
     }
   },
   "assets": {
@@ -100,7 +104,12 @@
     },
     "chat": {
       "max_history_messages": 12,
-      "temperature": 0.2
+      "temperature": 0.2,
+      "item_history_period_hours": 24,
+      "item_history_max_rows": 50
+    },
+    "problem_inline": {
+      "auto_analyze": true
     },
     "security": {
       "enabled": true,
@@ -154,7 +163,8 @@
         "items": false,
         "triggers": false,
         "users": false,
-        "problems": false
+        "problems": false,
+        "hostgroups": false
       },
       "require_super_admin_for_write": true
     }

@@ -60,6 +60,9 @@ ob_start();
     data-execute-url="<?= $h($execute_url) ?>"
     data-execute-csrf="<?= $h(CCsrfTokenHelper::get('ai.chat.execute')) ?>"
     data-security-enabled="<?= $h(($data['security_enabled'] ?? false) ? '1' : '0') ?>"
+    data-context-url="<?= $h((new CUrl('zabbix.php'))->setArgument('action', 'ai.problem.context')->getUrl()) ?>"
+    data-history-period="<?= $h($data['item_history_period_hours'] ?? 24) ?>"
+    data-history-max-rows="<?= $h($data['item_history_max_rows'] ?? 50) ?>"
 >
     <div class="ai-header">
         <div>
@@ -133,6 +136,15 @@ ob_start();
 
             <div class="ai-side-actions">
                 <button type="button" class="btn-alt" id="ai-clear-session"><?= $h(_('Clear session')) ?></button>
+                <button
+                    type="button"
+                    class="btn-alt"
+                    id="ai-include-history"
+                    <?= ($data['has_zabbix_api'] ?? false) ? '' : 'disabled' ?>
+                    title="<?= $h(($data['has_zabbix_api'] ?? false) ? _('Fetch item history for the selected event and send to AI for trend analysis.') : _('Configure Zabbix API settings first.')) ?>"
+                >
+                    <?= $h(_('Include history')) ?>
+                </button>
                 <button
                     type="button"
                     class="btn-alt"
