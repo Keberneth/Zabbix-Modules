@@ -134,11 +134,17 @@ class ChatSend extends CController {
                 'content' => $message
             ];
 
-            $actions_provider = null;
-            if ($actions_enabled) {
+            // Honor the user's explicit provider selection from the chat UI.
+            // The actions default provider is only used when no provider_id
+            // was passed in (e.g. from automated/webhook callers).
+            $explicit_selection = trim((string) ($post['provider_id'] ?? '')) !== '';
+            $active_provider = $provider;
+            if (!$explicit_selection && $actions_enabled) {
                 $actions_provider = Config::getProvider($config, '', 'actions');
+                if ($actions_provider !== null) {
+                    $active_provider = $actions_provider;
+                }
             }
-            $active_provider = $actions_provider ?? $provider;
             // The system prompt has already been processed by PromptBuilder
             // (sensitive instruction segments + chat context block). Only
             // redact history and the current user turn here.

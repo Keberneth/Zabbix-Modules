@@ -44,6 +44,32 @@
             addRow('provider');
         }
 
+        var apiKeyEnvPlaceholders = {
+            openai_compatible: 'OPENAI_API_KEY',
+            anthropic: 'ANTHROPIC_API_KEY',
+            ollama: ''
+        };
+
+        function updateApiKeyEnvPlaceholder(typeSelect) {
+            var row = typeSelect.closest('.ai-provider-row');
+            if (!row) {
+                return;
+            }
+            var envInput = row.querySelector('.ai-provider-api-key-env');
+            if (!envInput) {
+                return;
+            }
+            var placeholder = apiKeyEnvPlaceholders[typeSelect.value];
+            envInput.placeholder = (placeholder === undefined) ? 'OPENAI_API_KEY' : placeholder;
+        }
+
+        root.addEventListener('change', function (event) {
+            var typeSelect = event.target.closest('.ai-provider-type-select');
+            if (typeSelect) {
+                updateApiKeyEnvPlaceholder(typeSelect);
+            }
+        });
+
         // FAQ toggle buttons
         root.addEventListener('click', function (event) {
             var faqBtn = event.target.closest('.ai-faq-toggle');

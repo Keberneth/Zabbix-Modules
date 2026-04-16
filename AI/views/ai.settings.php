@@ -32,9 +32,17 @@ if (function_exists('getUserTheme')) {
     }
 }
 
-$render_provider_row = static function(array $provider = []) use ($h): string {
+$api_key_env_placeholder_map = [
+    'openai_compatible' => 'OPENAI_API_KEY',
+    'anthropic' => 'ANTHROPIC_API_KEY',
+    'ollama' => ''
+];
+
+$render_provider_row = static function(array $provider = []) use ($h, $api_key_env_placeholder_map): string {
     ob_start();
     $id = $provider['id'] ?? '__ROW_ID__';
+    $current_type = $provider['type'] ?? 'openai_compatible';
+    $api_key_env_placeholder = $api_key_env_placeholder_map[$current_type] ?? 'OPENAI_API_KEY';
     ?>
     <div class="ai-repeat-row ai-provider-row" data-row-type="provider">
         <input type="hidden" class="ai-row-id-field" name="providers[<?= $h($id) ?>][id]" value="<?= $h($id) ?>">
@@ -45,9 +53,9 @@ $render_provider_row = static function(array $provider = []) use ($h): string {
             </div>
             <div>
                 <label class="ai-label"><?= $h(_('Type')) ?></label>
-                <select class="ai-input" name="providers[<?= $h($id) ?>][type]">
+                <select class="ai-input ai-provider-type-select" name="providers[<?= $h($id) ?>][type]">
                     <?php foreach (['openai_compatible', 'ollama', 'anthropic'] as $type): ?>
-                        <option value="<?= $h($type) ?>" <?= (($provider['type'] ?? 'openai_compatible') === $type) ? 'selected' : '' ?>><?= $h($type) ?></option>
+                        <option value="<?= $h($type) ?>" <?= ($current_type === $type) ? 'selected' : '' ?>><?= $h($type) ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -93,7 +101,7 @@ $render_provider_row = static function(array $provider = []) use ($h): string {
             </div>
             <div>
                 <label class="ai-label"><?= $h(_('Secret environment variable')) ?></label>
-                <input class="ai-input" type="text" name="providers[<?= $h($id) ?>][api_key_env]" value="<?= $h($provider['api_key_env'] ?? '') ?>" placeholder="OPENAI_API_KEY">
+                <input class="ai-input ai-provider-api-key-env" type="text" name="providers[<?= $h($id) ?>][api_key_env]" value="<?= $h($provider['api_key_env'] ?? '') ?>" placeholder="<?= $h($api_key_env_placeholder) ?>">
             </div>
             <div class="ai-span-3">
                 <label class="ai-label"><?= $h(_('Extra headers JSON')) ?></label>
