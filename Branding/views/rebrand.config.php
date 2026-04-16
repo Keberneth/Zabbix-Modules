@@ -92,12 +92,38 @@ $logo_compact_fields[] = (new CTag('div', true, _('Recommended: 24 x 24 pixels. 
 	->addClass(ZBX_STYLE_GREY)
 	->setAttribute('style', 'margin-top: 4px;');
 
+// --- Browser favicon ---
+
+$favicon_fields = [];
+
+if ($data['favicon']) {
+	$favicon_fields[] = (new CDiv(
+		(new CTag('img', true))
+			->setAttribute('src', $logos_url.'/'.$data['favicon'].'?'.time())
+			->setAttribute('style', 'max-height: 32px; max-width: 32px; margin-bottom: 8px; display: block; background: #333; padding: 4px; border-radius: 4px;')
+	));
+	$favicon_fields[] = (new CDiv([
+		(new CCheckBox('remove_favicon', '1')),
+		' ',
+		_('Remove current favicon')
+	]))->setAttribute('style', 'display: block; margin-bottom: 8px; color: #c00;');
+}
+
+$favicon_fields[] = (new CTag('input', false))
+	->setAttribute('type', 'file')
+	->setAttribute('name', 'favicon')
+	->setAttribute('accept', '.ico,.png,.svg,.gif,.jpg,.jpeg');
+$favicon_fields[] = (new CTag('div', true, _('Saved to assets/logos/favicon.ico. Requires a one-time symlink from /usr/share/zabbix/favicon.ico to that file — see the module README. Recommended: 32 x 32 pixels. Formats: ICO, PNG, SVG, GIF, JPG.')))
+	->addClass(ZBX_STYLE_GREY)
+	->setAttribute('style', 'margin-top: 4px;');
+
 // --- Build form list ---
 
 $form_list = (new CFormList())
 	->addRow(_('Login page logo'), $logo_main_fields)
 	->addRow(_('Sidebar logo'), $logo_sidebar_fields)
 	->addRow(_('Compact sidebar icon'), $logo_compact_fields)
+	->addRow(_('Browser favicon'), $favicon_fields)
 	->addRow(_('Footer text'),
 		(new CTextBox('brand_footer', $data['brand_footer'], false, 128))
 			->setWidth(ZBX_TEXTAREA_STANDARD_WIDTH)

@@ -22,6 +22,7 @@ class RebrandConfigUpdate extends CController {
 			'remove_logo_main' => 'in 1',
 			'remove_logo_sidebar' => 'in 1',
 			'remove_logo_compact' => 'in 1',
+			'remove_favicon' => 'in 1',
 			'update' => 'string'
 		];
 
@@ -76,11 +77,13 @@ class RebrandConfigUpdate extends CController {
 				$config = $this->loadConfigFromDir($logo_storage_dir);
 			}
 			$this->migrateLegacyAssets($config, $config_storage_dir, $logo_storage_dir, $errors);
+			$this->healLegacyAssets($config, $config_storage_dir, $logo_storage_dir);
 
 			$logo_types = [
 				'logo_main' => ['label' => 'Login page logo'],
 				'logo_sidebar' => ['label' => 'Sidebar logo'],
-				'logo_compact' => ['label' => 'Compact sidebar icon']
+				'logo_compact' => ['label' => 'Compact sidebar icon'],
+				'favicon' => ['label' => 'Browser favicon']
 			];
 
 			foreach ($logo_types as $logo_key => $meta) {
@@ -101,6 +104,8 @@ class RebrandConfigUpdate extends CController {
 					$errors[] = $upload_error;
 				}
 			}
+
+			$this->persistAssetsToPrimary($config, $logo_storage_dir, $config_storage_dir);
 
 			$config['brand_footer'] = trim($this->getInput('brand_footer', ''));
 

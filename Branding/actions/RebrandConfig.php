@@ -26,6 +26,7 @@ class RebrandConfig extends CController {
 			'logo_main' => null,
 			'logo_sidebar' => null,
 			'logo_compact' => null,
+			'favicon' => null,
 			'brand_footer' => '',
 			'brand_help_url' => '',
 			'storage_url' => $this->getPrimaryStorageUrl(),
@@ -54,10 +55,13 @@ class RebrandConfig extends CController {
 				$config = $this->loadConfigFromDir($logo_storage_dir);
 			}
 
+			$this->healLegacyAssets($config, $config_storage_dir, $logo_storage_dir);
+
 			$data = [
 				'logo_main' => $this->getExistingLogoName($config, 'logo_main', $logo_storage_dir),
 				'logo_sidebar' => $this->getExistingLogoName($config, 'logo_sidebar', $logo_storage_dir),
 				'logo_compact' => $this->getExistingLogoName($config, 'logo_compact', $logo_storage_dir),
+				'favicon' => $this->getExistingLogoName($config, 'favicon', $logo_storage_dir),
 				'brand_footer' => $config['brand_footer'] ?? '',
 				'brand_help_url' => $config['brand_help_url'] ?? '',
 				'storage_url' => $logo_storage_url,

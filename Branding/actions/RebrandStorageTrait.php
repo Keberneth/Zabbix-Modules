@@ -65,6 +65,7 @@ trait RebrandStorageTrait {
 			'logo_main' => $this->normalizeLogoName($config['logo_main'] ?? null),
 			'logo_sidebar' => $this->normalizeLogoName($config['logo_sidebar'] ?? null),
 			'logo_compact' => $this->normalizeLogoName($config['logo_compact'] ?? null),
+			'favicon' => $this->normalizeLogoName($config['favicon'] ?? null),
 			'brand_footer' => isset($config['brand_footer']) ? trim((string) $config['brand_footer']) : '',
 			'brand_help_url' => isset($config['brand_help_url']) ? trim((string) $config['brand_help_url']) : ''
 		];
@@ -153,7 +154,7 @@ trait RebrandStorageTrait {
 			return;
 		}
 
-		foreach (['logo_main', 'logo_sidebar', 'logo_compact'] as $logo_key) {
+		foreach (['logo_main', 'logo_sidebar', 'logo_compact', 'favicon'] as $logo_key) {
 			$filename = $this->normalizeLogoName($config[$logo_key] ?? null);
 
 			if ($filename === null) {
@@ -173,6 +174,71 @@ trait RebrandStorageTrait {
 			}
 
 			@chmod($target, 0644);
+		}
+	}
+
+	private function persistAssetsToPrimary(array $config, string $legacy_dir, string $primary_dir): void {
+		if ($legacy_dir === $primary_dir) {
+			return;
+		}
+
+		if (!is_dir($primary_dir) && !@mkdir($primary_dir, 0755, true) && !is_dir($primary_dir)) {
+			return;
+		}
+
+		foreach (['logo_main', 'logo_sidebar', 'logo_compact', 'favicon'] as $logo_key) {
+			$filename = $this->normalizeLogoName($config[$logo_key] ?? null);
+
+			if ($filename === null) {
+				continue;
+			}
+
+			$source = $legacy_dir.DIRECTORY_SEPARATOR.$filename;
+			$target = $primary_dir.DIRECTORY_SEPARATOR.$filename;
+
+			if (!is_file($source)) {
+				continue;
+			}
+
+			$source_mtime = @filemtime($source);
+			$target_mtime = is_file($target) ? @filemtime($target) : 0;
+
+			if ($target_mtime !== false && $source_mtime !== false && $target_mtime >= $source_mtime) {
+				continue;
+			}
+
+			if (@copy($source, $target)) {
+				@chmod($target, 0644);
+			}
+		}
+	}
+
+	private function healLegacyAssets(array $config, string $primary_dir, string $legacy_dir): void {
+		if ($legacy_dir === $primary_dir) {
+			return;
+		}
+
+		if (!is_dir($legacy_dir) && !@mkdir($legacy_dir, 0755, true) && !is_dir($legacy_dir)) {
+			return;
+		}
+
+		foreach (['logo_main', 'logo_sidebar', 'logo_compact', 'favicon'] as $logo_key) {
+			$filename = $this->normalizeLogoName($config[$logo_key] ?? null);
+
+			if ($filename === null) {
+				continue;
+			}
+
+			$source = $primary_dir.DIRECTORY_SEPARATOR.$filename;
+			$target = $legacy_dir.DIRECTORY_SEPARATOR.$filename;
+
+			if (!is_file($source) || is_file($target)) {
+				continue;
+			}
+
+			if (@copy($source, $target)) {
+				@chmod($target, 0644);
+			}
 		}
 	}
 
@@ -288,7 +354,8 @@ trait RebrandStorageTrait {
 			return $meta['label'].': file content does not match the selected image format.';
 		}
 
-		$target_file = $storage_dir.DIRECTORY_SEPARATOR.$logo_key.'.'.$extension;
+		$target_name = ($logo_key === 'favicon') ? 'favicon.ico' : $logo_key.'.'.$extension;
+		$target_file = $storage_dir.DIRECTORY_SEPARATOR.$target_name;
 		$existing_file = $this->normalizeLogoName($config[$logo_key] ?? null);
 
 		if ($existing_file !== null && is_file($storage_dir.DIRECTORY_SEPARATOR.$existing_file)) {
