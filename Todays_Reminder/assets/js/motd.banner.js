@@ -3,18 +3,37 @@
 
     var DATA_URL = 'zabbix.php?action=motd.banner.data';
     var ROOT_ID = 'motd-banner-root';
-    var SEEN_KEY = 'zbx_motd_banner_seen_v1';
-    var COLLAPSED_KEY = 'zbx_motd_banner_collapsed_v1';
+    var EXPANDED_KEY = 'zbx_motd_banner_expanded_v1';
+    var REFRESH_MS = 60000;
+
+    var refreshTimer = null;
 
     function init() {
         if (window.location && window.location.search.indexOf('action=motd.banner.data') !== -1) {
             return;
         }
 
-        if (document.getElementById(ROOT_ID)) {
-            return;
-        }
+        fetchAndRender();
 
+        if (refreshTimer) {
+            clearInterval(refreshTimer);
+        }
+        refreshTimer = setInterval(function () {
+            if (document.hidden) {
+                return;
+            }
+            fetchAndRender();
+        }, REFRESH_MS);
+
+        window.addEventListener('beforeunload', function () {
+            if (refreshTimer) {
+                clearInterval(refreshTimer);
+                refreshTimer = null;
+            }
+        });
+    }
+
+    function fetchAndRender() {
         fetch(DATA_URL + '&_=' + Date.now(), {
             method: 'GET',
             credentials: 'same-origin',
@@ -40,6 +59,11 @@
 
         if (!target) {
             return;
+        }
+
+        var existing = document.getElementById(ROOT_ID);
+        if (existing && existing.parentNode) {
+            existing.parentNode.removeChild(existing);
         }
 
         var root = document.createElement('div');
@@ -91,7 +115,13 @@
         banner.appendChild(body);
 
         if (Array.isArray(data.chips) && data.chips.length) {
-            body.appendChild(buildChipRow(data.chips));
+            var bannerKinds = ['critical', 'high', 'unacked', 'suppressed', 'unreachable', 'queue', 'stale'];
+            var bannerChips = data.chips.filter(function (chip) {
+                return chip && bannerKinds.indexOf(chip.kind) !== -1;
+            });
+            if (bannerChips.length) {
+                body.appendChild(buildChipRow(bannerChips));
+            }
         }
 
         if (Array.isArray(data.banner_items) && data.banner_items.length) {
@@ -101,22 +131,19 @@
         insertRoot(target, root);
 
         var fingerprint = String(data.fingerprint || 'motd');
-        var hasSeen = sessionStorage.getItem(SEEN_KEY) === fingerprint;
-        var forceCollapsed = sessionStorage.getItem(COLLAPSED_KEY) === fingerprint;
-        var collapsed = forceCollapsed || hasSeen;
+        var expanded = sessionStorage.getItem(EXPANDED_KEY) === fingerprint;
 
-        setCollapsed(banner, toggleButton, collapsed);
-        sessionStorage.setItem(SEEN_KEY, fingerprint);
+        setCollapsed(banner, toggleButton, !expanded);
 
         toggleButton.addEventListener('click', function () {
             var nextCollapsed = !banner.classList.contains('motd-banner--collapsed');
             setCollapsed(banner, toggleButton, nextCollapsed);
 
             if (nextCollapsed) {
-                sessionStorage.setItem(COLLAPSED_KEY, fingerprint);
+                sessionStorage.removeItem(EXPANDED_KEY);
             }
             else {
-                sessionStorage.removeItem(COLLAPSED_KEY);
+                sessionStorage.setItem(EXPANDED_KEY, fingerprint);
             }
         });
     }

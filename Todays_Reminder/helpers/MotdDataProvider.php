@@ -26,12 +26,16 @@ class MotdDataProvider {
 		$week_end = $week_start->modify('+7 days');
 
 		$problems = $this->getProblemSummary($timezone, $now);
-		$software_update = $this->getSoftwareUpdateStatus($timezone);
+		$unacked = $this->getUnacknowledgedProblems($timezone, $now);
+		$longest = $this->getLongestRunningProblems($timezone, $now);
+		$resolved = $this->getRecentlyResolvedProblems($timezone, $now);
+		$health = $this->getMonitoringHealth();
+		$new_hosts = $this->getNewHosts24h($timezone, $now);
 		$maintenances = $this->getMaintenanceSummary($now, $today_start, $tomorrow_start, $week_end, $timezone);
 
-		$summary_line = $this->buildSummaryLine($problems, $software_update, $maintenances);
-		$banner_items = $this->buildBannerItems($problems, $software_update, $maintenances);
-		$chips = $this->buildSummaryChips($problems, $software_update, $maintenances);
+		$summary_line = $this->buildSummaryLine($problems, $unacked, $maintenances);
+		$banner_items = $this->buildBannerItems($problems, $unacked, $longest, $maintenances);
+		$chips = $this->buildSummaryChips($problems, $unacked, $health, $new_hosts, $maintenances);
 
 		$data = [
 			'title' => _('Today\'s Reminder'),
@@ -42,7 +46,11 @@ class MotdDataProvider {
 			'banner_items' => $banner_items,
 			'chips' => $chips,
 			'problems' => $problems,
-			'software_update' => $software_update,
+			'unacked' => $unacked,
+			'longest' => $longest,
+			'resolved' => $resolved,
+			'health' => $health,
+			'new_hosts' => $new_hosts,
 			'maintenances' => $maintenances,
 			'links' => [
 				'module' => $this->buildUrl('motd.view'),
@@ -55,8 +63,13 @@ class MotdDataProvider {
 			$summary_line,
 			$problems['high_count'],
 			$problems['critical_count'],
-			$software_update['available'],
-			$software_update['latest_version'],
+			$unacked['count'],
+			$health['stale_items_total'],
+			$health['unreachable_hosts'],
+			$health['unreachable_proxies'],
+			$health['queue_backlog'],
+			$new_hosts['count'],
+			$resolved['count'],
 			array_map(static function(array $item): array {
 				return [
 					$item['maintenanceid'] ?? '',
@@ -81,6 +94,7 @@ class MotdDataProvider {
 	private function getProblemSummary(\DateTimeZone $timezone, \DateTimeImmutable $now): array {
 		$high_count = 0;
 		$critical_count = 0;
+		$suppressed_count = 0;
 		$recent = [];
 
 		try {
@@ -106,6 +120,17 @@ class MotdDataProvider {
 		}
 
 		try {
+			$suppressed_count = (int) API::Problem()->get([
+				'countOutput' => true,
+				'severities' => [self::SEVERITY_HIGH, self::SEVERITY_CRITICAL],
+				'suppressed' => true
+			]);
+		}
+		catch (\Throwable $e) {
+			$suppressed_count = 0;
+		}
+
+		try {
 			$recent = API::Problem()->get([
 				'output' => ['eventid', 'objectid', 'clock', 'name', 'severity'],
 				'severities' => [self::SEVERITY_HIGH, self::SEVERITY_CRITICAL],
@@ -119,9 +144,30 @@ class MotdDataProvider {
 			$recent = [];
 		}
 
+		$formatted_recent = $this->formatProblemRows($recent, $timezone, $now);
+
+		return [
+			'high_count' => $high_count,
+			'critical_count' => $critical_count,
+			'suppressed_count' => $suppressed_count,
+			'total' => $high_count + $critical_count,
+			'recent' => $formatted_recent,
+			'all_url' => $this->buildUrl('problem.view'),
+			'high_url' => $this->buildProblemFilterUrl([self::SEVERITY_HIGH]),
+			'critical_url' => $this->buildProblemFilterUrl([self::SEVERITY_CRITICAL]),
+			'high_critical_url' => $this->buildProblemFilterUrl([self::SEVERITY_HIGH, self::SEVERITY_CRITICAL]),
+			'suppressed_url' => $this->buildProblemSuppressedUrl()
+		];
+	}
+
+	private function formatProblemRows(array $problems, \DateTimeZone $timezone, \DateTimeImmutable $now): array {
+		if (!$problems) {
+			return [];
+		}
+
 		$triggerids = [];
-		foreach ($recent as $problem) {
-			if (array_key_exists('objectid', $problem) && $problem['objectid'] !== '') {
+		foreach ($problems as $problem) {
+			if (!empty($problem['objectid'])) {
 				$triggerids[] = $problem['objectid'];
 			}
 		}
@@ -141,8 +187,8 @@ class MotdDataProvider {
 			}
 		}
 
-		$formatted_recent = [];
-		foreach ($recent as $problem) {
+		$formatted = [];
+		foreach ($problems as $problem) {
 			$severity = (int) ($problem['severity'] ?? 0);
 			$clock = (int) ($problem['clock'] ?? 0);
 			$triggerid = (string) ($problem['objectid'] ?? '');
@@ -158,8 +204,9 @@ class MotdDataProvider {
 				return $value !== '';
 			}));
 
-			$formatted_recent[] = [
+			$formatted[] = [
 				'eventid' => (string) ($problem['eventid'] ?? ''),
+				'triggerid' => $triggerid,
 				'name' => (string) ($problem['name'] ?? ''),
 				'severity' => $severity,
 				'severity_label' => $this->severityLabel($severity),
@@ -167,122 +214,329 @@ class MotdDataProvider {
 				'clock' => $clock,
 				'clock_text' => $clock > 0 ? $this->formatTimestamp($clock, $timezone) : '',
 				'age_text' => $clock > 0 ? $this->formatAge($clock, $now->getTimestamp()) : '',
+				'acknowledged' => (int) ($problem['acknowledged'] ?? 0) === 1,
 				'hosts' => $hosts,
 				'host_text' => $this->formatNameList($hosts, 2),
-				'url' => $this->buildProblemEventUrl((string) ($problem['eventid'] ?? ''))
+				'url' => $this->buildProblemTriggerUrl($triggerid)
 			];
 		}
 
+		return $formatted;
+	}
+
+	private function getUnacknowledgedProblems(\DateTimeZone $timezone, \DateTimeImmutable $now): array {
+		$count = 0;
+		$items = [];
+
+		try {
+			$count = (int) API::Problem()->get([
+				'countOutput' => true,
+				'severities' => [self::SEVERITY_HIGH, self::SEVERITY_CRITICAL],
+				'acknowledged' => false,
+				'suppressed' => false
+			]);
+		}
+		catch (\Throwable $e) {
+			$count = 0;
+		}
+
+		try {
+			$items = API::Problem()->get([
+				'output' => ['eventid', 'objectid', 'clock', 'name', 'severity', 'acknowledged'],
+				'severities' => [self::SEVERITY_HIGH, self::SEVERITY_CRITICAL],
+				'acknowledged' => false,
+				'suppressed' => false,
+				'sortfield' => ['eventid'],
+				'sortorder' => 'DESC',
+				'limit' => 5
+			]);
+		}
+		catch (\Throwable $e) {
+			$items = [];
+		}
+
 		return [
-			'high_count' => $high_count,
-			'critical_count' => $critical_count,
-			'total' => $high_count + $critical_count,
-			'recent' => $formatted_recent,
-			'all_url' => $this->buildUrl('problem.view'),
-			'high_url' => $this->buildProblemFilterUrl([self::SEVERITY_HIGH]),
-			'critical_url' => $this->buildProblemFilterUrl([self::SEVERITY_CRITICAL])
+			'count' => $count,
+			'recent' => $this->formatProblemRows($items, $timezone, $now),
+			'url' => $this->buildProblemUnackedUrl()
 		];
 	}
 
-	private function getSoftwareUpdateStatus(\DateTimeZone $timezone): array {
-		$enabled = null;
-		$check_data = null;
+	private function getLongestRunningProblems(\DateTimeZone $timezone, \DateTimeImmutable $now): array {
+		$items = [];
 
 		try {
-			if (class_exists('CSettingsHelper')) {
-				if (method_exists('CSettingsHelper', 'isSoftwareUpdateCheckEnabled')) {
-					$enabled = (bool) \CSettingsHelper::isSoftwareUpdateCheckEnabled();
-				}
+			$items = API::Problem()->get([
+				'output' => ['eventid', 'objectid', 'clock', 'name', 'severity', 'acknowledged'],
+				'severities' => [self::SEVERITY_HIGH, self::SEVERITY_CRITICAL],
+				'suppressed' => false,
+				'sortfield' => ['eventid'],
+				'sortorder' => 'ASC',
+				'limit' => 5
+			]);
+		}
+		catch (\Throwable $e) {
+			$items = [];
+		}
 
-				$const_name = 'CSettingsHelper::SOFTWARE_UPDATE_CHECK_DATA';
-				if (defined($const_name)) {
-					$key = constant($const_name);
-					if (method_exists('CSettingsHelper', 'getPublic')) {
-						$check_data = @\CSettingsHelper::getPublic($key);
+		return [
+			'recent' => $this->formatProblemRows($items, $timezone, $now)
+		];
+	}
+
+	private function getRecentlyResolvedProblems(\DateTimeZone $timezone, \DateTimeImmutable $now): array {
+		$since = $now->getTimestamp() - 86400;
+		$problem_events = [];
+
+		try {
+			$problem_events = API::Event()->get([
+				'output' => ['eventid', 'clock', 'name', 'severity', 'objectid', 'r_eventid'],
+				'source' => 0,
+				'object' => 0,
+				'value' => 1,
+				'severities' => [self::SEVERITY_HIGH, self::SEVERITY_CRITICAL],
+				'sortfield' => ['eventid'],
+				'sortorder' => 'DESC',
+				'limit' => 200
+			]);
+		}
+		catch (\Throwable $e) {
+			$problem_events = [];
+		}
+
+		$recovery_ids = [];
+		foreach ($problem_events as $event) {
+			$rid = (string) ($event['r_eventid'] ?? '0');
+			if ($rid !== '' && $rid !== '0') {
+				$recovery_ids[] = $rid;
+			}
+		}
+
+		$recovery_map = [];
+		if ($recovery_ids) {
+			try {
+				$recoveries = API::Event()->get([
+					'output' => ['eventid', 'clock'],
+					'eventids' => array_values(array_unique($recovery_ids))
+				]);
+				foreach ($recoveries as $rec) {
+					$recovery_map[(string) $rec['eventid']] = (int) $rec['clock'];
+				}
+			}
+			catch (\Throwable $e) {
+				$recovery_map = [];
+			}
+		}
+
+		$resolved = [];
+		$count = 0;
+		$mttr_sum = 0;
+		$mttr_count = 0;
+
+		foreach ($problem_events as $event) {
+			$rid = (string) ($event['r_eventid'] ?? '0');
+			if ($rid === '' || $rid === '0' || !isset($recovery_map[$rid])) {
+				continue;
+			}
+			$r_clock = $recovery_map[$rid];
+			if ($r_clock < $since) {
+				continue;
+			}
+			$p_clock = (int) ($event['clock'] ?? 0);
+			$mttr = max(0, $r_clock - $p_clock);
+			$mttr_sum += $mttr;
+			$mttr_count++;
+			$count++;
+
+			$resolved[] = [
+				'problem_event' => $event,
+				'resolved_at' => $r_clock,
+				'mttr' => $mttr
+			];
+		}
+
+		usort($resolved, static function(array $a, array $b): int {
+			return $b['resolved_at'] <=> $a['resolved_at'];
+		});
+
+		$top = array_slice($resolved, 0, 5);
+		$top_rows = $this->formatProblemRows(array_column($top, 'problem_event'), $timezone, $now);
+
+		foreach ($top_rows as $idx => &$row) {
+			$entry = $top[$idx];
+			$row['resolved_at'] = $entry['resolved_at'];
+			$row['resolved_at_text'] = $this->formatTimestamp($entry['resolved_at'], $timezone);
+			$row['resolved_age_text'] = $this->formatAge($entry['resolved_at'], $now->getTimestamp());
+			$row['mttr'] = $entry['mttr'];
+			$row['mttr_text'] = $this->formatDuration($entry['mttr']);
+		}
+		unset($row);
+
+		return [
+			'count' => $count,
+			'recent' => $top_rows,
+			'avg_mttr' => $mttr_count > 0 ? (int) round($mttr_sum / $mttr_count) : 0,
+			'avg_mttr_text' => $mttr_count > 0 ? $this->formatDuration((int) round($mttr_sum / $mttr_count)) : ''
+		];
+	}
+
+	private function getMonitoringHealth(): array {
+		$stale_total = 0;
+		$stale_hosts = 0;
+
+		try {
+			$stale_total = (int) API::Item()->get([
+				'countOutput' => true,
+				'filter' => ['state' => 1],
+				'monitored' => true
+			]);
+		}
+		catch (\Throwable $e) {
+			$stale_total = 0;
+		}
+
+		if ($stale_total > 0 && $stale_total <= 20000) {
+			try {
+				$stale_items = API::Item()->get([
+					'output' => ['hostid'],
+					'filter' => ['state' => 1],
+					'monitored' => true,
+					'limit' => 20000
+				]);
+				$host_ids = [];
+				foreach ($stale_items as $item) {
+					if (!empty($item['hostid'])) {
+						$host_ids[(string) $item['hostid']] = true;
 					}
-					if ((!is_array($check_data) || !$check_data) && method_exists('CSettingsHelper', 'getPrivate')) {
-						$check_data = @\CSettingsHelper::getPrivate($key);
-					}
+				}
+				$stale_hosts = count($host_ids);
+			}
+			catch (\Throwable $e) {
+				$stale_hosts = 0;
+			}
+		}
+
+		$unreachable_hosts = 0;
+		try {
+			$bad = API::HostInterface()->get([
+				'output' => ['hostid'],
+				'filter' => ['available' => 2]
+			]);
+			$hostids = [];
+			foreach ($bad as $iface) {
+				if (!empty($iface['hostid'])) {
+					$hostids[(string) $iface['hostid']] = true;
+				}
+			}
+			$unreachable_hosts = count($hostids);
+		}
+		catch (\Throwable $e) {
+			$unreachable_hosts = 0;
+		}
+
+		$unreachable_proxies = 0;
+		try {
+			$proxies = API::Proxy()->get([
+				'output' => ['proxyid', 'state', 'lastaccess']
+			]);
+			foreach ($proxies as $proxy) {
+				if ((int) ($proxy['state'] ?? 0) === 2) {
+					$unreachable_proxies++;
 				}
 			}
 		}
 		catch (\Throwable $e) {
-			$check_data = null;
+			$unreachable_proxies = 0;
 		}
 
-		if (is_string($check_data)) {
-			$decoded = json_decode($check_data, true);
-			if (is_array($decoded)) {
-				$check_data = $decoded;
+		$queue_backlog = null;
+		try {
+			$queue_items = API::Item()->get([
+				'output' => ['itemid'],
+				'filter' => ['key_' => 'zabbix[queue,10m]'],
+				'limit' => 1
+			]);
+			if ($queue_items) {
+				$itemid = $queue_items[0]['itemid'];
+				$history = API::History()->get([
+					'itemids' => [$itemid],
+					'history' => 3,
+					'sortfield' => 'clock',
+					'sortorder' => 'DESC',
+					'limit' => 1
+				]);
+				if ($history) {
+					$queue_backlog = (int) $history[0]['value'];
+				}
 			}
 		}
-
-		if (!is_array($check_data)) {
-			$check_data = [];
-		}
-
-		$current_version = (string) ($check_data['current_version'] ?? (defined('ZABBIX_VERSION') ? ZABBIX_VERSION : ''));
-		$latest_release = $check_data['latest_release'] ?? [];
-		$latest_version = '';
-		$release_notes_url = '';
-		$checked_at = 0;
-		$end_of_full_support = 0;
-
-		if (is_array($latest_release)) {
-			$latest_version = (string) ($latest_release['release'] ?? $latest_release['version'] ?? $latest_release['name'] ?? '');
-			$release_notes_url = (string) ($latest_release['release_notes_url'] ?? $latest_release['url'] ?? $check_data['release_notes_url'] ?? '');
-			$checked_at = (int) ($latest_release['created'] ?? $check_data['checked_at'] ?? 0);
-		}
-		elseif (is_string($latest_release)) {
-			$latest_version = $latest_release;
-		}
-
-		$end_of_full_support = (int) ($check_data['end_of_full_support'] ?? 0);
-
-		$available = null;
-		if ($latest_version !== '') {
-			if ($current_version !== '') {
-				$available = version_compare($this->normalizeVersion($latest_version), $this->normalizeVersion($current_version), '>');
-			}
-			else {
-				$available = true;
-			}
-		}
-
-		$message = '';
-		if ($available === true) {
-			$message = sprintf(_('Update available: %1$s (current: %2$s).'), $latest_version, $current_version !== '' ? $current_version : _('unknown'));
-		}
-		elseif ($available === false && $latest_version !== '') {
-			$message = sprintf(_('Frontend release is up to date (%1$s).'), $current_version !== '' ? $current_version : $latest_version);
-		}
-		elseif ($enabled === false) {
-			$message = _('Software update check is disabled.');
-		}
-		else {
-			$message = _('Software update data is unavailable.');
-		}
-
-		$support_message = '';
-		if ($end_of_full_support > 0) {
-			$support_message = sprintf(
-				_('End of full support: %1$s.'),
-				$this->formatTimestamp($end_of_full_support, $timezone)
-			);
+		catch (\Throwable $e) {
+			$queue_backlog = null;
 		}
 
 		return [
-			'enabled' => $enabled,
-			'available' => $available,
-			'current_version' => $current_version,
-			'latest_version' => $latest_version,
-			'release_notes_url' => $release_notes_url,
-			'checked_at' => $checked_at,
-			'checked_at_text' => $checked_at > 0 ? $this->formatTimestamp($checked_at, $timezone) : '',
-			'end_of_full_support' => $end_of_full_support,
-			'end_of_full_support_text' => $end_of_full_support > 0 ? $this->formatTimestamp($end_of_full_support, $timezone) : '',
-			'message' => $message,
-			'support_message' => $support_message
+			'stale_items_total' => $stale_total,
+			'stale_items_hosts' => $stale_hosts,
+			'unreachable_hosts' => $unreachable_hosts,
+			'unreachable_proxies' => $unreachable_proxies,
+			'queue_backlog' => $queue_backlog,
+			'stale_url' => $this->buildStaleItemsUrl(),
+			'unreachable_hosts_url' => $this->buildUnreachableHostsUrl(),
+			'proxy_url' => $this->buildUrl('proxy.list'),
+			'queue_url' => $this->buildUrl('queue.overview')
+		];
+	}
+
+	private function getNewHosts24h(\DateTimeZone $timezone, \DateTimeImmutable $now): array {
+		$since = $now->getTimestamp() - 86400;
+		$entries = [];
+		$count = 0;
+
+		$resource_host = 4;
+		$action_add = 0;
+		if (class_exists('CAudit')) {
+			if (defined('\CAudit::RESOURCE_HOST')) {
+				$resource_host = constant('\CAudit::RESOURCE_HOST');
+			}
+			if (defined('\CAudit::ACTION_ADD')) {
+				$action_add = constant('\CAudit::ACTION_ADD');
+			}
+		}
+
+		try {
+			$audit = API::AuditLog()->get([
+				'output' => ['auditid', 'clock', 'resourceid', 'resourcename'],
+				'filter' => [
+					'resourcetype' => $resource_host,
+					'action' => $action_add
+				],
+				'time_from' => $since,
+				'sortfield' => 'clock',
+				'sortorder' => 'DESC',
+				'limit' => 20
+			]);
+
+			foreach ($audit as $row) {
+				$clock = (int) ($row['clock'] ?? 0);
+				$entries[] = [
+					'name' => (string) ($row['resourcename'] ?? ''),
+					'hostid' => (string) ($row['resourceid'] ?? ''),
+					'clock' => $clock,
+					'clock_text' => $clock > 0 ? $this->formatTimestamp($clock, $timezone) : '',
+					'age_text' => $clock > 0 ? $this->formatAge($clock, $now->getTimestamp()) : ''
+				];
+			}
+			$count = count($audit);
+		}
+		catch (\Throwable $e) {
+			$entries = [];
+			$count = 0;
+		}
+
+		return [
+			'count' => $count,
+			'recent' => array_slice($entries, 0, 5),
+			'url' => $this->buildUrl('host.list')
 		];
 	}
 
@@ -544,14 +798,18 @@ class MotdDataProvider {
 		return $occurrence;
 	}
 
-	private function buildSummaryLine(array $problems, array $software_update, array $maintenances): string {
+	private function buildSummaryLine(array $problems, array $unacked, array $maintenances): string {
 		$parts = [
 			sprintf(_('Critical: %1$d'), (int) $problems['critical_count']),
 			sprintf(_('High: %1$d'), (int) $problems['high_count'])
 		];
 
-		if ($software_update['available'] === true && $software_update['latest_version'] !== '') {
-			$parts[] = sprintf(_('Update: %1$s'), $software_update['latest_version']);
+		if ((int) $unacked['count'] > 0) {
+			$parts[] = sprintf(_('Unacked: %1$d'), (int) $unacked['count']);
+		}
+
+		if ((int) $problems['suppressed_count'] > 0) {
+			$parts[] = sprintf(_('Suppressed: %1$d'), (int) $problems['suppressed_count']);
 		}
 
 		if ($maintenances['today_count'] > 0) {
@@ -564,17 +822,18 @@ class MotdDataProvider {
 		if (
 			(int) $problems['critical_count'] === 0
 			&& (int) $problems['high_count'] === 0
-			&& $software_update['available'] !== true
+			&& (int) $unacked['count'] === 0
+			&& (int) $problems['suppressed_count'] === 0
 			&& (int) $maintenances['today_count'] === 0
 			&& (int) $maintenances['week_count'] === 0
 		) {
-			return _('No High/Critical incidents, no update alert, and no maintenance windows scheduled for today or later this week.');
+			return _('No High/Critical incidents and no maintenance windows scheduled for today or later this week.');
 		}
 
 		return implode(' · ', $parts);
 	}
 
-	private function buildBannerItems(array $problems, array $software_update, array $maintenances): array {
+	private function buildBannerItems(array $problems, array $unacked, array $longest, array $maintenances): array {
 		$items = [];
 
 		if ((int) $problems['critical_count'] > 0 || (int) $problems['high_count'] > 0) {
@@ -585,23 +844,36 @@ class MotdDataProvider {
 					(int) $problems['critical_count'],
 					(int) $problems['high_count']
 				),
-				'url' => $problems['all_url']
+				'url' => $problems['high_critical_url']
 			];
 		}
 
-		if ($software_update['available'] === true && $software_update['latest_version'] !== '') {
+		if ((int) $unacked['count'] > 0) {
 			$items[] = [
-				'type' => 'update',
-				'text' => $software_update['message'],
-				'url' => $software_update['release_notes_url'] !== '' ? $software_update['release_notes_url'] : $this->buildUrl('motd.view')
+				'type' => 'unacked',
+				'text' => sprintf(
+					_('%1$d High/Critical problem(s) still unacknowledged.'),
+					(int) $unacked['count']
+				),
+				'url' => $unacked['url']
 			];
 		}
-		elseif ($software_update['support_message'] !== '') {
-			$items[] = [
-				'type' => 'update',
-				'text' => $software_update['support_message'],
-				'url' => ''
-			];
+
+		if (!empty($longest['recent'])) {
+			$oldest = $longest['recent'][0];
+			if (($oldest['age_text'] ?? '') !== '') {
+				$host_prefix = $oldest['host_text'] !== '' ? $oldest['host_text'].' — ' : '';
+				$items[] = [
+					'type' => 'longest',
+					'text' => sprintf(
+						_('Oldest open: %1$s%2$s — %3$s'),
+						$host_prefix,
+						$oldest['name'],
+						$oldest['age_text']
+					),
+					'url' => $oldest['url']
+				];
+			}
 		}
 
 		foreach (array_slice($maintenances['today'], 0, 2) as $occurrence) {
@@ -642,7 +914,7 @@ class MotdDataProvider {
 		return $items;
 	}
 
-	private function buildSummaryChips(array $problems, array $software_update, array $maintenances): array {
+	private function buildSummaryChips(array $problems, array $unacked, array $health, array $new_hosts, array $maintenances): array {
 		$chips = [
 			[
 				'label' => _('Critical'),
@@ -655,29 +927,82 @@ class MotdDataProvider {
 				'value' => (string) (int) $problems['high_count'],
 				'kind' => 'high',
 				'url' => $problems['high_url']
-			],
-			[
-				'label' => _('Today'),
-				'value' => (string) (int) $maintenances['today_count'],
-				'kind' => 'maintenance',
-				'url' => $this->buildUrl('motd.view')
-			],
-			[
-				'label' => _('This week'),
-				'value' => (string) (int) $maintenances['week_count'],
-				'kind' => 'maintenance',
-				'url' => $this->buildUrl('motd.view')
 			]
 		];
 
-		if ($software_update['available'] === true && $software_update['latest_version'] !== '') {
+		if ((int) $unacked['count'] > 0) {
 			$chips[] = [
-				'label' => _('Update'),
-				'value' => $software_update['latest_version'],
-				'kind' => 'update',
-				'url' => $software_update['release_notes_url'] !== '' ? $software_update['release_notes_url'] : $this->buildUrl('motd.view')
+				'label' => _('Unacked'),
+				'value' => (string) (int) $unacked['count'],
+				'kind' => 'unacked',
+				'url' => $unacked['url']
 			];
 		}
+
+		if ((int) $problems['suppressed_count'] > 0) {
+			$chips[] = [
+				'label' => _('Suppressed'),
+				'value' => (string) (int) $problems['suppressed_count'],
+				'kind' => 'suppressed',
+				'url' => $problems['suppressed_url']
+			];
+		}
+
+		if ((int) $health['stale_items_total'] > 0) {
+			$label = (int) $health['stale_items_hosts'] > 0
+				? sprintf('%d / %d', (int) $health['stale_items_hosts'], (int) $health['stale_items_total'])
+				: (string) (int) $health['stale_items_total'];
+			$chips[] = [
+				'label' => _('Stale items'),
+				'value' => $label,
+				'kind' => 'stale',
+				'url' => $health['stale_url']
+			];
+		}
+
+		if ((int) $health['unreachable_hosts'] > 0 || (int) $health['unreachable_proxies'] > 0) {
+			$value = (int) $health['unreachable_hosts'];
+			if ((int) $health['unreachable_proxies'] > 0) {
+				$value = $value.' + '.(int) $health['unreachable_proxies'].'p';
+			}
+			$chips[] = [
+				'label' => _('Unreachable'),
+				'value' => (string) $value,
+				'kind' => 'unreachable',
+				'url' => $health['unreachable_hosts_url']
+			];
+		}
+
+		if ($health['queue_backlog'] !== null && (int) $health['queue_backlog'] > 0) {
+			$chips[] = [
+				'label' => _('Queue'),
+				'value' => (string) (int) $health['queue_backlog'],
+				'kind' => 'queue',
+				'url' => $health['queue_url']
+			];
+		}
+
+		if ((int) $new_hosts['count'] > 0) {
+			$chips[] = [
+				'label' => _('New hosts 24h'),
+				'value' => (string) (int) $new_hosts['count'],
+				'kind' => 'activity',
+				'url' => $new_hosts['url']
+			];
+		}
+
+		$chips[] = [
+			'label' => _('Today'),
+			'value' => (string) (int) $maintenances['today_count'],
+			'kind' => 'maintenance',
+			'url' => $this->buildUrl('maintenance.list')
+		];
+		$chips[] = [
+			'label' => _('This week'),
+			'value' => (string) (int) $maintenances['week_count'],
+			'kind' => 'maintenance',
+			'url' => $this->buildUrl('maintenance.list')
+		];
 
 		return $chips;
 	}
@@ -754,11 +1079,26 @@ class MotdDataProvider {
 		}
 	}
 
-	private function normalizeVersion(string $version): string {
-		if (preg_match('/\d+(?:\.\d+)+(?:[a-z0-9.-]+)?/i', $version, $matches)) {
-			return $matches[0];
+	private function formatDuration(int $seconds): string {
+		$seconds = max(0, $seconds);
+		if ($seconds < 60) {
+			return sprintf(_('%1$ds'), $seconds);
 		}
-		return $version;
+		if ($seconds < 3600) {
+			return sprintf(_('%1$dm'), (int) floor($seconds / 60));
+		}
+		if ($seconds < 86400) {
+			$hours = (int) floor($seconds / 3600);
+			$minutes = (int) floor(($seconds % 3600) / 60);
+			return $minutes > 0
+				? sprintf(_('%1$dh %2$dm'), $hours, $minutes)
+				: sprintf(_('%1$dh'), $hours);
+		}
+		$days = (int) floor($seconds / 86400);
+		$hours = (int) floor(($seconds % 86400) / 3600);
+		return $hours > 0
+			? sprintf(_('%1$dd %2$dh'), $days, $hours)
+			: sprintf(_('%1$dd'), $days);
 	}
 
 	private function monthMatches(int $month_mask, int $month_number): bool {
@@ -785,21 +1125,68 @@ class MotdDataProvider {
 	}
 
 	private function buildProblemFilterUrl(array $severities): string {
-		return (new CUrl('zabbix.php'))
+		$url = (new CUrl('zabbix.php'))
 			->setArgument('action', 'problem.view')
+			->setArgument('show', 3);
+
+		foreach ($severities as $severity) {
+			$url->setArgument('severities['.(int) $severity.']', (int) $severity);
+		}
+
+		return $url->getUrl();
+	}
+
+	private function buildProblemSuppressedUrl(): string {
+		$url = (new CUrl('zabbix.php'))
+			->setArgument('action', 'problem.view')
+			->setArgument('show', 3)
+			->setArgument('show_suppressed', 1);
+
+		foreach ([self::SEVERITY_HIGH, self::SEVERITY_CRITICAL] as $severity) {
+			$url->setArgument('severities['.$severity.']', $severity);
+		}
+
+		return $url->getUrl();
+	}
+
+	private function buildProblemUnackedUrl(): string {
+		$url = (new CUrl('zabbix.php'))
+			->setArgument('action', 'problem.view')
+			->setArgument('show', 3)
+			->setArgument('acknowledgement_status', 1);
+
+		foreach ([self::SEVERITY_HIGH, self::SEVERITY_CRITICAL] as $severity) {
+			$url->setArgument('severities['.$severity.']', $severity);
+		}
+
+		return $url->getUrl();
+	}
+
+	private function buildStaleItemsUrl(): string {
+		return (new CUrl('zabbix.php'))
+			->setArgument('action', 'latest.view')
+			->setArgument('filter_state', 1)
 			->setArgument('filter_set', 1)
-			->setArgument('filter_severities[]', $severities)
 			->getUrl();
 	}
 
-	private function buildProblemEventUrl(string $eventid): string {
-		if ($eventid === '') {
+	private function buildUnreachableHostsUrl(): string {
+		return (new CUrl('zabbix.php'))
+			->setArgument('action', 'host.view')
+			->setArgument('filter_set', 1)
+			->setArgument('filter_status', 1)
+			->getUrl();
+	}
+
+	private function buildProblemTriggerUrl(string $triggerid): string {
+		if ($triggerid === '') {
 			return $this->buildUrl('problem.view');
 		}
 
 		return (new CUrl('zabbix.php'))
 			->setArgument('action', 'problem.view')
-			->setArgument('eventid', $eventid)
+			->setArgument('show', 3)
+			->setArgument('triggerids['.$triggerid.']', $triggerid)
 			->getUrl();
 	}
 }
