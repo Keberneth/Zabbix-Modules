@@ -48,7 +48,11 @@ class Config {
         'sql_version_item_key' => 'mssql.version',
         'windows_disk_search' => 'vfs.fs.dependent.size',
         'linux_disk_search' => 'vfs.file.contents[/sys/block/',
-        'interface_search' => 'net.if.out['
+        'interface_search' => 'net.if.out[',
+        'memory_unit' => 'mb',
+        'disk_unit' => 'mb',
+        'prune_disks' => true,
+        'prune_interfaces' => true
     ],
     'services' => [
         'enabled' => false,
@@ -327,7 +331,11 @@ public static function sanitizeForRuntime(array $config): array {
             'sql_version_item_key' => Util::cleanString($post['vm']['sql_version_item_key'] ?? '', 255),
             'windows_disk_search' => Util::cleanString($post['vm']['windows_disk_search'] ?? '', 255),
             'linux_disk_search' => Util::cleanString($post['vm']['linux_disk_search'] ?? '', 255),
-            'interface_search' => Util::cleanString($post['vm']['interface_search'] ?? '', 255)
+            'interface_search' => Util::cleanString($post['vm']['interface_search'] ?? '', 255),
+            'memory_unit' => Util::cleanEnum($post['vm']['memory_unit'] ?? 'mb', ['mb', 'gb'], 'mb'),
+            'disk_unit' => Util::cleanEnum($post['vm']['disk_unit'] ?? 'mb', ['mb', 'gb'], 'mb'),
+            'prune_disks' => Util::truthy($post['vm']['prune_disks'] ?? false),
+            'prune_interfaces' => Util::truthy($post['vm']['prune_interfaces'] ?? false)
         ];
 
         $new_config['services'] = [

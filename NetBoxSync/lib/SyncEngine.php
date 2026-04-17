@@ -550,17 +550,22 @@ class SyncEngine {
         $os_vendor = (string) ($ctx->getOsInfo()['vendor'] ?? '');
         $linux_vendors = ['ubuntu', 'redhat', 'oracle-linux', 'rocky-linux', 'sles', 'alma', 'almalinux', 'debian', 'centos', 'centos-stream', 'fedora', 'alpine', 'linux'];
 
+        $os_supported = false;
         if (strpos($os_value, 'windows') !== false) {
             $disks = $ctx->getWindowsDisks();
+            $os_supported = true;
         }
         elseif (strpos($os_value, 'linux') !== false || in_array($os_vendor, $linux_vendors, true)) {
             $disks = $ctx->getLinuxDisks();
+            $os_supported = true;
         }
         else {
             $disks = [];
         }
 
-        if ($disks === []) {
+        $prune = !empty($this->config['vm']['prune_disks']);
+
+        if ($disks === [] && (!$prune || !$os_supported)) {
             $this->summary['skipped']++;
             return false;
         }
@@ -570,14 +575,17 @@ class SyncEngine {
             $existing[(string) ($disk['name'] ?? '')] = $disk;
         }
 
+        $disk_unit = strtolower((string) ($this->config['vm']['disk_unit'] ?? 'mb'));
+        $unit_label = $disk_unit === 'gb' ? 'GB' : 'MB';
         $changed = false;
 
         foreach ($disks as $name => $size_gb) {
             $name = (string) $name;
-            $size_mb = max(0, (int) $size_gb) * 1000;
+            $size_gb_int = max(0, (int) $size_gb);
+            $size = $disk_unit === 'gb' ? $size_gb_int : $size_gb_int * 1000;
 
             if (!isset($existing[$name])) {
-                $this->netbox->createVirtualDisk((int) $vm['id'], $name, $size_mb);
+                $this->netbox->createVirtualDisk((int) $vm['id'], $name, $size);
                 $this->summary['created']++;
                 $changed = true;
                 $this->recordEvent(LogStore::TYPE_ADDED, [
@@ -587,14 +595,14 @@ class SyncEngine {
                     'target_id' => (int) ($vm['id'] ?? 0),
                     'field' => 'size',
                     'disk_name' => $name,
-                    'new_value' => (string) $size_mb
+                    'new_value' => $size.' '.$unit_label
                 ]);
                 continue;
             }
 
             $current_size = (int) ($existing[$name]['size'] ?? 0);
-            if ($current_size !== $size_mb) {
-                $this->netbox->updateVirtualDisk((int) $existing[$name]['id'], $size_mb);
+            if ($current_size !== $size) {
+                $this->netbox->updateVirtualDisk((int) $existing[$name]['id'], $size);
                 $this->summary['updated']++;
                 $changed = true;
                 $this->recordEvent(LogStore::TYPE_CHANGED, [
@@ -604,26 +612,28 @@ class SyncEngine {
                     'target_id' => (int) ($existing[$name]['id'] ?? 0),
                     'field' => 'size',
                     'disk_name' => $name,
-                    'old_value' => (string) $current_size,
-                    'new_value' => (string) $size_mb
+                    'old_value' => $current_size.' '.$unit_label,
+                    'new_value' => $size.' '.$unit_label
                 ]);
             }
 
             unset($existing[$name]);
         }
 
-        foreach ($existing as $name => $disk) {
-            $this->netbox->deleteVirtualDisk((int) $disk['id']);
-            $this->summary['deleted']++;
-            $changed = true;
-            $this->recordEvent(LogStore::TYPE_REMOVED, [
-                'sync_id' => 'vm_disks',
-                'target_type' => 'vm_disk',
-                'target_name' => (string) ($vm['name'] ?? '').' / '.$name,
-                'target_id' => (int) ($disk['id'] ?? 0),
-                'disk_name' => (string) $name,
-                'old_value' => (string) (int) ($disk['size'] ?? 0)
-            ]);
+        if ($prune) {
+            foreach ($existing as $name => $disk) {
+                $this->netbox->deleteVirtualDisk((int) $disk['id']);
+                $this->summary['deleted']++;
+                $changed = true;
+                $this->recordEvent(LogStore::TYPE_REMOVED, [
+                    'sync_id' => 'vm_disks',
+                    'target_type' => 'vm_disk',
+                    'target_name' => (string) ($vm['name'] ?? '').' / '.$name,
+                    'target_id' => (int) ($disk['id'] ?? 0),
+                    'disk_name' => (string) $name,
+                    'old_value' => ((int) ($disk['size'] ?? 0)).' '.$unit_label
+                ]);
+            }
         }
 
         if (!$changed) {
@@ -642,7 +652,9 @@ class SyncEngine {
         }
 
         $interface_names = $ctx->getInterfaceNames();
-        if ($interface_names === []) {
+        $prune = !empty($this->config['vm']['prune_interfaces']);
+
+        if ($interface_names === [] && !$prune) {
             $this->summary['skipped']++;
             return false;
         }
@@ -673,17 +685,19 @@ class SyncEngine {
             ]);
         }
 
-        foreach ($existing as $interface) {
-            $this->netbox->deleteVmInterface((int) $interface['id']);
-            $this->summary['deleted']++;
-            $changed = true;
-            $this->recordEvent(LogStore::TYPE_REMOVED, [
-                'sync_id' => 'vm_interfaces',
-                'target_type' => 'vm_interface',
-                'target_name' => (string) ($vm['name'] ?? '').' / '.(string) ($interface['name'] ?? ''),
-                'target_id' => (int) ($interface['id'] ?? 0),
-                'old_value' => (string) ($interface['name'] ?? '')
-            ]);
+        if ($prune) {
+            foreach ($existing as $interface) {
+                $this->netbox->deleteVmInterface((int) $interface['id']);
+                $this->summary['deleted']++;
+                $changed = true;
+                $this->recordEvent(LogStore::TYPE_REMOVED, [
+                    'sync_id' => 'vm_interfaces',
+                    'target_type' => 'vm_interface',
+                    'target_name' => (string) ($vm['name'] ?? '').' / '.(string) ($interface['name'] ?? ''),
+                    'target_id' => (int) ($interface['id'] ?? 0),
+                    'old_value' => (string) ($interface['name'] ?? '')
+                ]);
+            }
         }
 
         if (!$changed) {

@@ -359,6 +359,7 @@ $runner_curl = "curl -fsS -X POST -H 'X-NetBox-Sync-Secret: ".$runner_secret_hin
             </div>
             <div id="nbs-faq-vm" class="nbs-faq-box">
                 <p><?= $h(_('This section holds the standard item names and keys used by your current VM sync scripts: OS detection, CPU, memory, SQL version, disk discovery, and interface discovery.')) ?></p>
+                <p><strong><?= $h(_('Memory / disk units')) ?>:</strong> <?= $h(_('Older NetBox versions store both VM memory and virtual-disk size in MB. NetBox 4.3+ stores virtual-disk size in GB while memory stays in MB. Pick the unit that matches your NetBox version — mismatches show up as 1000× too-large or too-small values.')) ?></p>
             </div>
             <div class="nbs-settings-grid">
                 <div>
@@ -428,6 +429,33 @@ $runner_curl = "curl -fsS -X POST -H 'X-NetBox-Sync-Secret: ".$runner_secret_hin
                 <div class="nbs-span-2">
                     <label class="nbs-label"><?= $h(_('Interface item search')) ?></label>
                     <input class="nbs-input" type="text" name="vm[interface_search]" value="<?= $h($config['vm']['interface_search'] ?? '') ?>">
+                </div>
+                <div>
+                    <label class="nbs-label"><?= $h(_('NetBox memory unit')) ?></label>
+                    <select class="nbs-input" name="vm[memory_unit]">
+                        <?php foreach (['mb' => 'MB', 'gb' => 'GB'] as $value => $label): ?>
+                            <option value="<?= $h($value) ?>" <?= (strtolower((string) ($config['vm']['memory_unit'] ?? 'mb')) === $value) ? 'selected' : '' ?>><?= $h($label) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <div class="nbs-mini-help"><?= $h(_('Unit stored in the NetBox VM memory field. Most versions use MB.')) ?></div>
+                </div>
+                <div>
+                    <label class="nbs-label"><?= $h(_('NetBox disk unit')) ?></label>
+                    <select class="nbs-input" name="vm[disk_unit]">
+                        <?php foreach (['mb' => 'MB', 'gb' => 'GB'] as $value => $label): ?>
+                            <option value="<?= $h($value) ?>" <?= (strtolower((string) ($config['vm']['disk_unit'] ?? 'mb')) === $value) ? 'selected' : '' ?>><?= $h($label) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <div class="nbs-mini-help"><?= $h(_('Unit stored in the NetBox virtual-disk size field. NetBox 4.3+ switched to GB.')) ?></div>
+                </div>
+                <div>
+                    <label class="nbs-label"><?= $h(_('Prune disks')) ?></label>
+                    <label class="nbs-checkbox"><input type="checkbox" name="vm[prune_disks]" value="1" <?= !empty($config['vm']['prune_disks']) ? 'checked' : '' ?>> <?= $h(_('Delete NetBox disks that Zabbix no longer reports')) ?></label>
+                    <div class="nbs-mini-help"><?= $h(_('Applies even when Zabbix returns zero disks for the host.')) ?></div>
+                </div>
+                <div>
+                    <label class="nbs-label"><?= $h(_('Prune interfaces')) ?></label>
+                    <label class="nbs-checkbox"><input type="checkbox" name="vm[prune_interfaces]" value="1" <?= !empty($config['vm']['prune_interfaces']) ? 'checked' : '' ?>> <?= $h(_('Delete NetBox VM interfaces that Zabbix no longer reports')) ?></label>
                 </div>
             </div>
         </section>

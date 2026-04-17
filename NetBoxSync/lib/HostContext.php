@@ -331,7 +331,9 @@ class HostContext {
             $memory_value = $this->getItemValueByKey($memory_key, '0');
             if (is_numeric($memory_value)) {
                 $memory_gb = (int) ceil(((float) $memory_value) / (1024 ** 3));
-                $memory_mb = $memory_gb * 1000;
+                $memory_mb = strtolower((string) ($this->config['vm']['memory_unit'] ?? 'mb')) === 'gb'
+                    ? $memory_gb
+                    : $memory_gb * 1000;
             }
         }
 

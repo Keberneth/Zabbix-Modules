@@ -77,7 +77,11 @@
       "sql_version_item_key": "mssql.version",
       "windows_disk_search": "vfs.fs.dependent.size",
       "linux_disk_search": "vfs.file.contents[/sys/block/",
-      "interface_search": "net.if.out["
+      "interface_search": "net.if.out[",
+      "memory_unit": "mb",
+      "disk_unit": "mb",
+      "prune_disks": true,
+      "prune_interfaces": true
     },
     "services": {
       "enabled": false,
