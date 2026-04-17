@@ -1,0 +1,155 @@
+{
+  "manifest_version": 2.0,
+  "id": "custom_netbox_sync",
+  "name": "NetBox Sync",
+  "namespace": "NetBoxSync",
+  "version": "0.1.0",
+  "author": "Keberneth",
+  "description": "Zabbix 7 frontend module for configurable NetBox synchronization, including built-in VM/service sync and extensible custom mappings.",
+  "actions": {
+    "netboxsync.settings": {
+      "class": "SettingsView",
+      "view": "netboxsync.settings"
+    },
+    "netboxsync.settings.save": {
+      "class": "SettingsSave",
+      "layout": "layout.json"
+    },
+    "netboxsync.run": {
+      "class": "RunSync",
+      "layout": "layout.json"
+    },
+    "netboxsync.log": {
+      "class": "LogView",
+      "view": "netboxsync.log"
+    },
+    "netboxsync.log.fetch": {
+      "class": "LogFetch",
+      "layout": "layout.json"
+    },
+    "netboxsync.log.clear": {
+      "class": "LogClear",
+      "layout": "layout.json"
+    }
+  },
+  "assets": {
+    "css": [
+      "netboxsync.css"
+    ],
+    "js": [
+      "netboxsync.settings.js",
+      "netboxsync.log.js"
+    ]
+  },
+  "config": {
+    "netbox": {
+      "enabled": false,
+      "url": "",
+      "token": "",
+      "token_env": "",
+      "verify_peer": true,
+      "timeout": 15
+    },
+    "runner": {
+      "enabled": true,
+      "shared_secret": "",
+      "shared_secret_env": "",
+      "state_path": "/var/lib/zabbix-netbox-sync/state",
+      "log_path": "/var/log/zabbix-netbox-sync",
+      "global_interval_seconds": 3600,
+      "lock_ttl_seconds": 1800,
+      "default_prefix_length": 24,
+      "max_hosts_per_run": 0
+    },
+    "vm": {
+      "enabled": true,
+      "create_missing": true,
+      "update_existing": true,
+      "require_os_for_create": true,
+      "default_site": 1,
+      "name_suffix": "",
+      "name_suffix_separator": ".",
+      "os_pretty_name_item_name": "OSI PRETTY_NAME",
+      "os_fallback_item_key": "system.sw.os",
+      "linux_cpu_item_key": "system.cpu.num",
+      "windows_cpu_item_key": "wmi.get[root/cimv2,\"Select NumberOfLogicalProcessors from Win32_ComputerSystem\"]",
+      "memory_item_key": "vm.memory.size[total]",
+      "sql_version_item_key": "mssql.version",
+      "windows_disk_search": "vfs.fs.dependent.size",
+      "linux_disk_search": "vfs.file.contents[/sys/block/",
+      "interface_search": "net.if.out["
+    },
+    "services": {
+      "enabled": false,
+      "prune_stale": false,
+      "windows_item_name": "Listening Services JSON",
+      "linux_item_name": "Linux Listening Services JSON"
+    },
+    "device": {
+      "enabled": false,
+      "create_missing": true,
+      "update_existing": true,
+      "default_site": 1,
+      "default_role_id": 1,
+      "default_status": "active",
+      "name_source_mode": "host_name",
+      "name_source_value": "",
+      "manufacturer_source_mode": "static",
+      "manufacturer_source_value": "",
+      "model_source_mode": "item_key",
+      "model_source_value": "fgate.device.model",
+      "serial_source_mode": "item_key",
+      "serial_source_value": "fgate.device.serialnumber",
+      "create_missing_manufacturer": true,
+      "create_missing_device_type": true
+    },
+    "standard_syncs": [
+      {
+        "id": "vm_object",
+        "enabled": true,
+        "interval_seconds": 0
+      },
+      {
+        "id": "vm_os_eol",
+        "enabled": true,
+        "interval_seconds": 0
+      },
+      {
+        "id": "vm_sql_license",
+        "enabled": true,
+        "interval_seconds": 0
+      },
+      {
+        "id": "vm_disks",
+        "enabled": true,
+        "interval_seconds": 0
+      },
+      {
+        "id": "vm_interfaces",
+        "enabled": true,
+        "interval_seconds": 0
+      },
+      {
+        "id": "vm_primary_ip",
+        "enabled": true,
+        "interval_seconds": 0
+      },
+      {
+        "id": "vm_services",
+        "enabled": false,
+        "interval_seconds": 0
+      },
+      {
+        "id": "device_object",
+        "enabled": false,
+        "interval_seconds": 0
+      },
+      {
+        "id": "device_serial",
+        "enabled": false,
+        "interval_seconds": 0
+      }
+    ],
+    "custom_mappings": []
+  }
+}

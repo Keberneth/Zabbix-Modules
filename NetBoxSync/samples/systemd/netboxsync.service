@@ -1,0 +1,9 @@
+[Unit]
+Description=Zabbix NetBox Sync runner
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/sysconfig/zabbix-netbox-sync
+ExecStart=/usr/bin/curl -fsS -X POST -H "X-NetBox-Sync-Secret: ${NETBOXSYNC_SECRET}" "${NETBOXSYNC_URL}"
