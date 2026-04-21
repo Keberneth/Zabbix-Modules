@@ -1,3 +1,0 @@
-# /etc/cron.d/zabbix-netbox-sync
-# Requires NETBOXSYNC_SECRET to be set in the shell wrapper or use a root-readable file wrapper.
-*/60 * * * * root /usr/bin/curl -fsS -X POST -H "X-NetBox-Sync-Secret: ${NETBOXSYNC_SECRET}" "https://zabbix.example.com/zabbix.php?action=netboxsync.run" >/dev/null 2>&1
