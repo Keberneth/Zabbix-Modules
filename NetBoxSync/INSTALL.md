@@ -125,6 +125,52 @@ https://<zabbix>/zabbix.php?action=netboxsync.run
 Calls must include the shared secret header
 `X-NetBox-Sync-Secret: <shared_secret>`.
 
+### 9a. systemd timer (recommended)
+
+Install the two unit files from `samples/systemd/` into
+`/etc/systemd/system/` as `root:root`:
+
+```bash
+sudo install -o root -g root -m 0644 \
+    samples/systemd/netboxsync.service /etc/systemd/system/netboxsync.service
+sudo install -o root -g root -m 0644 \
+    samples/systemd/netboxsync.timer   /etc/systemd/system/netboxsync.timer
+```
+
+Create the environment file referenced by the service
+(`EnvironmentFile=/etc/sysconfig/zabbix-netbox-sync`). It contains the
+shared secret, so it must be readable only by root:
+
+```bash
+sudo install -o root -g root -m 0640 /dev/null /etc/sysconfig/zabbix-netbox-sync
+sudo tee /etc/sysconfig/zabbix-netbox-sync >/dev/null <<'EOF'
+NETBOXSYNC_URL=https://<zabbix>/zabbix.php?action=netboxsync.run
+NETBOXSYNC_SECRET=<shared_secret>
+EOF
+sudo chmod 0640 /etc/sysconfig/zabbix-netbox-sync
+```
+
+On Debian/Ubuntu use `/etc/default/zabbix-netbox-sync` instead and update
+the `EnvironmentFile=` line in `netboxsync.service` to match.
+
+Summary of file placement and permissions:
+
+| File                                       | Owner       | Mode   |
+| ------------------------------------------ | ----------- | ------ |
+| `/etc/systemd/system/netboxsync.service`   | `root:root` | `0644` |
+| `/etc/systemd/system/netboxsync.timer`     | `root:root` | `0644` |
+| `/etc/sysconfig/zabbix-netbox-sync`        | `root:root` | `0640` |
+
+Reload systemd and enable the timer:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now netboxsync.timer
+systemctl list-timers netboxsync.timer
+sudo systemctl start netboxsync.service      # one-shot test run
+journalctl -u netboxsync.service -n 50 --no-pager
+```
+
 ## 10. Optional: enable listening-services sync
 
 Deploy the matching Zabbix plugin/template first:
