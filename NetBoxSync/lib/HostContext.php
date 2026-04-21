@@ -22,6 +22,7 @@ class HostContext {
     private ?array $resolved_vm = null;
     private ?array $resolved_device = null;
     private array $vars = [];
+    private static ?array $endoflife_products = null;
 
     public function __construct(array $host, ZabbixApiClient $zabbix, array $config) {
         $this->host = $host;
@@ -188,52 +189,71 @@ class HostContext {
         }
 
         $os_string = strtolower((string) ($this->getOsValue() ?? ''));
-
         $vendor = null;
-        $version = null;
+        $version_candidates = [];
 
         if ($os_string !== '') {
-            if (strpos($os_string, 'ubuntu') !== false) {
-                $vendor = 'ubuntu';
-                if (preg_match('/ubuntu\s+(\d+\.\d+)/', $os_string, $m)) {
-                    $version = $m[1];
+            if (preg_match_all('/\b(\d+(?:\.\d+)+)\b/', $os_string, $matches)) {
+                foreach ($matches[1] as $full) {
+                    $parts = explode('.', $full);
+                    while (count($parts) > 0) {
+                        $version_candidates[] = implode('.', $parts);
+                        array_pop($parts);
+                    }
                 }
             }
-            elseif (strpos($os_string, 'oracle linux') !== false) {
-                $vendor = 'oracle-linux';
-                if (preg_match('/oracle linux.*?(\d+)\.?/', $os_string, $m)) {
-                    $version = $m[1];
+
+            if (preg_match('/(\d+)\s*sp(\d+)/', $os_string, $m)) {
+                $version_candidates[] = $m[1].'.'.$m[2];
+                $version_candidates[] = $m[1];
+            }
+
+            if (preg_match('/\b(20\d{2})\b/', $os_string, $m)) {
+                $version_candidates[] = $m[1];
+            }
+
+            if (preg_match('/\b(\d+)\b/', $os_string, $m)) {
+                $version_candidates[] = $m[1];
+            }
+
+            $version_candidates = array_values(array_unique($version_candidates));
+
+            $normalized_os = preg_replace('/[^a-z0-9]+/', '', $os_string);
+            $products = $this->endoflifeProducts();
+            $best = null;
+            $best_len = 0;
+
+            foreach ($products as $product) {
+                $nslug = preg_replace('/[^a-z0-9]+/', '', strtolower($product));
+                if ($nslug === '' || strlen($nslug) < 3) {
+                    continue;
+                }
+                if (strpos($normalized_os, $nslug) !== false && strlen($nslug) > $best_len) {
+                    $best = $product;
+                    $best_len = strlen($nslug);
                 }
             }
-            elseif (strpos($os_string, 'red hat enterprise linux') !== false) {
-                $vendor = 'redhat';
-                if (preg_match('/red hat enterprise linux.*?(\d+)\.?/', $os_string, $m)) {
-                    $version = $m[1];
+
+            $aliases = [
+                'redhatenterpriselinux' => 'rhel',
+                'redhat' => 'rhel',
+                'suselinuxenterpriseserver' => 'sles',
+                'opensuseleap' => 'opensuse',
+                'amazonlinux' => 'amazon-linux'
+            ];
+            $products_set = array_flip($products);
+
+            foreach ($aliases as $alias_key => $slug) {
+                if (strpos($normalized_os, $alias_key) !== false
+                    && isset($products_set[$slug])
+                    && strlen($alias_key) > $best_len) {
+                    $best = $slug;
+                    $best_len = strlen($alias_key);
                 }
             }
-            elseif (strpos($os_string, 'rocky linux') !== false) {
-                $vendor = 'rocky-linux';
-                if (preg_match('/rocky linux\s+(\d+)\.?/', $os_string, $m)) {
-                    $version = $m[1];
-                }
-            }
-            elseif (strpos($os_string, 'suse linux enterprise server') !== false) {
-                $vendor = 'sles';
-                if (preg_match('/suse linux enterprise server\s+(\d+)(?:\s*sp(\d+))?/', $os_string, $m)) {
-                    $version = isset($m[2]) && $m[2] !== '' ? ($m[1].'.'.$m[2]) : $m[1];
-                }
-            }
-            elseif (strpos($os_string, 'centos') !== false) {
-                $vendor = (strpos($os_string, 'stream') !== false) ? 'centos-stream' : 'centos';
-                if (preg_match('/centos(?: linux| stream)?(?: release)?\s*(\d+)(?:\.(\d+))?/', $os_string, $m)) {
-                    $version = isset($m[2]) && $m[2] !== '' ? ($m[1].'.'.$m[2]) : $m[1];
-                }
-            }
-            elseif (strpos($os_string, 'windows server') !== false) {
-                $vendor = 'windows-server';
-                if (preg_match('/windows server.*?\b(2003|2008|2012|2016|2019|2022|2025)\b/', $os_string, $m)) {
-                    $version = $m[1];
-                }
+
+            if ($best !== null) {
+                $vendor = $best;
             }
             elseif (strpos($os_string, 'linux') !== false) {
                 $vendor = 'linux';
@@ -242,7 +262,8 @@ class HostContext {
 
         $this->os_info = [
             'vendor' => $vendor,
-            'version' => $version
+            'version' => $version_candidates[0] ?? null,
+            'version_candidates' => $version_candidates
         ];
 
         return $this->os_info;
@@ -255,37 +276,43 @@ class HostContext {
 
         $info = $this->getOsInfo();
         $vendor = (string) ($info['vendor'] ?? '');
-        $version = (string) ($info['version'] ?? '');
+        $candidates = is_array($info['version_candidates'] ?? null) ? $info['version_candidates'] : [];
 
-        if ($vendor === '' || $version === '') {
+        if ($vendor === '' || $candidates === []) {
             $this->os_eol = 'Unknown';
             return $this->os_eol;
         }
 
         try {
-            if ($vendor === 'sles') {
-                $rows = $this->httpGetJson('https://endoflife.date/api/sles.json');
+            $rows = $this->httpGetJson('https://endoflife.date/api/'.rawurlencode($vendor).'.json');
 
-                if (is_array($rows)) {
+            if (is_array($rows)) {
+                foreach ($candidates as $candidate) {
+                    $best_row = null;
+                    $best_cycle_len = -1;
+
                     foreach ($rows as $row) {
                         if (!is_array($row)) {
                             continue;
                         }
 
-                        if ((string) ($row['cycle'] ?? '') === $version) {
-                            $eol = trim((string) ($row['eol'] ?? ''));
-                            $this->os_eol = $eol !== '' ? $eol : 'Still Supported';
-                            return $this->os_eol;
+                        $cycle = (string) ($row['cycle'] ?? '');
+                        if ($cycle === '') {
+                            continue;
+                        }
+
+                        $matches = ($cycle === $candidate) || (strpos($candidate, $cycle.'.') === 0);
+                        if ($matches && strlen($cycle) > $best_cycle_len) {
+                            $best_row = $row;
+                            $best_cycle_len = strlen($cycle);
                         }
                     }
-                }
-            }
-            else {
-                $row = $this->httpGetJson('https://endoflife.date/api/'.$vendor.'/'.$version.'.json');
-                if (is_array($row)) {
-                    $eol = trim((string) ($row['eol'] ?? ''));
-                    $this->os_eol = $eol !== '' ? $eol : 'Unknown';
-                    return $this->os_eol;
+
+                    if ($best_row !== null) {
+                        $eol = trim((string) ($best_row['eol'] ?? ''));
+                        $this->os_eol = $eol !== '' ? $eol : 'Still Supported';
+                        return $this->os_eol;
+                    }
                 }
             }
         }
@@ -297,6 +324,17 @@ class HostContext {
         return $this->os_eol;
     }
 
+    private function endoflifeProducts(): array {
+        if (self::$endoflife_products !== null) {
+            return self::$endoflife_products;
+        }
+
+        $data = $this->httpGetJson('https://endoflife.date/api/all.json');
+        self::$endoflife_products = is_array($data) ? array_values(array_filter($data, 'is_string')) : [];
+
+        return self::$endoflife_products;
+    }
+
     public function getCpuMemory(): array {
         if ($this->cpu_memory !== null) {
             return $this->cpu_memory;
@@ -304,7 +342,7 @@ class HostContext {
 
         $os_value = strtolower((string) ($this->getOsValue() ?? ''));
         $vendor = (string) ($this->getOsInfo()['vendor'] ?? '');
-        $linux_vendors = ['ubuntu', 'redhat', 'oracle-linux', 'rocky-linux', 'sles', 'centos', 'centos-stream', 'linux'];
+        $linux_vendors = ['ubuntu', 'rhel', 'redhat', 'oracle-linux', 'rocky-linux', 'sles', 'opensuse', 'alma', 'almalinux', 'debian', 'centos', 'centos-stream', 'fedora', 'alpine', 'amazon-linux', 'linux'];
 
         $cpu_key = '';
 

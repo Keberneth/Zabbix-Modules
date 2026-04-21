@@ -310,7 +310,7 @@ class SyncEngine {
         $os_info = $ctx->getOsInfo();
         $vendor = (string) ($os_info['vendor'] ?? '');
 
-        $linux_vendors = ['ubuntu', 'redhat', 'oracle-linux', 'rocky-linux', 'sles', 'alma', 'almalinux', 'debian', 'centos', 'centos-stream', 'fedora', 'alpine', 'linux'];
+        $linux_vendors = ['ubuntu', 'rhel', 'redhat', 'oracle-linux', 'rocky-linux', 'sles', 'opensuse', 'alma', 'almalinux', 'debian', 'centos', 'centos-stream', 'fedora', 'alpine', 'amazon-linux', 'linux'];
 
         if ($os_value === '' && !empty($vm_config['require_os_for_create'])) {
             $existing = $this->findExistingVmByCandidate($ctx);
@@ -562,7 +562,7 @@ class SyncEngine {
 
         $os_value = strtolower((string) ($ctx->getOsValue() ?? ''));
         $os_vendor = (string) ($ctx->getOsInfo()['vendor'] ?? '');
-        $linux_vendors = ['ubuntu', 'redhat', 'oracle-linux', 'rocky-linux', 'sles', 'alma', 'almalinux', 'debian', 'centos', 'centos-stream', 'fedora', 'alpine', 'linux'];
+        $linux_vendors = ['ubuntu', 'rhel', 'redhat', 'oracle-linux', 'rocky-linux', 'sles', 'opensuse', 'alma', 'almalinux', 'debian', 'centos', 'centos-stream', 'fedora', 'alpine', 'amazon-linux', 'linux'];
 
         $os_supported = false;
         if (strpos($os_value, 'windows') !== false) {
