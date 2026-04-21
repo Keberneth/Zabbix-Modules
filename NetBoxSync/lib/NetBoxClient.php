@@ -186,7 +186,7 @@ class NetBoxClient {
     }
 
     public function getVmInterfaceIps(int $interface_id): array {
-        return $this->listResults('/ipam/ip-addresses/', ['vminterface_id' => [$interface_id]]);
+        return $this->listResults('/ipam/ip-addresses/', ['vminterface_id' => $interface_id]);
     }
 
     public function createVmInterfaceIp(string $address, int $interface_id): array {

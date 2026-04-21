@@ -349,11 +349,19 @@ class SyncEngine {
         }
 
         $resolved = $this->findExistingVmByCandidate($ctx);
+        $vcpus = (int) ($cpu_memory['vcpus'] ?? 0);
+        $memory_mb = (int) ($cpu_memory['memory_mb'] ?? 0);
         $payload = [
-            'vcpus' => (int) ($cpu_memory['vcpus'] ?? 0),
-            'memory' => (int) ($cpu_memory['memory_mb'] ?? 0),
             'platform' => $platform_id
         ];
+
+        if ($vcpus > 0) {
+            $payload['vcpus'] = $vcpus;
+        }
+
+        if ($memory_mb > 0) {
+            $payload['memory'] = $memory_mb;
+        }
 
         if ($resolved === null) {
             if (empty($vm_config['create_missing'])) {
@@ -366,10 +374,16 @@ class SyncEngine {
                 'name' => $vm_name,
                 'site' => (int) ($vm_config['default_site'] ?? 1),
                 'status' => 'active',
-                'platform' => $platform_id,
-                'vcpus' => (int) ($cpu_memory['vcpus'] ?? 0),
-                'memory' => (int) ($cpu_memory['memory_mb'] ?? 0)
+                'platform' => $platform_id
             ];
+
+            if ($vcpus > 0) {
+                $create_payload['vcpus'] = $vcpus;
+            }
+
+            if ($memory_mb > 0) {
+                $create_payload['memory'] = $memory_mb;
+            }
 
             $vm = $this->netbox->createVm($create_payload);
             $ctx->setResolvedVm($vm);
@@ -380,7 +394,7 @@ class SyncEngine {
                 'target_type' => 'vm',
                 'target_name' => $vm_name,
                 'target_id' => (int) ($vm['id'] ?? 0),
-                'new_value' => 'vcpus='.(int) $create_payload['vcpus'].', memory='.(int) $create_payload['memory']
+                'new_value' => 'vcpus='.$vcpus.', memory='.$memory_mb
             ]);
             return true;
         }
@@ -394,12 +408,12 @@ class SyncEngine {
 
         $changes = [];
 
-        if ((int) ($resolved['vcpus'] ?? 0) !== (int) $payload['vcpus']) {
-            $changes['vcpus'] = $payload['vcpus'];
+        if ($vcpus > 0 && (int) ($resolved['vcpus'] ?? 0) !== $vcpus) {
+            $changes['vcpus'] = $vcpus;
         }
 
-        if ((int) ($resolved['memory'] ?? 0) !== (int) $payload['memory']) {
-            $changes['memory'] = $payload['memory'];
+        if ($memory_mb > 0 && (int) ($resolved['memory'] ?? 0) !== $memory_mb) {
+            $changes['memory'] = $memory_mb;
         }
 
         $current_platform_id = (int) ($resolved['platform']['id'] ?? $resolved['platform'] ?? 0);
