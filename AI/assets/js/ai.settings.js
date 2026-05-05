@@ -1,6 +1,30 @@
 (function () {
     'use strict';
 
+    // Models whose APIs only accept the default temperature (typically 1).
+    // When a user picks one of these, we force the per-provider temperature
+    // field to 1 and explain why. The user can still override.
+    var FORCED_DEFAULT_TEMPERATURE_PATTERNS = [
+        /^gpt-5(?:[-.].*)?$/i,
+        /^o1(?:[-.].*)?$/i,
+        /^o3(?:[-.].*)?$/i,
+        /^o4(?:[-.].*)?$/i
+    ];
+    var FORCED_DEFAULT_TEMPERATURE_VALUE = '1';
+
+    function modelRequiresDefaultTemperature(modelName) {
+        var trimmed = (modelName || '').trim();
+        if (!trimmed) {
+            return false;
+        }
+        for (var i = 0; i < FORCED_DEFAULT_TEMPERATURE_PATTERNS.length; i++) {
+            if (FORCED_DEFAULT_TEMPERATURE_PATTERNS[i].test(trimmed)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     function init() {
         var root = document.getElementById('ai-settings-root');
 
@@ -23,6 +47,8 @@
         root.addEventListener('click', function (event) {
             var addButton = event.target.closest('[data-add-row]');
             var removeButton = event.target.closest('.ai-remove-row');
+            var testProviderButton = event.target.closest('[data-test-provider]');
+            var testNetBoxButton = event.target.closest('[data-test-netbox]');
 
             if (addButton) {
                 event.preventDefault();
@@ -37,6 +63,34 @@
                 if (row) {
                     row.remove();
                 }
+                return;
+            }
+
+            if (testProviderButton) {
+                event.preventDefault();
+                handleTestProvider(testProviderButton, root);
+                return;
+            }
+
+            if (testNetBoxButton) {
+                event.preventDefault();
+                handleTestNetBox(testNetBoxButton, root);
+            }
+        });
+
+        // React to model changes (typing or picking from the datalist) so the
+        // per-provider temperature is auto-set when the chosen model only
+        // supports the default temperature.
+        root.addEventListener('input', function (event) {
+            var modelInput = event.target.closest('.ai-provider-model-input');
+            if (modelInput) {
+                applyTemperatureDefaultForModel(modelInput);
+            }
+        });
+        root.addEventListener('change', function (event) {
+            var modelInput = event.target.closest('.ai-provider-model-input');
+            if (modelInput) {
+                applyTemperatureDefaultForModel(modelInput);
             }
         });
 
@@ -148,6 +202,13 @@
                     });
             });
         }
+
+        // Initial pass: any existing provider rows whose saved model name forces
+        // a specific temperature should display the warning hint on page load.
+        var existingModelInputs = root.querySelectorAll('.ai-provider-model-input');
+        for (var idx = 0; idx < existingModelInputs.length; idx++) {
+            applyTemperatureDefaultForModel(existingModelInputs[idx]);
+        }
     }
 
     function parseJsonSafe(text) {
@@ -176,6 +237,365 @@
         if (form) {
             form.parentNode.insertBefore(el, form);
         }
+    }
+
+    function getProviderRow(element) {
+        return element ? element.closest('.ai-provider-row') : null;
+    }
+
+    function buildProviderTestPayload(row) {
+        var data = new FormData();
+        var inputs = row.querySelectorAll('input[name], select[name], textarea[name]');
+
+        for (var i = 0; i < inputs.length; i++) {
+            var input = inputs[i];
+            var name = input.getAttribute('name') || '';
+            var match = name.match(/\[([^\]]+)\]$/);
+
+            if (!match) {
+                continue;
+            }
+
+            var fieldName = match[1];
+
+            if (input.type === 'checkbox') {
+                if (input.checked) {
+                    data.append(fieldName, input.value || '1');
+                }
+                continue;
+            }
+
+            if (input.type === 'radio' && !input.checked) {
+                continue;
+            }
+
+            data.append(fieldName, input.value);
+        }
+
+        return data;
+    }
+
+    function applyTemperatureDefaultForModel(modelInput) {
+        var row = getProviderRow(modelInput);
+        if (!row) {
+            return;
+        }
+
+        var tempInput = row.querySelector('.ai-provider-temperature-input');
+        var tempHint = row.querySelector('.ai-provider-temperature-hint');
+
+        if (!tempInput) {
+            return;
+        }
+
+        var modelName = modelInput.value || '';
+
+        if (modelRequiresDefaultTemperature(modelName)) {
+            // If the user has set an explicit value other than 1, the API will
+            // reject it — bump it to 1. Blank stays blank (uses the global,
+            // which is also 1).
+            var current = (tempInput.value || '').trim();
+            if (current !== '') {
+                var currentNum = parseFloat(current);
+                if (isNaN(currentNum) || currentNum !== 1) {
+                    tempInput.value = FORCED_DEFAULT_TEMPERATURE_VALUE;
+                }
+            }
+
+            if (tempHint) {
+                tempHint.textContent = 'This model only accepts the default temperature (1).';
+                tempHint.classList.add('ai-status-warn');
+            }
+        }
+        else if (tempHint) {
+            tempHint.textContent = 'Leave blank to use global chat temperature.';
+            tempHint.classList.remove('ai-status-warn');
+        }
+    }
+
+    function describeError(value) {
+        if (value === null || value === undefined || value === '') {
+            return '';
+        }
+        if (typeof value === 'string') {
+            return value;
+        }
+        if (Array.isArray(value)) {
+            var pieces = [];
+            for (var i = 0; i < value.length; i++) {
+                var part = describeError(value[i]);
+                if (part) {
+                    pieces.push(part);
+                }
+            }
+            return pieces.join('; ');
+        }
+        if (typeof value === 'object') {
+            if (typeof value.message === 'string' && value.message) {
+                return value.message;
+            }
+            if (typeof value.title === 'string' && value.title) {
+                return value.title;
+            }
+            if (Array.isArray(value.messages) && value.messages.length) {
+                return describeError(value.messages);
+            }
+            if (Array.isArray(value.errors) && value.errors.length) {
+                return describeError(value.errors);
+            }
+            try {
+                return JSON.stringify(value);
+            }
+            catch (e) {
+                return String(value);
+            }
+        }
+        return String(value);
+    }
+
+    function setProviderTestStatus(row, message, kind) {
+        var status = row.querySelector('.ai-test-provider-status');
+
+        if (!status) {
+            return;
+        }
+
+        var text = (typeof message === 'string') ? message : describeError(message);
+        status.textContent = text || '';
+        status.classList.remove('ai-status-ok', 'ai-status-error', 'ai-status-warn');
+
+        if (kind) {
+            status.classList.add('ai-status-' + kind);
+        }
+    }
+
+    function populateModelDatalist(row, models) {
+        var datalist = row.querySelector('.ai-provider-model-datalist');
+        var hint = row.querySelector('.ai-provider-model-hint');
+
+        if (!datalist) {
+            return;
+        }
+
+        datalist.textContent = '';
+
+        for (var i = 0; i < models.length; i++) {
+            var option = document.createElement('option');
+            option.value = models[i];
+            datalist.appendChild(option);
+        }
+
+        if (hint) {
+            if (models.length > 0) {
+                hint.textContent = models.length + ' model(s) detected. Click the field for autocomplete.';
+            }
+            else {
+                hint.textContent = 'No models returned by the provider.';
+            }
+        }
+    }
+
+    function handleTestProvider(button, root) {
+        var row = getProviderRow(button);
+
+        if (!row) {
+            return;
+        }
+
+        var endpoint = root.getAttribute('data-test-provider-url') || '';
+
+        if (!endpoint) {
+            setProviderTestStatus(row, 'Test endpoint is not configured.', 'error');
+            return;
+        }
+
+        var originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Testing…';
+        setProviderTestStatus(row, 'Connecting…', null);
+
+        var payload = buildProviderTestPayload(row);
+
+        // Zabbix enforces CSRF on POST endpoints; attach the per-action token
+        // exposed by the view via data-* attributes.
+        var csrfFieldName = root.getAttribute('data-csrf-field-name') || '';
+        var csrfToken = root.getAttribute('data-test-provider-csrf') || '';
+        if (csrfFieldName && csrfToken) {
+            payload.append(csrfFieldName, csrfToken);
+        }
+
+        fetch(endpoint, {
+            method: 'POST',
+            credentials: 'same-origin',
+            body: payload
+        })
+            .then(function (response) {
+                return response.text().then(function (text) {
+                    var parsed = parseJsonSafe(text);
+
+                    if (parsed && typeof parsed === 'object' && typeof parsed.main_block === 'string') {
+                        var inner = parseJsonSafe(parsed.main_block);
+                        if (inner) {
+                            parsed = inner;
+                        }
+                    }
+
+                    if (parsed === null || parsed === undefined) {
+                        return {
+                            ok: false,
+                            error: 'Server returned non-JSON response (HTTP ' + response.status + '). '
+                                + 'Check that the AI module is enabled in Administration > Modules.'
+                        };
+                    }
+
+                    return parsed;
+                });
+            })
+            .then(function (data) {
+                if (data && data.ok) {
+                    var models = Array.isArray(data.models) ? data.models : [];
+                    populateModelDatalist(row, models);
+                    setProviderTestStatus(row, data.message || 'Connection succeeded.', 'ok');
+
+                    var modelInput = row.querySelector('.ai-provider-model-input');
+                    if (modelInput) {
+                        applyTemperatureDefaultForModel(modelInput);
+                    }
+                }
+                else {
+                    var errorText = describeError(data && (data.error || data.errors || data.messages || data));
+                    setProviderTestStatus(row, errorText || 'Connection failed.', 'error');
+                }
+            })
+            .catch(function (error) {
+                var msg = (error && error.message) ? error.message : describeError(error);
+                setProviderTestStatus(row, 'Test failed: ' + (msg || 'unknown error'), 'error');
+            })
+            .finally(function () {
+                button.disabled = false;
+                button.textContent = originalText;
+            });
+    }
+
+    function buildNamedFieldsPayload(scope) {
+        var data = new FormData();
+        var inputs = scope.querySelectorAll('input[name], select[name], textarea[name]');
+
+        for (var i = 0; i < inputs.length; i++) {
+            var input = inputs[i];
+            var name = input.getAttribute('name') || '';
+            var match = name.match(/\[([^\]]+)\]$/);
+
+            if (!match) {
+                continue;
+            }
+
+            var fieldName = match[1];
+
+            if (input.type === 'checkbox') {
+                if (input.checked) {
+                    data.append(fieldName, input.value || '1');
+                }
+                continue;
+            }
+
+            if (input.type === 'radio' && !input.checked) {
+                continue;
+            }
+
+            data.append(fieldName, input.value);
+        }
+
+        return data;
+    }
+
+    function setNetBoxTestStatus(scope, message, kind) {
+        var status = scope.querySelector('.ai-test-netbox-status');
+
+        if (!status) {
+            return;
+        }
+
+        var text = (typeof message === 'string') ? message : describeError(message);
+        status.textContent = text || '';
+        status.classList.remove('ai-status-ok', 'ai-status-error', 'ai-status-warn');
+
+        if (kind) {
+            status.classList.add('ai-status-' + kind);
+        }
+    }
+
+    function handleTestNetBox(button, root) {
+        var scope = document.getElementById('ai-netbox-section');
+
+        if (!scope) {
+            return;
+        }
+
+        var endpoint = root.getAttribute('data-test-netbox-url') || '';
+
+        if (!endpoint) {
+            setNetBoxTestStatus(scope, 'Test endpoint is not configured.', 'error');
+            return;
+        }
+
+        var originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Testing…';
+        setNetBoxTestStatus(scope, 'Connecting…', null);
+
+        var payload = buildNamedFieldsPayload(scope);
+
+        var csrfFieldName = root.getAttribute('data-csrf-field-name') || '';
+        var csrfToken = root.getAttribute('data-test-netbox-csrf') || '';
+        if (csrfFieldName && csrfToken) {
+            payload.append(csrfFieldName, csrfToken);
+        }
+
+        fetch(endpoint, {
+            method: 'POST',
+            credentials: 'same-origin',
+            body: payload
+        })
+            .then(function (response) {
+                return response.text().then(function (text) {
+                    var parsed = parseJsonSafe(text);
+
+                    if (parsed && typeof parsed === 'object' && typeof parsed.main_block === 'string') {
+                        var inner = parseJsonSafe(parsed.main_block);
+                        if (inner) {
+                            parsed = inner;
+                        }
+                    }
+
+                    if (parsed === null || parsed === undefined) {
+                        return {
+                            ok: false,
+                            error: 'Server returned non-JSON response (HTTP ' + response.status + '). '
+                                + 'Check that the AI module is enabled in Administration > Modules.'
+                        };
+                    }
+
+                    return parsed;
+                });
+            })
+            .then(function (data) {
+                if (data && data.ok) {
+                    setNetBoxTestStatus(scope, data.message || 'Connection succeeded.', 'ok');
+                }
+                else {
+                    var errorText = describeError(data && (data.error || data.errors || data.messages || data));
+                    setNetBoxTestStatus(scope, errorText || 'Connection failed.', 'error');
+                }
+            })
+            .catch(function (error) {
+                var msg = (error && error.message) ? error.message : describeError(error);
+                setNetBoxTestStatus(scope, 'Test failed: ' + (msg || 'unknown error'), 'error');
+            })
+            .finally(function () {
+                button.disabled = false;
+                button.textContent = originalText;
+            });
     }
 
     function addRow(type) {

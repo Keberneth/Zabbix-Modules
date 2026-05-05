@@ -67,7 +67,7 @@ class Config {
             ],
             'chat' => [
                 'max_history_messages' => 12,
-                'temperature' => 0.2,
+                'temperature' => 1.0,
                 'item_history_period_hours' => 24,
                 'item_history_max_rows' => 50
             ],
@@ -381,7 +381,7 @@ class Config {
 
         $new_config['chat'] = [
             'max_history_messages' => Util::cleanInt($post['chat']['max_history_messages'] ?? 12, 12, 0, 50),
-            'temperature' => Util::cleanFloat($post['chat']['temperature'] ?? 0.2, 0.2, 0, 2),
+            'temperature' => Util::cleanFloat($post['chat']['temperature'] ?? 1.0, 1.0, 0, 2),
             'item_history_period_hours' => Util::cleanInt($post['chat']['item_history_period_hours'] ?? 24, 24, 1, 720),
             'item_history_max_rows' => Util::cleanInt($post['chat']['item_history_max_rows'] ?? 50, 50, 5, 500)
         ];

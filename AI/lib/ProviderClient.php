@@ -6,7 +6,7 @@ use RuntimeException;
 
 class ProviderClient {
 
-    public static function chat(array $provider, array $messages, float $temperature = 0.2): string {
+    public static function chat(array $provider, array $messages, float $temperature = 1.0): string {
         $type = strtolower(trim((string) ($provider['type'] ?? 'openai_compatible')));
 
         // Per-provider temperature override: -1 or unset means use the global default.

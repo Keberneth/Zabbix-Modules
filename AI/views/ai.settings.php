@@ -16,6 +16,18 @@ $settings_save_url = (new CUrl('zabbix.php'))
     ->setArgument('action', 'ai.settings.save')
     ->getUrl();
 
+$test_provider_url = (new CUrl('zabbix.php'))
+    ->setArgument('action', 'ai.test.provider')
+    ->getUrl();
+
+$test_provider_csrf = CCsrfTokenHelper::get('ai.test.provider');
+$test_netbox_csrf = CCsrfTokenHelper::get('ai.test.netbox');
+$csrf_field_name = CCsrfTokenHelper::CSRF_TOKEN_NAME;
+
+$test_netbox_url = (new CUrl('zabbix.php'))
+    ->setArgument('action', 'ai.test.netbox')
+    ->getUrl();
+
 $chat_url = (new CUrl('zabbix.php'))
     ->setArgument('action', 'ai.chat')
     ->getUrl();
@@ -69,7 +81,9 @@ $render_provider_row = static function(array $provider = []) use ($h, $api_key_e
             </div>
             <div>
                 <label class="ai-label"><?= $h(_('Model')) ?></label>
-                <input class="ai-input" type="text" name="providers[<?= $h($id) ?>][model]" value="<?= $h($provider['model'] ?? '') ?>" placeholder="gpt-4.1-mini / llama3.2 / claude-sonnet">
+                <input class="ai-input ai-provider-model-input" type="text" list="ai-models-<?= $h($id) ?>" name="providers[<?= $h($id) ?>][model]" value="<?= $h($provider['model'] ?? '') ?>" placeholder="gpt-4.1-mini / llama3.2 / claude-sonnet">
+                <datalist id="ai-models-<?= $h($id) ?>" class="ai-provider-model-datalist"></datalist>
+                <span class="ai-muted ai-provider-model-hint"></span>
             </div>
             <div>
                 <label class="ai-label"><?= $h(_('Timeout')) ?></label>
@@ -77,8 +91,8 @@ $render_provider_row = static function(array $provider = []) use ($h, $api_key_e
             </div>
             <div>
                 <label class="ai-label"><?= $h(_('Temperature')) ?></label>
-                <input class="ai-input" type="number" min="0" max="2" step="0.1" name="providers[<?= $h($id) ?>][temperature]" value="<?= $h(($provider['temperature'] ?? -1) >= 0 ? $provider['temperature'] : '') ?>" placeholder="Global default">
-                <span class="ai-muted"><?= $h(_('Leave blank to use global chat temperature.')) ?></span>
+                <input class="ai-input ai-provider-temperature-input" type="number" min="0" max="2" step="0.1" name="providers[<?= $h($id) ?>][temperature]" value="<?= $h(($provider['temperature'] ?? -1) >= 0 ? $provider['temperature'] : '') ?>" placeholder="Global default">
+                <span class="ai-muted ai-provider-temperature-hint"><?= $h(_('Leave blank to use global chat temperature.')) ?></span>
             </div>
             <div>
                 <label class="ai-label"><?= $h(_('Max tokens')) ?></label>
@@ -96,7 +110,7 @@ $render_provider_row = static function(array $provider = []) use ($h, $api_key_e
                     <?php if (!empty($provider['api_key_present'])): ?>
                         <span class="ai-muted"><?= $h(_('Stored secret exists.')) ?></span>
                     <?php endif; ?>
-                    <label class="ai-checkbox"><input type="checkbox" name="providers[<?= $h($id) ?>][clear_api_key]" value="1"> <?= $h(_('Clear stored secret')) ?></label>
+                    <label class="ai-checkbox ai-checkbox-danger"><input type="checkbox" name="providers[<?= $h($id) ?>][clear_api_key]" value="1"> <?= $h(_('Clear stored secret')) ?></label>
                 </div>
             </div>
             <div>
@@ -109,7 +123,9 @@ $render_provider_row = static function(array $provider = []) use ($h, $api_key_e
             </div>
         </div>
         <div class="ai-repeat-row-actions">
-            <button type="button" class="btn-alt ai-remove-row"><?= $h(_('Remove provider')) ?></button>
+            <button type="button" class="btn ai-test-provider" data-test-provider><?= $h(_('Test connection')) ?></button>
+            <span class="ai-test-provider-status ai-muted" role="status" aria-live="polite"></span>
+            <button type="button" class="btn ai-remove-row"><?= $h(_('Remove provider')) ?></button>
         </div>
     </div>
     <?php
@@ -141,7 +157,7 @@ $render_instruction_row = static function(array $instruction = []) use ($h): str
             </div>
         </div>
         <div class="ai-repeat-row-actions">
-            <button type="button" class="btn-alt ai-remove-row"><?= $h(_('Remove instruction')) ?></button>
+            <button type="button" class="btn ai-remove-row"><?= $h(_('Remove instruction')) ?></button>
         </div>
     </div>
     <?php
@@ -169,7 +185,7 @@ $render_link_row = static function(array $link = []) use ($h): string {
             </div>
         </div>
         <div class="ai-repeat-row-actions">
-            <button type="button" class="btn-alt ai-remove-row"><?= $h(_('Remove link')) ?></button>
+            <button type="button" class="btn ai-remove-row"><?= $h(_('Remove link')) ?></button>
         </div>
     </div>
     <?php
@@ -205,7 +221,7 @@ $render_custom_rule_row = static function(array $rule = []) use ($h): string {
             </div>
         </div>
         <div class="ai-repeat-row-actions">
-            <button type="button" class="btn-alt ai-remove-row"><?= $h(_('Remove rule')) ?></button>
+            <button type="button" class="btn ai-remove-row"><?= $h(_('Remove rule')) ?></button>
         </div>
     </div>
     <?php
@@ -214,15 +230,15 @@ $render_custom_rule_row = static function(array $rule = []) use ($h): string {
 
 ob_start();
 ?>
-<div id="ai-settings-root" class="ai-page ai-settings-page" data-ai-theme="<?= $h($ai_theme) ?>">
+<div id="ai-settings-root" class="ai-page ai-settings-page" data-ai-theme="<?= $h($ai_theme) ?>" data-test-provider-url="<?= $h($test_provider_url) ?>" data-test-provider-csrf="<?= $h($test_provider_csrf) ?>" data-test-netbox-url="<?= $h($test_netbox_url) ?>" data-test-netbox-csrf="<?= $h($test_netbox_csrf) ?>" data-csrf-field-name="<?= $h($csrf_field_name) ?>">
     <div class="ai-header">
         <div>
             <h1><?= $h($data['title'] ?? _('AI settings')) ?></h1>
             <p class="ai-muted">Configure providers, prompt policy, integrations, redaction, and local logging.</p>
         </div>
         <div class="ai-header-actions">
-            <a class="btn-alt" href="<?= $h($chat_url) ?>"><?= $h(_('Open chat')) ?></a>
-            <a class="btn-alt" href="<?= $h($logs_url) ?>"><?= $h(_('Open logs')) ?></a>
+            <a class="btn" href="<?= $h($chat_url) ?>"><?= $h(_('Open chat')) ?></a>
+            <a class="btn" href="<?= $h($logs_url) ?>"><?= $h(_('Open logs')) ?></a>
         </div>
     </div>
 
@@ -246,33 +262,37 @@ ob_start();
                 <p><strong>API keys:</strong> Prefer environment variables over storing secrets directly. Set the env var name in "Secret environment variable" and ensure it is visible to your PHP/web process.</p>
             </div>
             <p class="ai-muted">Supported provider types: openai_compatible, ollama, anthropic.</p>
-            <div class="ai-repeat-grid ai-settings-grid">
-                <div>
-                    <label class="ai-label"><?= $h(_('Default for chat')) ?></label>
-                    <select class="ai-input" name="default_chat_provider_id">
-                        <option value=""><?= $h(_('Auto')) ?></option>
-                        <?php foreach ($providers as $provider): ?>
-                            <option value="<?= $h($provider['id'] ?? '') ?>" <?= (($config['default_chat_provider_id'] ?? '') === ($provider['id'] ?? '')) ? 'selected' : '' ?>><?= $h($provider['name'] ?? $provider['id'] ?? '') ?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                <div>
-                    <label class="ai-label"><?= $h(_('Default for webhook')) ?></label>
-                    <select class="ai-input" name="default_webhook_provider_id">
-                        <option value=""><?= $h(_('Auto')) ?></option>
-                        <?php foreach ($providers as $provider): ?>
-                            <option value="<?= $h($provider['id'] ?? '') ?>" <?= (($config['default_webhook_provider_id'] ?? '') === ($provider['id'] ?? '')) ? 'selected' : '' ?>><?= $h($provider['name'] ?? $provider['id'] ?? '') ?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                <div>
-                    <label class="ai-label"><?= $h(_('Default for Zabbix actions')) ?></label>
-                    <select class="ai-input" name="default_actions_provider_id">
-                        <option value=""><?= $h(_('Auto')) ?></option>
-                        <?php foreach ($providers as $provider): ?>
-                            <option value="<?= $h($provider['id'] ?? '') ?>" <?= (($config['default_actions_provider_id'] ?? '') === ($provider['id'] ?? '')) ? 'selected' : '' ?>><?= $h($provider['name'] ?? $provider['id'] ?? '') ?></option>
-                        <?php endforeach; ?>
-                    </select>
+            <div class="ai-defaults-block">
+                <h3 class="ai-defaults-heading"><?= $h(_('Default providers')) ?></h3>
+                <p class="ai-muted ai-defaults-subhead"><?= $h(_('Pick which configured provider is used for each context. "Auto" falls back to the first enabled provider.')) ?></p>
+                <div class="ai-repeat-grid ai-settings-grid">
+                    <div>
+                        <label class="ai-label"><?= $h(_('Default for chat')) ?></label>
+                        <select class="ai-input" name="default_chat_provider_id">
+                            <option value=""><?= $h(_('Auto')) ?></option>
+                            <?php foreach ($providers as $provider): ?>
+                                <option value="<?= $h($provider['id'] ?? '') ?>" <?= (($config['default_chat_provider_id'] ?? '') === ($provider['id'] ?? '')) ? 'selected' : '' ?>><?= $h($provider['name'] ?? $provider['id'] ?? '') ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="ai-label"><?= $h(_('Default for webhook')) ?></label>
+                        <select class="ai-input" name="default_webhook_provider_id">
+                            <option value=""><?= $h(_('Auto')) ?></option>
+                            <?php foreach ($providers as $provider): ?>
+                                <option value="<?= $h($provider['id'] ?? '') ?>" <?= (($config['default_webhook_provider_id'] ?? '') === ($provider['id'] ?? '')) ? 'selected' : '' ?>><?= $h($provider['name'] ?? $provider['id'] ?? '') ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="ai-label"><?= $h(_('Default for Zabbix actions')) ?></label>
+                        <select class="ai-input" name="default_actions_provider_id">
+                            <option value=""><?= $h(_('Auto')) ?></option>
+                            <?php foreach ($providers as $provider): ?>
+                                <option value="<?= $h($provider['id'] ?? '') ?>" <?= (($config['default_actions_provider_id'] ?? '') === ($provider['id'] ?? '')) ? 'selected' : '' ?>><?= $h($provider['name'] ?? $provider['id'] ?? '') ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
                 </div>
             </div>
             <div id="ai-providers-list" class="ai-repeat-list">
@@ -281,7 +301,7 @@ ob_start();
                 <?php endforeach; ?>
             </div>
             <div class="ai-section-actions">
-                <button type="button" class="btn-alt" data-add-row="provider"><?= $h(_('Add provider')) ?></button>
+                <button type="button" class="btn" data-add-row="provider"><?= $h(_('Add provider')) ?></button>
             </div>
         </section>
 
@@ -301,7 +321,7 @@ ob_start();
                 <?php endforeach; ?>
             </div>
             <div class="ai-section-actions">
-                <button type="button" class="btn-alt" data-add-row="instruction"><?= $h(_('Add instruction')) ?></button>
+                <button type="button" class="btn" data-add-row="instruction"><?= $h(_('Add instruction')) ?></button>
             </div>
         </section>
 
@@ -320,7 +340,7 @@ ob_start();
                 <?php endforeach; ?>
             </div>
             <div class="ai-section-actions">
-                <button type="button" class="btn-alt" data-add-row="reference_link"><?= $h(_('Add link')) ?></button>
+                <button type="button" class="btn" data-add-row="reference_link"><?= $h(_('Add link')) ?></button>
             </div>
         </section>
 
@@ -368,7 +388,7 @@ ob_start();
                         <?php if (!empty($config['zabbix_api']['token_present'])): ?>
                             <span class="ai-muted"><?= $h(_('Stored token exists.')) ?></span>
                         <?php endif; ?>
-                        <label class="ai-checkbox"><input type="checkbox" name="zabbix_api[clear_token]" value="1"> <?= $h(_('Clear stored token')) ?></label>
+                        <label class="ai-checkbox ai-checkbox-danger"><input type="checkbox" name="zabbix_api[clear_token]" value="1"> <?= $h(_('Clear stored token')) ?></label>
                     </div>
                 </div>
                 <div>
@@ -378,7 +398,7 @@ ob_start();
             </div>
         </section>
 
-        <section class="ai-card">
+        <section class="ai-card" id="ai-netbox-section" data-test-scope="netbox">
             <div class="ai-section-header">
                 <h2><?= $h(_('NetBox')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-netbox" title="<?= $h(_('Help')) ?>">?</button>
@@ -411,13 +431,17 @@ ob_start();
                         <?php if (!empty($config['netbox']['token_present'])): ?>
                             <span class="ai-muted"><?= $h(_('Stored token exists.')) ?></span>
                         <?php endif; ?>
-                        <label class="ai-checkbox"><input type="checkbox" name="netbox[clear_token]" value="1"> <?= $h(_('Clear stored token')) ?></label>
+                        <label class="ai-checkbox ai-checkbox-danger"><input type="checkbox" name="netbox[clear_token]" value="1"> <?= $h(_('Clear stored token')) ?></label>
                     </div>
                 </div>
                 <div>
                     <label class="ai-label"><?= $h(_('Token environment variable')) ?></label>
                     <input class="ai-input" type="text" name="netbox[token_env]" value="<?= $h($config['netbox']['token_env'] ?? '') ?>" placeholder="NETBOX_TOKEN">
                 </div>
+            </div>
+            <div class="ai-section-actions">
+                <button type="button" class="btn ai-test-netbox" data-test-netbox><?= $h(_('Test connection')) ?></button>
+                <span class="ai-test-netbox-status ai-muted" role="status" aria-live="polite"></span>
             </div>
         </section>
 
@@ -474,7 +498,7 @@ ob_start();
                         <?php if (!empty($config['webhook']['shared_secret_present'])): ?>
                             <span class="ai-muted"><?= $h(_('Stored secret exists.')) ?></span>
                         <?php endif; ?>
-                        <label class="ai-checkbox"><input type="checkbox" name="webhook[clear_shared_secret]" value="1"> <?= $h(_('Clear stored secret')) ?></label>
+                        <label class="ai-checkbox ai-checkbox-danger"><input type="checkbox" name="webhook[clear_shared_secret]" value="1"> <?= $h(_('Clear stored secret')) ?></label>
                     </div>
                 </div>
                 <div>
@@ -493,7 +517,7 @@ ob_start();
                 <p><strong>What is this?</strong> Controls for the chat page behavior.</p>
                 <ul>
                     <li><strong>Max history messages</strong> &mdash; How many previous messages are sent to the AI for context. Higher = more context but slower and more tokens. Default 12.</li>
-                    <li><strong>Temperature</strong> &mdash; Controls AI randomness. 0 = deterministic, 1 = creative, 2 = very random. Default 0.2 (focused and consistent). Can be overridden per provider.</li>
+                    <li><strong>Temperature</strong> &mdash; Controls AI randomness. 0 = deterministic, 1 = creative, 2 = very random. Default 1 (matches OpenAI's default; some newer models like GPT-5 only accept 1). Can be overridden per provider.</li>
                     <li><strong>Item history period</strong> &mdash; How far back to fetch item history when the "Include history" button is clicked. Default 24 hours.</li>
                     <li><strong>Item history max rows</strong> &mdash; Maximum number of data points per item to include. Default 50.</li>
                 </ul>
@@ -506,7 +530,7 @@ ob_start();
                 </div>
                 <div>
                     <label class="ai-label"><?= $h(_('Temperature')) ?></label>
-                    <input class="ai-input" type="number" min="0" max="2" step="0.1" name="chat[temperature]" value="<?= $h($config['chat']['temperature'] ?? 0.2) ?>">
+                    <input class="ai-input" type="number" min="0" max="2" step="0.1" name="chat[temperature]" value="<?= $h($config['chat']['temperature'] ?? 1.0) ?>">
                 </div>
                 <div>
                     <label class="ai-label"><?= $h(_('Item history period (hours)')) ?></label>
@@ -633,7 +657,7 @@ restorecon -Rv /var/lib/zabbix-ai</pre>
                 <?php endforeach; ?>
             </div>
             <div class="ai-section-actions">
-                <button type="button" class="btn-alt" data-add-row="custom_rule"><?= $h(_('Add custom rule')) ?></button>
+                <button type="button" class="btn" data-add-row="custom_rule"><?= $h(_('Add custom rule')) ?></button>
             </div>
         </section>
 
@@ -743,6 +767,15 @@ restorecon -Rv /var/log/zabbix-ai</pre>
                 <h2><?= $h(_('Zabbix actions')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-actions" title="<?= $h(_('Help')) ?>">?</button>
             </div>
+            <div class="ai-danger-notice" role="alert">
+                <p>
+                    <strong><?= $h(_('Warning')) ?></strong> &mdash;
+                    <?= $h(_('Enabling this lets the AI module read and (in Read & write mode) modify your Zabbix configuration on behalf of users. Write actions can create maintenance windows, change items/triggers, create users, and acknowledge problems. Only enable if you trust the AI provider, the configured Zabbix API token scope, and the users who can chat with the AI.')) ?>
+                </p>
+                <p class="ai-danger-notice-followup">
+                    <?= $h(_('Nothing happens automatically: every write action is shown to the user with the exact tool name and arguments, and the user must click Confirm before the module executes it. Read actions run without confirmation.')) ?>
+                </p>
+            </div>
             <div id="faq-actions" class="ai-faq-box">
                 <p><strong>What is this?</strong> Lets the AI query and modify Zabbix through natural language. Ask things like "Show me all high-severity problems" or "Create a maintenance window for host db-01".</p>
                 <p><strong>Read actions</strong> (always safe): get_problems, get_unsupported_items, get_host_info, get_host_uptime, get_host_os, get_triggers, get_items</p>
@@ -769,7 +802,10 @@ restorecon -Rv /var/log/zabbix-ai</pre>
                     </select>
                 </div>
                 <div>
-                    <label class="ai-label"><?= $h(_('Require Super Admin for write')) ?></label>
+                    <label class="ai-label">
+                        <?= $h(_('Require Super Admin for write')) ?>
+                        <span class="ai-recommended-badge" title="<?= $h(_('Strongly recommended in production.')) ?>"><?= $h(_('Recommended')) ?></span>
+                    </label>
                     <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[require_super_admin_for_write]" value="1" <?= !empty($config['zabbix_actions']['require_super_admin_for_write']) ? 'checked' : '' ?>> <?= $h(_('Restrict write actions')) ?></label>
                 </div>
             </div>

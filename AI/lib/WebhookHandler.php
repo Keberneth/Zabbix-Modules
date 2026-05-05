@@ -74,7 +74,7 @@ class WebhookHandler {
         $reply_masked = ProviderClient::chat(
             $provider,
             $masked_messages,
-            (float) ($config['chat']['temperature'] ?? 0.2)
+            (float) ($config['chat']['temperature'] ?? 1.0)
         );
         $reply = $redactor->restoreText($reply_masked);
 

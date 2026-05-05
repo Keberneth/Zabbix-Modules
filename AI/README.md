@@ -159,6 +159,7 @@ For OpenAI-compatible APIs:
 - **API key:** use the field or preferably an environment variable
 - **Temperature:** Leave blank to use global default, or set per-provider (0-2)
 - **Max tokens:** Leave blank for provider default, or set a specific limit
+- **Test connection:** Click the button on each provider row to verify connectivity. On success, the model field becomes an autocomplete populated with the provider's available models. Picking a model that requires the default temperature (e.g. GPT-5, o1/o3/o4 series) auto-sets temperature to 1.
 
 For Ollama:
 
@@ -214,7 +215,7 @@ This lets you use a faster/cheaper model for chat and a more capable model for Z
 ### 5. Chat settings
 
 - **Max history messages:** How many prior messages are sent for context (default 12)
-- **Temperature:** Global AI randomness setting (default 0.2, can be overridden per provider)
+- **Temperature:** Global AI randomness setting (default 1, can be overridden per provider)
 - **Item history period:** How far back to fetch item data when "Include history" is clicked (default 24 hours)
 - **Item history max rows:** Maximum data points per item (default 50)
 

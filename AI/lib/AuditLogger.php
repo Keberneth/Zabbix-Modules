@@ -90,19 +90,26 @@ class AuditLogger {
         }
     }
 
-    public static function listEntries(array $config, array $filters = [], int $limit = 200): array {
+    private const QUERY_MAX_SCAN = 20000;
+
+    public static function query(array $config, array $filters = [], int $limit = 250, int $offset = 0): array {
         $config = Config::mergeWithDefaults($config);
-        $limit = max(1, min($limit, 1000));
+        $limit = max(1, min(2000, $limit));
+        $offset = max(0, $offset);
         self::runMaintenance($config);
 
-        // listLogFiles() already returns files sorted newest-first by name,
-        // and readFileLines() returns each file's lines newest-first, so the
-        // combined stream is newest → oldest with no extra reverse needed.
-        $files = self::listLogFiles($config);
-        $entries = [];
+        $files = self::listFilesInRange($config, $filters['since'] ?? '', $filters['until'] ?? '');
+        $matches = [];
+        $scanned = 0;
+        $cap = self::QUERY_MAX_SCAN;
 
         foreach ($files as $file) {
             foreach (self::readFileLines($file) as $line) {
+                $scanned++;
+                if ($scanned > $cap) {
+                    break 2;
+                }
+
                 $line = trim($line);
                 if ($line === '') {
                     continue;
@@ -113,18 +120,110 @@ class AuditLogger {
                     continue;
                 }
 
-                if (!self::entryMatches($decoded, $filters)) {
+                if (!self::queryMatches($decoded, $filters)) {
                     continue;
                 }
 
-                $entries[] = $decoded;
-                if (count($entries) >= $limit) {
-                    return $entries;
+                $matches[] = $decoded;
+                if (count($matches) >= $offset + $limit + 1) {
+                    break 2;
                 }
             }
         }
 
-        return $entries;
+        $total = count($matches);
+        $items = array_slice($matches, $offset, $limit);
+
+        return [
+            'items' => $items,
+            'count' => count($items),
+            'offset' => $offset,
+            'limit' => $limit,
+            'has_more' => $total > $offset + $limit || $scanned > $cap
+        ];
+    }
+
+    public static function facets(array $config, array $filters = [], array $fields = [
+        'category', 'status', 'source', 'tool'
+    ]): array {
+        $config = Config::mergeWithDefaults($config);
+        self::runMaintenance($config);
+
+        $files = self::listFilesInRange($config, $filters['since'] ?? '', $filters['until'] ?? '');
+        $facets = array_fill_keys($fields, []);
+        $scanned = 0;
+        $cap = self::QUERY_MAX_SCAN;
+
+        // Apply only the time + tab filter when computing facets so the user
+        // still sees all available values for the other dimensions.
+        $facet_filters = [
+            'category' => $filters['category'] ?? '',
+            'since' => $filters['since'] ?? '',
+            'until' => $filters['until'] ?? ''
+        ];
+
+        foreach ($files as $file) {
+            foreach (self::readFileLines($file) as $line) {
+                $scanned++;
+                if ($scanned > $cap) {
+                    break 2;
+                }
+
+                $line = trim($line);
+                if ($line === '') {
+                    continue;
+                }
+
+                $decoded = json_decode($line, true);
+                if (!is_array($decoded)) {
+                    continue;
+                }
+
+                if (!self::queryMatches($decoded, $facet_filters)) {
+                    continue;
+                }
+
+                foreach ($fields as $field) {
+                    $value = (string) ($decoded[$field] ?? '');
+                    if ($value === '') {
+                        continue;
+                    }
+
+                    $facets[$field][$value] = ($facets[$field][$value] ?? 0) + 1;
+                }
+            }
+        }
+
+        foreach ($facets as $field => $values) {
+            ksort($values, SORT_NATURAL | SORT_FLAG_CASE);
+            $facets[$field] = array_map(
+                static function($value, $count) { return ['value' => (string) $value, 'count' => (int) $count]; },
+                array_keys($values),
+                array_values($values)
+            );
+        }
+
+        return $facets;
+    }
+
+    public static function clear(array $config): int {
+        $config = Config::mergeWithDefaults($config);
+
+        $removed = 0;
+
+        foreach (Filesystem::safeGlob(self::logDir($config).'/ai-*.jsonl') as $file) {
+            if (@unlink($file)) {
+                $removed++;
+            }
+        }
+
+        foreach (Filesystem::safeGlob(self::archiveDir($config).'/ai-*.jsonl*') as $file) {
+            if (@unlink($file)) {
+                $removed++;
+            }
+        }
+
+        return $removed;
     }
 
     public static function summary(array $config): array {
@@ -289,27 +388,146 @@ class AuditLogger {
         return array_reverse(is_array($lines) ? $lines : []);
     }
 
-    private static function entryMatches(array $entry, array $filters): bool {
-        $source = trim((string) ($filters['source'] ?? ''));
-        $status = trim((string) ($filters['status'] ?? ''));
-        $search = trim((string) ($filters['search'] ?? ''));
+    private static function queryMatches(array $entry, array $filters): bool {
+        // Tab filter: 'category' = 'all' (show everything) or 'errors' (show
+        // entries where status === 'error' OR category === 'errors') or any
+        // specific category name.
+        $tab = strtolower(trim((string) ($filters['category'] ?? '')));
+        if ($tab !== '' && $tab !== 'all') {
+            if ($tab === 'errors') {
+                $is_error = strtolower((string) ($entry['status'] ?? '')) === 'error'
+                    || strtolower((string) ($entry['category'] ?? '')) === 'errors';
+                if (!$is_error) {
+                    return false;
+                }
+            }
+            elseif ($tab === 'tools') {
+                $cat = strtolower((string) ($entry['category'] ?? ''));
+                if ($cat !== 'reads' && $cat !== 'writes') {
+                    return false;
+                }
+            }
+            elseif (strtolower((string) ($entry['category'] ?? '')) !== $tab) {
+                return false;
+            }
+        }
 
-        if ($source !== '' && ($entry['category'] ?? '') !== $source && ($entry['source'] ?? '') !== $source) {
+        // Multi-value field filters (substring match, case-insensitive).
+        foreach (['category', 'status', 'source', 'tool', 'event', 'request_id'] as $key) {
+            if (!array_key_exists($key, $filters)) {
+                continue;
+            }
+
+            $values = self::normalizeFilterList($filters[$key]);
+            if ($values === []) {
+                continue;
+            }
+
+            if (!self::containsAny((string) ($entry[$key] ?? ''), $values)) {
+                return false;
+            }
+        }
+
+        // Time range — work on the ISO 8601 'ts' prefix YYYY-MM-DD.
+        $ts_date = substr((string) ($entry['ts'] ?? ''), 0, 10);
+
+        $since = self::cleanIsoDate($filters['since'] ?? '');
+        if ($since !== '' && $ts_date !== '' && strcmp($ts_date, $since) < 0) {
             return false;
         }
 
-        if ($status !== '' && ($entry['status'] ?? '') !== $status) {
+        $until = self::cleanIsoDate($filters['until'] ?? '');
+        if ($until !== '' && $ts_date !== '' && strcmp($ts_date, $until) > 0) {
             return false;
         }
 
-        if ($search !== '') {
+        // Free text search across the full encoded record.
+        $text = trim((string) ($filters['q'] ?? ''));
+        if ($text !== '') {
             $haystack = strtolower(json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
-            if (strpos($haystack, strtolower($search)) === false) {
+            if (strpos($haystack, strtolower($text)) === false) {
                 return false;
             }
         }
 
         return true;
+    }
+
+    private static function normalizeFilterList($input): array {
+        if (is_string($input)) {
+            $input = array_map('trim', explode(',', $input));
+        }
+
+        if (!is_array($input)) {
+            return [];
+        }
+
+        $values = [];
+        foreach ($input as $value) {
+            $value = trim((string) $value);
+            if ($value !== '') {
+                $values[] = $value;
+            }
+        }
+
+        return $values;
+    }
+
+    private static function containsAny(string $current, array $needles): bool {
+        $current_lower = strtolower($current);
+
+        foreach ($needles as $needle) {
+            $needle_lower = strtolower((string) $needle);
+            if ($needle_lower === '') {
+                continue;
+            }
+
+            if ($current_lower === $needle_lower) {
+                return true;
+            }
+
+            if (strpos($current_lower, $needle_lower) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static function cleanIsoDate(string $value): string {
+        $value = trim($value);
+        return preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) ? $value : '';
+    }
+
+    private static function listFilesInRange(array $config, string $since, string $until): array {
+        $files = self::listLogFiles($config);
+        $since = self::cleanIsoDate($since);
+        $until = self::cleanIsoDate($until);
+
+        if ($since === '' && $until === '') {
+            return $files;
+        }
+
+        $filtered = [];
+        foreach ($files as $file) {
+            // Filename shape: ai-YYYY-MM-DD.jsonl[.gz]
+            if (!preg_match('/ai-(\d{4}-\d{2}-\d{2})\.jsonl/', basename($file), $m)) {
+                $filtered[] = $file;
+                continue;
+            }
+
+            $date = $m[1];
+            if ($since !== '' && strcmp($date, $since) < 0) {
+                continue;
+            }
+            if ($until !== '' && strcmp($date, $until) > 0) {
+                continue;
+            }
+
+            $filtered[] = $file;
+        }
+
+        return $filtered;
     }
 
     private static function logDir(array $config): string {

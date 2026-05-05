@@ -126,7 +126,7 @@ class ChatExecute extends CController {
                     $formatted_masked = ProviderClient::chat(
                         $provider,
                         $messages,
-                        (float) ($config['chat']['temperature'] ?? 0.2)
+                        (float) ($config['chat']['temperature'] ?? 1.0)
                     );
                     $formatted = $redactor !== null ? $redactor->restoreText($formatted_masked) : $formatted_masked;
                 }

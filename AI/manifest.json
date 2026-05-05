@@ -23,6 +23,22 @@
       "class": "SettingsSave",
       "layout": "layout.json"
     },
+    "ai.test.provider": {
+      "class": "TestProvider",
+      "layout": "layout.json"
+    },
+    "ai.test.netbox": {
+      "class": "TestNetBox",
+      "layout": "layout.json"
+    },
+    "ai.logs.fetch": {
+      "class": "LogsFetch",
+      "layout": "layout.json"
+    },
+    "ai.logs.clear": {
+      "class": "LogsClear",
+      "layout": "layout.json"
+    },
     "ai.chat.send": {
       "class": "ChatSend",
       "layout": "layout.json"
@@ -64,6 +80,7 @@
     "js": [
       "ai.chat.js",
       "ai.settings.js",
+      "ai.logs.js",
       "ai.config.inline.js"
     ]
   },
@@ -110,7 +127,7 @@
     },
     "chat": {
       "max_history_messages": 12,
-      "temperature": 0.2,
+      "temperature": 1.0,
       "item_history_period_hours": 24,
       "item_history_max_rows": 50
     },

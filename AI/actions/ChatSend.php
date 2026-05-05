@@ -155,7 +155,7 @@ class ChatSend extends CController {
             $reply_masked = ProviderClient::chat(
                 $active_provider,
                 $outbound_messages,
-                (float) ($config['chat']['temperature'] ?? 0.2)
+                (float) ($config['chat']['temperature'] ?? 1.0)
             );
 
             if ($redactor !== null) {
@@ -300,7 +300,7 @@ class ChatSend extends CController {
                     $formatted_masked = ProviderClient::chat(
                         $active_provider,
                         $format_messages,
-                        (float) ($config['chat']['temperature'] ?? 0.2)
+                        (float) ($config['chat']['temperature'] ?? 1.0)
                     );
 
                     if ($redactor !== null) {

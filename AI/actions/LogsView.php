@@ -6,9 +6,9 @@ require_once __DIR__.'/../lib/bootstrap.php';
 
 use CController,
     CControllerResponseData,
+    CUrl,
     Modules\AI\Lib\AuditLogger,
-    Modules\AI\Lib\Config,
-    Modules\AI\Lib\Util;
+    Modules\AI\Lib\Config;
 
 class LogsView extends CController {
 
@@ -26,18 +26,15 @@ class LogsView extends CController {
 
     protected function doAction(): void {
         $config = Config::get();
-        $filters = [
-            'source' => Util::cleanString($_GET['source'] ?? '', 128),
-            'status' => Util::cleanString($_GET['status'] ?? '', 32),
-            'search' => Util::cleanString($_GET['search'] ?? '', 255)
-        ];
 
         $response = new CControllerResponseData([
             'title' => _('AI logs'),
             'summary' => AuditLogger::summary($config),
-            'entries' => AuditLogger::listEntries($config, $filters, 200),
-            'filters' => $filters,
-            'permission_note' => AuditLogger::permissionNote()
+            'permission_note' => AuditLogger::permissionNote(),
+            'fetch_url' => (new CUrl('zabbix.php'))->setArgument('action', 'ai.logs.fetch')->getUrl(),
+            'clear_url' => (new CUrl('zabbix.php'))->setArgument('action', 'ai.logs.clear')->getUrl(),
+            'settings_url' => (new CUrl('zabbix.php'))->setArgument('action', 'ai.settings')->getUrl(),
+            'chat_url' => (new CUrl('zabbix.php'))->setArgument('action', 'ai.chat')->getUrl()
         ]);
 
         $this->setResponse($response);

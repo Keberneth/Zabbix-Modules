@@ -70,9 +70,9 @@ ob_start();
             <p class="ai-muted">Conversation history stays in this browser tab. Sensitive values can be masked locally before they are sent to the provider when redaction is enabled.</p>
         </div>
         <div class="ai-header-actions">
-            <a class="btn-alt" href="<?= $h($settings_url) ?>"><?= $h(_('Open settings')) ?></a>
+            <a class="btn" href="<?= $h($settings_url) ?>"><?= $h(_('Open settings')) ?></a>
             <?php if (!empty($data['can_view_logs'])): ?>
-                <a class="btn-alt" href="<?= $h($logs_url) ?>"><?= $h(_('Open logs')) ?></a>
+                <a class="btn" href="<?= $h($logs_url) ?>"><?= $h(_('Open logs')) ?></a>
             <?php endif; ?>
         </div>
     </div>
@@ -135,10 +135,10 @@ ob_start();
             <textarea id="ai-extra-context" class="ai-textarea" rows="6" placeholder="<?= $h(_('Recent changes, error text, environment notes, internal docs, or other useful context.')) ?>"></textarea>
 
             <div class="ai-side-actions">
-                <button type="button" class="btn-alt" id="ai-clear-session"><?= $h(_('Clear session')) ?></button>
+                <button type="button" class="btn" id="ai-clear-session"><?= $h(_('Clear session')) ?></button>
                 <button
                     type="button"
-                    class="btn-alt"
+                    class="btn"
                     id="ai-include-history"
                     <?= ($data['has_zabbix_api'] ?? false) ? '' : 'disabled' ?>
                     title="<?= $h(($data['has_zabbix_api'] ?? false) ? _('Fetch item history for the selected event and send to AI for trend analysis.') : _('Configure Zabbix API settings first.')) ?>"
@@ -147,7 +147,7 @@ ob_start();
                 </button>
                 <button
                     type="button"
-                    class="btn-alt"
+                    class="btn"
                     id="ai-post-last-answer"
                     <?= ($data['has_zabbix_api'] ?? false) ? '' : 'disabled' ?>
                     title="<?= $h(($data['has_zabbix_api'] ?? false) ? _('Post the last AI answer as a problem update comment.') : _('Configure Zabbix API settings first.')) ?>"
