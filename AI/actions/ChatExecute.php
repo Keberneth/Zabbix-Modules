@@ -8,6 +8,7 @@ use CController,
     CControllerResponseData,
     Modules\AI\Lib\AuditLogger,
     Modules\AI\Lib\Config,
+    Modules\AI\Lib\NetBoxClient,
     Modules\AI\Lib\PendingActionStore,
     Modules\AI\Lib\PromptBuilder,
     Modules\AI\Lib\ProviderClient,
@@ -118,7 +119,8 @@ class ChatExecute extends CController {
 
             $tool_result = ZabbixActionExecutor::execute($tool_name, $tool_params, $zabbix_api, [
                 'config' => $config,
-                'server_session' => $this->serverSessionKey()
+                'server_session' => $this->serverSessionKey(),
+                'netbox_client' => NetBoxClient::fromConfig($config)
             ]);
 
             // Tools that build structured output (download URLs, embedded images)

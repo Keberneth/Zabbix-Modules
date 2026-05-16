@@ -333,6 +333,12 @@
                     if (response.action_executed) {
                         statusText = 'Zabbix action "' + (response.action_tool || '') + '" executed. ' + statusText;
                     }
+                    var enrichedHosts = (response.context && Array.isArray(response.context.netbox_enriched_hosts))
+                        ? response.context.netbox_enriched_hosts
+                        : [];
+                    if (enrichedHosts.length > 0) {
+                        statusText += ' NetBox auto-enriched: ' + enrichedHosts.join(', ') + '.';
+                    }
                     showSideStatus(statusText, false);
                     updatePostButtonState();
                 })
@@ -512,6 +518,61 @@
         function setBusy(isBusy) {
             sendButton.disabled = isBusy;
             sendButton.textContent = isBusy ? 'Sending…' : 'Send';
+            showTypingIndicator(isBusy);
+        }
+
+        // Add (or remove) an "AI is thinking…" bubble at the bottom of the
+        // transcript so the operator has feedback while a request is in flight.
+        // The agentic chat loop can take 10–15s for multi-step tool sequences,
+        // so a passive disabled button is not enough.
+        function showTypingIndicator(visible) {
+            if (!transcript) {
+                return;
+            }
+
+            var existing = transcript.querySelector('.ai-msg-typing');
+
+            if (!visible) {
+                if (existing) {
+                    existing.remove();
+                }
+                return;
+            }
+
+            if (existing) {
+                return;
+            }
+
+            var item = document.createElement('div');
+            item.className = 'ai-msg ai-msg-assistant ai-msg-typing';
+            item.setAttribute('aria-live', 'polite');
+            item.setAttribute('aria-label', 'AI is thinking');
+
+            var title = document.createElement('div');
+            title.className = 'ai-msg-title';
+            title.textContent = 'AI';
+            item.appendChild(title);
+
+            var body = document.createElement('div');
+            body.className = 'ai-msg-body ai-typing-body';
+
+            var dots = document.createElement('span');
+            dots.className = 'ai-typing-dots';
+            for (var i = 0; i < 3; i++) {
+                var dot = document.createElement('span');
+                dot.className = 'ai-typing-dot';
+                dots.appendChild(dot);
+            }
+            body.appendChild(dots);
+
+            var hint = document.createElement('span');
+            hint.className = 'ai-typing-hint';
+            hint.textContent = 'Thinking…';
+            body.appendChild(hint);
+
+            item.appendChild(body);
+            transcript.appendChild(item);
+            transcript.scrollTop = transcript.scrollHeight;
         }
 
         // Render a restricted subset of Markdown into `target` using only DOM APIs
@@ -560,6 +621,22 @@
                     renderInline(h, headingMatch[2]);
                     target.appendChild(h);
                     return;
+                }
+
+                // Download button marker: [[ai-download fname="x.svg" url="zabbix.php?..." fmt="SVG" size_kb="12" expires_min="60"]]
+                var downloadMatch = /^\s*\[\[ai-download\s+(.+?)\]\]\s*$/.exec(block);
+                if (downloadMatch) {
+                    if (renderDownloadButton(target, downloadMatch[1])) {
+                        return;
+                    }
+                }
+
+                // Navigation link button marker: [[ai-link-button url="https://..." label="Open the CPU graph in Zabbix"]]
+                var linkMatch = /^\s*\[\[ai-link-button\s+(.+?)\]\]\s*$/.exec(block);
+                if (linkMatch) {
+                    if (renderLinkButton(target, linkMatch[1])) {
+                        return;
+                    }
                 }
 
                 var lines = block.split('\n');
@@ -745,6 +822,152 @@
                 return url;
             }
             return null;
+        }
+
+        // Parse the attribute payload of an [[ai-... attr1="v1" attr2="v2"]]
+        // marker into an object of key -> string. Values are quoted with " and
+        // may escape \\ and \" via backslash. Used by both the download-button
+        // and the link-button markers.
+        function parseMarkerAttrs(attrsString) {
+            var out = {};
+            var re = /([a-z_][a-z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"/gi;
+            var match;
+            while ((match = re.exec(attrsString)) !== null) {
+                out[match[1]] = match[2].replace(/\\(["\\])/g, '$1');
+            }
+            return out;
+        }
+
+        // Render a styled download button into `target` from the attribute
+        // payload of an [[ai-download ...]] marker. Returns true on success;
+        // false if the URL is rejected (in which case the marker is left as
+        // plain text by the caller).
+        function renderDownloadButton(target, attrsString) {
+            var attrs = parseMarkerAttrs(attrsString);
+            var href = safeLinkHref(attrs.url || '');
+            if (!href) {
+                return false;
+            }
+
+            var filename = String(attrs.fname || 'report');
+            var fmt = String(attrs.fmt || '').toUpperCase();
+            var sizeKb = parseInt(attrs.size_kb, 10);
+            var expiresMin = parseInt(attrs.expires_min, 10);
+
+            var a = document.createElement('a');
+            a.className = 'ai-download-btn';
+            a.href = href;
+            a.target = '_blank';
+            a.rel = 'noopener noreferrer';
+            a.setAttribute('download', filename);
+            a.setAttribute('aria-label', 'Download ' + filename);
+
+            // Inline SVG download icon (created via createElementNS so we never
+            // touch innerHTML on caller-controlled data).
+            var SVG_NS = 'http://www.w3.org/2000/svg';
+            var icon = document.createElementNS(SVG_NS, 'svg');
+            icon.setAttribute('class', 'ai-download-icon');
+            icon.setAttribute('viewBox', '0 0 24 24');
+            icon.setAttribute('width', '20');
+            icon.setAttribute('height', '20');
+            icon.setAttribute('aria-hidden', 'true');
+            var arrow = document.createElementNS(SVG_NS, 'path');
+            arrow.setAttribute('d', 'M12 3v12m0 0l-5-5m5 5l5-5M5 21h14');
+            arrow.setAttribute('fill', 'none');
+            arrow.setAttribute('stroke', 'currentColor');
+            arrow.setAttribute('stroke-width', '2');
+            arrow.setAttribute('stroke-linecap', 'round');
+            arrow.setAttribute('stroke-linejoin', 'round');
+            icon.appendChild(arrow);
+            a.appendChild(icon);
+
+            var info = document.createElement('span');
+            info.className = 'ai-download-info';
+
+            var titleEl = document.createElement('span');
+            titleEl.className = 'ai-download-title';
+            titleEl.textContent = 'Download ' + filename;
+            info.appendChild(titleEl);
+
+            var metaParts = [];
+            if (fmt) {
+                metaParts.push(fmt);
+            }
+            if (!isNaN(sizeKb) && sizeKb > 0) {
+                metaParts.push(sizeKb + ' KB');
+            }
+            if (!isNaN(expiresMin) && expiresMin > 0) {
+                metaParts.push('expires in ~' + expiresMin + ' min');
+            }
+
+            if (metaParts.length > 0) {
+                var meta = document.createElement('span');
+                meta.className = 'ai-download-meta';
+                meta.textContent = metaParts.join(' · ');
+                info.appendChild(meta);
+            }
+
+            a.appendChild(info);
+            target.appendChild(a);
+            return true;
+        }
+
+        // Render a navigation link button (secondary style) from the attribute
+        // payload of an [[ai-link-button url="..." label="..." icon="..."]]
+        // marker. Used for primary call-to-action navigation links, e.g.
+        // "Open the CPU graph in Zabbix". Returns true on success.
+        function renderLinkButton(target, attrsString) {
+            var attrs = parseMarkerAttrs(attrsString);
+            var href = safeLinkHref(attrs.url || '');
+            if (!href) {
+                return false;
+            }
+
+            var label = String(attrs.label || attrs.url || 'Open link');
+            var icon = String(attrs.icon || 'external').toLowerCase();
+
+            var a = document.createElement('a');
+            a.className = 'ai-link-btn';
+            a.href = href;
+            a.target = '_blank';
+            a.rel = 'noopener noreferrer';
+            a.setAttribute('aria-label', label);
+
+            var SVG_NS = 'http://www.w3.org/2000/svg';
+            var iconSvg = document.createElementNS(SVG_NS, 'svg');
+            iconSvg.setAttribute('class', 'ai-link-btn-icon');
+            iconSvg.setAttribute('viewBox', '0 0 24 24');
+            iconSvg.setAttribute('width', '16');
+            iconSvg.setAttribute('height', '16');
+            iconSvg.setAttribute('aria-hidden', 'true');
+
+            // Icon paths: 'external' (default), 'graph', 'open'.
+            // Each is a single <path d="..."> using currentColor.
+            var pathD = 'M14 4h6m0 0v6m0-6L10 14M5 7v12h12';
+            if (icon === 'graph') {
+                pathD = 'M4 19V5m0 14h16M7 15l3-4 3 3 4-6';
+            }
+            else if (icon === 'open' || icon === 'arrow') {
+                pathD = 'M5 12h14m0 0l-5-5m5 5l-5 5';
+            }
+
+            var p = document.createElementNS(SVG_NS, 'path');
+            p.setAttribute('d', pathD);
+            p.setAttribute('fill', 'none');
+            p.setAttribute('stroke', 'currentColor');
+            p.setAttribute('stroke-width', '2');
+            p.setAttribute('stroke-linecap', 'round');
+            p.setAttribute('stroke-linejoin', 'round');
+            iconSvg.appendChild(p);
+            a.appendChild(iconSvg);
+
+            var span = document.createElement('span');
+            span.className = 'ai-link-btn-label';
+            span.textContent = label;
+            a.appendChild(span);
+
+            target.appendChild(a);
+            return true;
         }
 
         function renderHistory() {

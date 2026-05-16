@@ -52,7 +52,9 @@ class Config {
                 'token' => '',
                 'token_env' => '',
                 'verify_peer' => true,
-                'timeout' => 10
+                'timeout' => 10,
+                'auto_enrich_chat' => true,
+                'enrich_webhook_host' => true
             ],
             'webhook' => [
                 'enabled' => true,
@@ -258,7 +260,7 @@ class Config {
                 'api_key_env' => Util::cleanString($provider['api_key_env'] ?? '', 128),
                 'headers_json' => Util::cleanMultiline($provider['headers_json'] ?? '', 10000),
                 'verify_peer' => Util::truthy($provider['verify_peer'] ?? false),
-                'timeout' => Util::cleanInt($provider['timeout'] ?? 60, 60, 5, 300),
+                'timeout' => Util::cleanInt($provider['timeout'] ?? 120, 120, 5, 600),
                 'enabled' => Util::truthy($provider['enabled'] ?? false),
                 'temperature' => Util::cleanFloat($provider['temperature'] ?? '', -1, 0, 2),
                 'max_tokens' => Util::cleanInt($provider['max_tokens'] ?? 0, 0, 0, 128000)
@@ -359,6 +361,8 @@ class Config {
         $netbox_token_input = Util::cleanString($post['netbox']['token'] ?? '');
         $new_config['netbox'] = [
             'enabled' => Util::truthy($post['netbox']['enabled'] ?? false),
+            'auto_enrich_chat' => Util::truthy($post['netbox']['auto_enrich_chat'] ?? false),
+            'enrich_webhook_host' => Util::truthy($post['netbox']['enrich_webhook_host'] ?? false),
             'url' => Util::cleanUrl($post['netbox']['url'] ?? ''),
             'token' => $clear_netbox_token
                 ? ''

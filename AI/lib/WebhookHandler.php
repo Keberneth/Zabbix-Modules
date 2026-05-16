@@ -51,9 +51,13 @@ class WebhookHandler {
         }
 
         $netbox = NetBoxClient::fromConfig($config);
-        if (!empty($payload['hostname'])
-            && Util::truthy($config['webhook']['include_netbox'] ?? false)
-            && $netbox !== null) {
+        // Either the legacy webhook[include_netbox] toggle or the canonical
+        // netbox[enrich_webhook_host] toggle enables enrichment. We accept both
+        // so existing installs keep working without re-configuration.
+        $netbox_enrich_webhook = Util::truthy($config['netbox']['enrich_webhook_host'] ?? false)
+            || Util::truthy($config['webhook']['include_netbox'] ?? false);
+
+        if (!empty($payload['hostname']) && $netbox_enrich_webhook && $netbox !== null) {
             $context['netbox_info'] = $netbox->getContextForHostname($payload['hostname']);
         }
 

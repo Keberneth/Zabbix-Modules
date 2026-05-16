@@ -254,6 +254,71 @@ select.ai-input {
     color: var(--ai-fg);
 }
 
+/* ── Typing / thinking indicator ── */
+.ai-msg-typing .ai-msg-title {
+    background: var(--ai-assistant-bg);
+    opacity: 0.85;
+}
+
+.ai-typing-body {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    white-space: normal;
+}
+
+.ai-typing-dots {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.ai-typing-dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--ai-fg-muted);
+    opacity: 0.4;
+    animation: ai-typing-bounce 1.2s infinite ease-in-out;
+}
+
+.ai-typing-dot:nth-child(2) {
+    animation-delay: 0.18s;
+}
+
+.ai-typing-dot:nth-child(3) {
+    animation-delay: 0.36s;
+}
+
+.ai-typing-hint {
+    color: var(--ai-fg-muted);
+    font-style: italic;
+    font-size: 0.92em;
+}
+
+@keyframes ai-typing-bounce {
+    0%, 80%, 100% {
+        opacity: 0.35;
+        transform: translateY(0);
+    }
+    40% {
+        opacity: 1;
+        transform: translateY(-3px);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ai-typing-dot {
+        animation: ai-typing-fade 1.4s infinite ease-in-out;
+        transform: none !important;
+    }
+    @keyframes ai-typing-fade {
+        0%, 100% { opacity: 0.35; }
+        50%      { opacity: 1; }
+    }
+}
+
 /* ── Action messages ── */
 .ai-msg-action .ai-msg-title {
     background: #e8f5e9;
@@ -1100,4 +1165,153 @@ html[theme="dark-theme"] .ai-md .ai-md-link,
 html[theme="hc-dark"] .ai-md .ai-md-link,
 .ai-page[data-ai-theme="dark"] .ai-md .ai-md-link {
     color: #93c5fd;
+}
+
+/* ── Download button for generated reports (HTML / CSV / SVG / MD / JSON) ── */
+.ai-md .ai-download-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    margin: 10px 0;
+    padding: 10px 16px;
+    background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+    color: #fff;
+    border: 1px solid #1e3a8a;
+    border-radius: 6px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    text-decoration: none;
+    font-size: 0.95em;
+    line-height: 1.2;
+    cursor: pointer;
+    transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease;
+    max-width: 100%;
+}
+
+.ai-md .ai-download-btn:hover,
+.ai-md .ai-download-btn:focus {
+    background: linear-gradient(180deg, #1d4ed8 0%, #1e40af 100%);
+    color: #fff;
+    text-decoration: none;
+    box-shadow: 0 2px 6px rgba(37, 99, 235, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    outline: none;
+}
+
+.ai-md .ai-download-btn:active {
+    transform: translateY(1px);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15), inset 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+
+.ai-md .ai-download-btn .ai-download-icon {
+    flex: 0 0 auto;
+    width: 20px;
+    height: 20px;
+    color: #fff;
+}
+
+.ai-md .ai-download-btn .ai-download-info {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    min-width: 0;
+}
+
+.ai-md .ai-download-btn .ai-download-title {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+
+.ai-md .ai-download-btn .ai-download-meta {
+    font-size: 0.82em;
+    opacity: 0.85;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+html[theme="dark-theme"] .ai-md .ai-download-btn,
+html[theme="hc-dark"] .ai-md .ai-download-btn,
+.ai-page[data-ai-theme="dark"] .ai-md .ai-download-btn {
+    background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
+    border-color: #1e3a8a;
+    color: #fff;
+}
+
+html[theme="dark-theme"] .ai-md .ai-download-btn:hover,
+html[theme="dark-theme"] .ai-md .ai-download-btn:focus,
+html[theme="hc-dark"] .ai-md .ai-download-btn:hover,
+html[theme="hc-dark"] .ai-md .ai-download-btn:focus,
+.ai-page[data-ai-theme="dark"] .ai-md .ai-download-btn:hover,
+.ai-page[data-ai-theme="dark"] .ai-md .ai-download-btn:focus {
+    background: linear-gradient(180deg, #60a5fa 0%, #3b82f6 100%);
+    box-shadow: 0 2px 6px rgba(96, 165, 250, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+/* ── Secondary link button (navigation call-to-action) ── */
+.ai-md .ai-link-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 6px 6px 0;
+    padding: 7px 14px;
+    background: transparent;
+    color: #2563eb;
+    border: 1.5px solid #2563eb;
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 0.92em;
+    font-weight: 600;
+    line-height: 1.2;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease, transform 0.05s ease;
+    max-width: 100%;
+}
+
+.ai-md .ai-link-btn:hover,
+.ai-md .ai-link-btn:focus {
+    background: #2563eb;
+    color: #fff;
+    text-decoration: none;
+    box-shadow: 0 2px 6px rgba(37, 99, 235, 0.30);
+    outline: none;
+}
+
+.ai-md .ai-link-btn:active {
+    transform: translateY(1px);
+}
+
+.ai-md .ai-link-btn .ai-link-btn-icon {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    color: currentColor;
+}
+
+.ai-md .ai-link-btn .ai-link-btn-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+
+html[theme="dark-theme"] .ai-md .ai-link-btn,
+html[theme="hc-dark"] .ai-md .ai-link-btn,
+.ai-page[data-ai-theme="dark"] .ai-md .ai-link-btn {
+    color: #93c5fd;
+    border-color: #60a5fa;
+}
+
+html[theme="dark-theme"] .ai-md .ai-link-btn:hover,
+html[theme="dark-theme"] .ai-md .ai-link-btn:focus,
+html[theme="hc-dark"] .ai-md .ai-link-btn:hover,
+html[theme="hc-dark"] .ai-md .ai-link-btn:focus,
+.ai-page[data-ai-theme="dark"] .ai-md .ai-link-btn:hover,
+.ai-page[data-ai-theme="dark"] .ai-md .ai-link-btn:focus {
+    background: #60a5fa;
+    color: #0f1c30;
+    box-shadow: 0 2px 6px rgba(96, 165, 250, 0.35);
 }

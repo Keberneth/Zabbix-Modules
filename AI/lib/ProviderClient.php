@@ -53,7 +53,7 @@ class ProviderClient {
         $response = HttpClient::expectSuccess('POST', $endpoint, [
             'headers' => $headers,
             'json' => $payload,
-            'timeout' => (int) ($provider['timeout'] ?? 60),
+            'timeout' => (int) ($provider['timeout'] ?? 120),
             'verify_peer' => (bool) ($provider['verify_peer'] ?? false)
         ]);
 
@@ -101,7 +101,7 @@ class ProviderClient {
         $response = HttpClient::expectSuccess('POST', $endpoint, [
             'headers' => $headers,
             'json' => $payload,
-            'timeout' => (int) ($provider['timeout'] ?? 60),
+            'timeout' => (int) ($provider['timeout'] ?? 120),
             'verify_peer' => (bool) ($provider['verify_peer'] ?? true)
         ]);
 

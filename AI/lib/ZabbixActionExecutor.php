@@ -446,6 +446,51 @@ class ZabbixActionExecutor {
                 'rw' => 'read',
                 'category' => ''
             ],
+            'build_file_report' => [
+                'description' => 'Save arbitrary report content (HTML / CSV / Markdown / JSON) you have composed yourself as a downloadable file the user can click. Use this WHENEVER the user explicitly asks for a "report file", "download", "html report", "csv report", "give me a report I can download", or wants a result they can open in Excel or a browser. Build the full file body as a single string and pass it in "content". For HTML, include a complete document (<!DOCTYPE html>...</html>) with inline CSS so it renders standalone. The tool persists the file and returns a special download marker — preserve the entire returned text verbatim in your reply (do NOT alter or remove the marker). Do NOT dump the same content as a fenced code block in addition.',
+                'params' => [
+                    'title' => '(string, required) Short title used to name the file (e.g. "performance_report_LHBHANA101"). Used in the saved filename and HTML <title>.',
+                    'format' => '(string, required) File format: "html", "csv", "md", or "json".',
+                    'content' => '(string, required) Full file content as a single string. Up to ~1 MB.'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'list_zabbix_hosts' => [
+                'description' => 'List Zabbix hosts in bulk with optional filters. Use this FIRST when the user asks about "all servers", "all hosts", or wants an inventory across many hosts — it returns up to 2000 hosts in one call, with hostid + technical name + visible name + status + maintenance + groups + tags. Much faster than calling get_host_info per host. Returns the numeric hostid you need for zabbix.php?action=...&hostids[]=... URLs.',
+                'params' => [
+                    'host_group' => '(string, optional) Substring match on host-group name (e.g. "Linux", "Windows").',
+                    'search' => '(string, optional) Substring match on the host technical or visible name.',
+                    'status' => '(string, optional) "enabled" (default behaviour) or "disabled".',
+                    'tag' => '(string, optional) Filter by host tag, either "name" or "name=value" (e.g. "env=production").',
+                    'limit' => '(int, optional) Max rows, default 200, cap 2000.'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'list_netbox_devices' => [
+                'description' => 'List NetBox VMs and/or devices in bulk with optional filters. Returns one row per VM/device with name, role, site, platform, status, vCPU, RAM (MB), disk (MB), primary IP. Use this when the user asks for an INVENTORY / CAPACITY REPORT across many servers (CPU, RAM, disk counts, models) — NetBox is the system of record for that. Much faster than gathering item values from Zabbix one host at a time. Only available when NetBox is enabled in AI Settings.',
+                'params' => [
+                    'kind' => '(string, optional) "vm", "device", or "both" (default "both"). VMs typically have vCPU/RAM/disk populated; physical devices may not.',
+                    'search' => '(string, optional) Substring match on the VM/device name or display name.',
+                    'platform' => '(string, optional) Filter by platform name, e.g. "Linux", "Windows", "RHEL", "Ubuntu".',
+                    'role' => '(string, optional) Filter by NetBox role, e.g. "Server", "Database", "Application".',
+                    'site' => '(string, optional) Filter by site, e.g. "Stockholm".',
+                    'status' => '(string, optional) Filter by status label, e.g. "active", "offline", "decommissioning".',
+                    'tenant' => '(string, optional) Filter by tenant.',
+                    'limit' => '(int, optional) Max rows, default 200, cap 1000.'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'get_netbox_info' => [
+                'description' => 'Look up a single host in NetBox by hostname. Returns the full NetBox record (VM or device) with status, site, cluster, role, platform, primary IP, vCPU, RAM, disk, OS, services, and custom fields. Use this for a deep-dive on ONE host. Only available when NetBox is enabled in AI Settings. For multi-host reports, prefer list_netbox_devices.',
+                'params' => [
+                    'hostname' => '(string, required) Hostname to look up (matches NetBox name or display).'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
             'get_actions_for_event' => [
                 'description' => 'List the configured trigger actions (alert rules) and whether each one matches the given event. Use this when the user asks why an alert did or did not notify someone. Returns a match_status of "matched", "did_not_match", "disabled" or "undetermined" with the specific reasons.',
                 'params' => [
@@ -713,44 +758,100 @@ class ZabbixActionExecutor {
     }
 
     /**
-     * Try to parse a tool call from an AI response.
+     * Find the end offset of a JSON object that starts at $start in $haystack.
+     *
+     * Treats `"..."` (with backslash escapes) as opaque so braces and quotes
+     * inside string values do not throw off the depth counter. Returns the
+     * offset of the character AFTER the matching `}`, or -1 if no complete
+     * object is found.
+     *
+     * This matters because (a) the AI sometimes emits multiple JSON tool
+     * calls concatenated in one response, and (b) tool parameters can
+     * legitimately contain strings with `{` / `}` (e.g. CSS in HTML report
+     * content). A naive brace counter is fooled in both cases.
+     */
+    private static function findJsonObjectEnd(string $haystack, int $start): int {
+        $len = strlen($haystack);
+
+        if ($start >= $len || $haystack[$start] !== '{') {
+            return -1;
+        }
+
+        $depth = 0;
+        $in_string = false;
+        $escape = false;
+
+        for ($i = $start; $i < $len; $i++) {
+            $c = $haystack[$i];
+
+            if ($escape) {
+                $escape = false;
+                continue;
+            }
+
+            if ($in_string) {
+                if ($c === '\\') {
+                    $escape = true;
+                }
+                elseif ($c === '"') {
+                    $in_string = false;
+                }
+                continue;
+            }
+
+            if ($c === '"') {
+                $in_string = true;
+            }
+            elseif ($c === '{') {
+                $depth++;
+            }
+            elseif ($c === '}') {
+                $depth--;
+                if ($depth === 0) {
+                    return $i + 1;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    /**
+     * Try to parse the FIRST tool call from an AI response.
      *
      * Returns ['tool' => ..., 'params' => ..., 'confirm' => bool, 'confirm_message' => string]
-     * or null if the response is not a tool call.
+     * or null if the response is not a tool call. Tolerates surrounding text,
+     * markdown code fences, AND multiple concatenated tool calls (extracts
+     * only the first complete `{"tool":...}` object).
      */
     public static function parseToolCall(string $response): ?array {
         $trimmed = trim($response);
 
-        // Try to extract JSON from the response — it may be wrapped in markdown code fences.
+        // Try to extract JSON from a markdown code fence first.
         if (preg_match('/```(?:json)?\s*(\{[\s\S]*?\})\s*```/', $trimmed, $m)) {
             $trimmed = trim($m[1]);
         }
 
-        // If it starts with '{' try direct parse.
-        if (strncmp($trimmed, '{', 1) !== 0) {
-            // Check if the response contains a JSON block somewhere.
-            $json_start = strpos($trimmed, '{"tool"');
-            if ($json_start === false) {
+        // Find the first `{"tool"` block in the response.
+        $json_start = strpos($trimmed, '{"tool"');
+
+        if ($json_start === false) {
+            // Maybe the AI used single quotes or extra whitespace. Try a
+            // more permissive search before giving up.
+            if (!preg_match('/\{\s*"tool"\s*:/', $trimmed, $m, PREG_OFFSET_CAPTURE)) {
                 return null;
             }
-            $trimmed = substr($trimmed, $json_start);
-            // Find the matching closing brace.
-            $depth = 0;
-            $end = 0;
-            for ($i = 0, $len = strlen($trimmed); $i < $len; $i++) {
-                if ($trimmed[$i] === '{') $depth++;
-                if ($trimmed[$i] === '}') $depth--;
-                if ($depth === 0) {
-                    $end = $i + 1;
-                    break;
-                }
-            }
-            if ($end > 0) {
-                $trimmed = substr($trimmed, 0, $end);
-            }
+            $json_start = (int) $m[0][1];
         }
 
-        $decoded = json_decode($trimmed, true);
+        $end = self::findJsonObjectEnd($trimmed, $json_start);
+
+        if ($end <= $json_start) {
+            return null;
+        }
+
+        $candidate = substr($trimmed, $json_start, $end - $json_start);
+        $decoded = json_decode($candidate, true);
 
         if (!is_array($decoded) || !isset($decoded['tool'])) {
             return null;
@@ -773,14 +874,16 @@ class ZabbixActionExecutor {
     /**
      * Strip all JSON tool call blocks from a response string.
      *
-     * Removes any {"tool":"...",...} blocks (including markdown-fenced ones)
-     * so that raw tool JSON is never shown to the user.
+     * Uses string-aware JSON object scanning so tool params containing
+     * literal `{` / `}` (e.g. CSS in HTML content, JSON-stringified arrays)
+     * do not confuse the brace counter. Removes both markdown-fenced and
+     * bare {"tool":...} blocks.
      */
     public static function stripToolCalls(string $response): string {
-        // Remove markdown-fenced tool calls.
+        // Remove markdown-fenced tool calls. The non-greedy regex is a heuristic
+        // for the common "AI wraps its own tool call in ```json ... ```" case.
         $cleaned = preg_replace('/```(?:json)?\s*\{"tool"\s*:[\s\S]*?\}\s*```/', '', $response);
 
-        // Remove bare {"tool":...} blocks.
         $result = '';
         $len = strlen($cleaned);
         $i = 0;
@@ -795,17 +898,13 @@ class ZabbixActionExecutor {
 
             $result .= substr($cleaned, $i, $next - $i);
 
-            // Find the matching closing brace.
-            $depth = 0;
-            $end = $next;
+            $end = self::findJsonObjectEnd($cleaned, $next);
 
-            for ($j = $next; $j < $len; $j++) {
-                if ($cleaned[$j] === '{') $depth++;
-                if ($cleaned[$j] === '}') $depth--;
-                if ($depth === 0) {
-                    $end = $j + 1;
-                    break;
-                }
+            if ($end <= $next) {
+                // Malformed (no matching close). Keep the rest verbatim to
+                // avoid eating the entire tail of the message.
+                $result .= substr($cleaned, $next);
+                break;
             }
 
             $i = $end;
@@ -849,6 +948,18 @@ class ZabbixActionExecutor {
 
             case 'generate_report':
                 return self::executeGenerateReport($params, $zabbix_api, $context);
+
+            case 'build_file_report':
+                return self::executeBuildFileReport($params, $context);
+
+            case 'list_zabbix_hosts':
+                return self::executeListZabbixHosts($params, $zabbix_api);
+
+            case 'list_netbox_devices':
+                return self::executeListNetBoxDevices($params, $context);
+
+            case 'get_netbox_info':
+                return self::executeGetNetBoxInfo($params, $context);
 
             case 'get_host_info':
                 return self::executeGetHostInfo($params, $zabbix_api);
@@ -1051,6 +1162,9 @@ class ZabbixActionExecutor {
         }
 
         $lines = ['Host: '.$host['host'].' ('.$host['name'].')'];
+        if (!empty($host['hostid'])) {
+            $lines[] = 'Host ID: '.$host['hostid'].' (use this numeric ID in zabbix.php URLs that take hostids[])';
+        }
         $lines[] = 'Status: '.($host['status'] === '0' ? 'Enabled' : 'Disabled');
         $lines[] = 'Maintenance: '.($host['maintenance_status'] === '1' ? 'In maintenance' : 'Normal');
 
@@ -1325,17 +1439,232 @@ class ZabbixActionExecutor {
             $meta
         );
 
-        $expires_in_min = max(1, (int) round(($result['expires_at'] - time()) / 60));
-        $size_kb = max(1, (int) round($result['size'] / 1024));
-
         $filter_summary = $host_group !== '' ? ' (host group: '.$host_group.')' : '';
 
         $lines = [];
         $lines[] = 'Report generated: **'.count($rows).' unsupported item(s)**'.$filter_summary.'.';
         $lines[] = '';
-        $lines[] = '[Download '.$result['filename'].']('.$result['url'].') &mdash; '.strtoupper($format).', ~'.$size_kb.' KB, expires in ~'.$expires_in_min.' min.';
+        $lines[] = ReportStore::downloadMarker($result);
 
         return self::RAW_OUTPUT_SENTINEL.implode("\n", $lines);
+    }
+
+    /**
+     * Save arbitrary AI-composed report content (HTML / CSV / MD / JSON) as a
+     * downloadable file and emit a download-button marker. Used when the user
+     * asks for a report file built from data the AI has already collected.
+     */
+    private static function executeBuildFileReport(array $params, array $context): string {
+        $config = is_array($context['config'] ?? null) ? $context['config'] : null;
+        $server_session = (string) ($context['server_session'] ?? '');
+
+        if ($config === null || $server_session === '') {
+            return 'Error: file-report generation is not available in this context.';
+        }
+
+        $title = trim((string) ($params['title'] ?? ''));
+        $format = strtolower(trim((string) ($params['format'] ?? '')));
+        $content = (string) ($params['content'] ?? '');
+
+        if ($title === '') {
+            return 'Error: "title" parameter is required.';
+        }
+
+        $allowed_formats = ['html', 'csv', 'md', 'json'];
+        if (!in_array($format, $allowed_formats, true)) {
+            return 'Error: "format" must be one of '.implode(', ', $allowed_formats).'.';
+        }
+
+        if ($content === '') {
+            return 'Error: "content" parameter is required.';
+        }
+
+        // 1 MB cap to bound disk usage from a runaway AI response.
+        if (strlen($content) > 1048576) {
+            return 'Error: report content exceeds the 1 MB limit.';
+        }
+
+        $slug = preg_replace('/[^A-Za-z0-9_-]+/', '_', $title);
+        $slug = trim((string) $slug, '_');
+        if ($slug === '') {
+            $slug = 'report';
+        }
+        $slug = substr($slug, 0, 96);
+
+        try {
+            $result = ReportStore::createDocument(
+                $config,
+                $server_session,
+                $slug,
+                $format,
+                $content,
+                ['generated_at' => time()]
+            );
+        }
+        catch (\Throwable $e) {
+            return 'Error saving report: '.$e->getMessage();
+        }
+
+        $lines = [
+            'Report saved as **'.$result['filename'].'**.',
+            '',
+            ReportStore::downloadMarker($result)
+        ];
+
+        return self::RAW_OUTPUT_SENTINEL.implode("\n", $lines);
+    }
+
+    /**
+     * Bulk-list Zabbix hosts with optional filters. Wraps
+     * ZabbixApiClient::listHostsFiltered() for AI tool consumption.
+     */
+    private static function executeListZabbixHosts(array $params, ZabbixApiClient $api): string {
+        $filters = [
+            'host_group' => (string) ($params['host_group'] ?? ''),
+            'search' => (string) ($params['search'] ?? ''),
+            'status' => (string) ($params['status'] ?? ''),
+            'tag' => (string) ($params['tag'] ?? ''),
+            'limit' => (int) ($params['limit'] ?? 200)
+        ];
+
+        try {
+            $rows = $api->listHostsFiltered($filters);
+        }
+        catch (\Throwable $e) {
+            return 'Error listing hosts: '.$e->getMessage();
+        }
+
+        if (!$rows) {
+            return 'No hosts matched those filters.';
+        }
+
+        $lines = ['Found '.count($rows).' host(s):', ''];
+
+        foreach ($rows as $h) {
+            $maintenance = $h['maintenance'] ? ' [maintenance]' : '';
+            $groups = $h['groups'] ? ' groups: '.implode(', ', $h['groups']) : '';
+            $tags = $h['tags'] ? ' tags: '.implode(', ', $h['tags']) : '';
+            $name = $h['name'] !== '' && $h['name'] !== $h['host'] ? ' ('.$h['name'].')' : '';
+
+            $lines[] = '- ['.$h['status'].$maintenance.'] hostid='.$h['hostid'].' '.$h['host'].$name.$groups.$tags;
+        }
+
+        return implode("\n", $lines);
+    }
+
+    /**
+     * Bulk-list NetBox VMs / devices with optional filters. Used by the AI
+     * to build inventory and capacity reports.
+     */
+    private static function executeListNetBoxDevices(array $params, array $context): string {
+        $netbox = $context['netbox_client'] ?? null;
+
+        if (!($netbox instanceof NetBoxClient)) {
+            return 'Error: NetBox is not enabled or not configured. Ask an administrator to enable NetBox in AI Settings > NetBox.';
+        }
+
+        $filters = [
+            'kind' => (string) ($params['kind'] ?? 'both'),
+            'search' => (string) ($params['search'] ?? ''),
+            'platform' => (string) ($params['platform'] ?? ''),
+            'role' => (string) ($params['role'] ?? ''),
+            'site' => (string) ($params['site'] ?? ''),
+            'status' => (string) ($params['status'] ?? ''),
+            'tenant' => (string) ($params['tenant'] ?? ''),
+            'limit' => (int) ($params['limit'] ?? 200)
+        ];
+
+        try {
+            $rows = $netbox->listDevicesAndVMs($filters);
+        }
+        catch (\Throwable $e) {
+            return 'Error listing NetBox VMs/devices: '.$e->getMessage();
+        }
+
+        if (!$rows) {
+            return 'No NetBox VMs or devices matched those filters.';
+        }
+
+        $fmt_size = static function (?int $mb): string {
+            if ($mb === null || $mb <= 0) {
+                return '';
+            }
+            if ($mb >= 1024 * 1024) {
+                return number_format($mb / (1024 * 1024), 2).' TB';
+            }
+            if ($mb >= 1024) {
+                return number_format($mb / 1024, 2).' GB';
+            }
+            return $mb.' MB';
+        };
+
+        $lines = ['Found '.count($rows).' NetBox entries:', ''];
+
+        foreach ($rows as $r) {
+            $parts = [];
+            $parts[] = '['.$r['kind'].']';
+            $parts[] = $r['name'];
+
+            if ($r['status'] !== '') {
+                $parts[] = 'status='.$r['status'];
+            }
+            if ($r['platform'] !== '') {
+                $parts[] = 'platform='.$r['platform'];
+            }
+            if ($r['operating_system'] !== '') {
+                $parts[] = 'OS='.$r['operating_system'];
+            }
+            if ($r['role'] !== '') {
+                $parts[] = 'role='.$r['role'];
+            }
+            if ($r['site'] !== '') {
+                $parts[] = 'site='.$r['site'];
+            }
+            if ($r['vcpus'] !== null) {
+                $parts[] = 'vCPU='.(is_float($r['vcpus']) ? rtrim(rtrim(number_format($r['vcpus'], 2, '.', ''), '0'), '.') : $r['vcpus']);
+            }
+            $ram = $fmt_size($r['memory_mb']);
+            if ($ram !== '') {
+                $parts[] = 'RAM='.$ram;
+            }
+            $disk = $fmt_size($r['disk_mb']);
+            if ($disk !== '') {
+                $parts[] = 'disk='.$disk;
+            }
+            if ($r['primary_ip'] !== '') {
+                $parts[] = 'ip='.$r['primary_ip'];
+            }
+
+            $lines[] = '- '.implode(' | ', $parts);
+        }
+
+        return implode("\n", $lines);
+    }
+
+    /**
+     * Deep-dive on a single host in NetBox (VM or device).
+     */
+    private static function executeGetNetBoxInfo(array $params, array $context): string {
+        $netbox = $context['netbox_client'] ?? null;
+
+        if (!($netbox instanceof NetBoxClient)) {
+            return 'Error: NetBox is not enabled or not configured. Ask an administrator to enable NetBox in AI Settings > NetBox.';
+        }
+
+        $hostname = trim((string) ($params['hostname'] ?? ''));
+
+        if ($hostname === '') {
+            return 'Error: "hostname" parameter is required.';
+        }
+
+        try {
+            $context_text = $netbox->getContextForHostname($hostname);
+        }
+        catch (\Throwable $e) {
+            return 'Error looking up NetBox info: '.$e->getMessage();
+        }
+
+        return $context_text !== '' ? $context_text : 'No NetBox VM or device match found for "'.$hostname.'".';
     }
 
     private static function executeGenerateProblemGraph(array $params, ZabbixApiClient $api, array $context): string {
@@ -1397,7 +1726,6 @@ class ZabbixActionExecutor {
             ['generated_at' => time()]
         );
 
-        $expires_in_min = max(1, (int) round(($svg_result['expires_at'] - time()) / 60));
         $inline_url = $svg_result['url'].'&inline=1';
 
         $summary_lines = [
@@ -1415,7 +1743,7 @@ class ZabbixActionExecutor {
         $summary_lines[] = '';
         $summary_lines[] = '![Problems over the last '.$period_days.' days]('.$inline_url.')';
         $summary_lines[] = '';
-        $summary_lines[] = '[Download '.$svg_result['filename'].']('.$svg_result['url'].') &mdash; SVG, expires in ~'.$expires_in_min.' min.';
+        $summary_lines[] = ReportStore::downloadMarker($svg_result);
 
         return self::RAW_OUTPUT_SENTINEL.implode("\n", $summary_lines);
     }
@@ -2227,9 +2555,6 @@ class ZabbixActionExecutor {
             ['generated_at' => time()]
         );
 
-        $expires_in_min = max(1, (int) round(($result['expires_at'] - time()) / 60));
-        $size_kb = max(1, (int) round($result['size'] / 1024));
-
         $event_name = (string) ($bundle['event']['name'] ?? '');
         $hostname = (string) ($bundle['event']['hostname'] ?? '');
 
@@ -2238,7 +2563,7 @@ class ZabbixActionExecutor {
             .($event_name !== '' ? ' — '.$event_name : '')
             .($hostname !== '' ? ' on `'.$hostname.'`' : '').'.';
         $lines[] = '';
-        $lines[] = '[Download '.$result['filename'].']('.$result['url'].') &mdash; '.strtoupper($format).', ~'.$size_kb.' KB, expires in ~'.$expires_in_min.' min.';
+        $lines[] = ReportStore::downloadMarker($result);
         $lines[] = '';
         $lines[] = 'Token: `'.$result['token'].'` (use with post_evidence_to_event to attach a summary comment to the event).';
 

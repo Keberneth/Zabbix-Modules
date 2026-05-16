@@ -17,7 +17,7 @@ use RuntimeException;
 class ReportStore {
 
     public const ALLOWED_FORMATS = ['csv', 'html', 'json'];
-    public const ALLOWED_DOCUMENT_FORMATS = ['md', 'json', 'svg', 'html'];
+    public const ALLOWED_DOCUMENT_FORMATS = ['md', 'json', 'svg', 'html', 'csv'];
 
     private const DEFAULT_TTL_SECONDS = 3600;
 
@@ -258,6 +258,38 @@ class ReportStore {
                 }
             }
         }
+    }
+
+    /**
+     * Build the chat-side marker for a generated report, e.g.:
+     *   [[ai-download fname="report.csv" url="zabbix.php?..." fmt="CSV" size_kb="12" expires_min="60"]]
+     *
+     * The chat renderer (ai.chat.js) detects this marker and turns it into a
+     * styled download button. Falls back to a plain Markdown link if the
+     * renderer is older and does not know the marker.
+     *
+     * @param array $result Result array returned by create() or createDocument().
+     */
+    public static function downloadMarker(array $result): string {
+        $filename = (string) ($result['filename'] ?? 'report');
+        $url = (string) ($result['url'] ?? '');
+        $format = strtoupper((string) ($result['format'] ?? ''));
+        $size = (int) ($result['size'] ?? 0);
+        $expires_at = (int) ($result['expires_at'] ?? 0);
+
+        $size_kb = $size > 0 ? max(1, (int) round($size / 1024)) : 0;
+        $expires_min = $expires_at > 0 ? max(1, (int) round(($expires_at - time()) / 60)) : 0;
+
+        $esc = static function ($value): string {
+            return str_replace(['\\', '"'], ['\\\\', '\\"'], (string) $value);
+        };
+
+        return '[[ai-download fname="'.$esc($filename).'"'
+            .' url="'.$esc($url).'"'
+            .' fmt="'.$esc($format).'"'
+            .($size_kb > 0 ? ' size_kb="'.$size_kb.'"' : '')
+            .($expires_min > 0 ? ' expires_min="'.$expires_min.'"' : '')
+            .']]';
     }
 
     public static function contentType(string $format): string {

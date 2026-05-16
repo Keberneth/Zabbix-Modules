@@ -923,10 +923,12 @@
         renderTranscript(formType, hostid);
         msgField.value = '';
         sendBtn.disabled = true;
+        showConfigTypingIndicator(true);
         showStatus('Sending...', false);
 
         doSend(formType, hostid, message, function () {
             sendBtn.disabled = false;
+            showConfigTypingIndicator(false);
             msgField.focus();
         });
     }
@@ -1409,6 +1411,51 @@
         }
 
         return lines.join('\n');
+    }
+
+    function showConfigTypingIndicator(visible) {
+        var transcript = document.getElementById('ai-config-transcript');
+        if (!transcript) return;
+
+        var existing = transcript.querySelector('.ai-msg-typing');
+
+        if (!visible) {
+            if (existing) existing.remove();
+            return;
+        }
+
+        if (existing) return;
+
+        var item = document.createElement('div');
+        item.className = 'ai-msg ai-msg-assistant ai-msg-typing';
+        item.setAttribute('aria-live', 'polite');
+        item.setAttribute('aria-label', 'AI is thinking');
+
+        var title = document.createElement('div');
+        title.className = 'ai-msg-title';
+        title.textContent = 'AI';
+        item.appendChild(title);
+
+        var body = document.createElement('div');
+        body.className = 'ai-msg-body ai-typing-body';
+
+        var dots = document.createElement('span');
+        dots.className = 'ai-typing-dots';
+        for (var i = 0; i < 3; i++) {
+            var dot = document.createElement('span');
+            dot.className = 'ai-typing-dot';
+            dots.appendChild(dot);
+        }
+        body.appendChild(dots);
+
+        var hint = document.createElement('span');
+        hint.className = 'ai-typing-hint';
+        hint.textContent = 'Thinking…';
+        body.appendChild(hint);
+
+        item.appendChild(body);
+        transcript.appendChild(item);
+        transcript.scrollTop = transcript.scrollHeight;
     }
 
     // ── Transcript rendering ──

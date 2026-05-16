@@ -11,6 +11,7 @@ class ZabbixApiClient {
     private bool $verify_peer;
     private int $timeout;
     private string $auth_mode;
+    private ?string $frontend_url_cache = null;
 
     public function __construct(string $url, string $token, bool $verify_peer = true, int $timeout = 15, string $auth_mode = 'auto') {
         $this->url = trim($url);
@@ -132,6 +133,102 @@ class ZabbixApiClient {
         }
 
         return $hosts;
+    }
+
+    /**
+     * Bulk-list hosts with optional filters. Used by the AI `list_zabbix_hosts`
+     * tool to support multi-host inventory reports in a single API call.
+     *
+     * Accepted filters (all optional):
+     *   - host_group   Substring match against host group name.
+     *   - search       Substring match against technical or visible name.
+     *   - status       'enabled' | 'disabled' | '' (any).
+     *   - tag          Filter by host tag (string "name=value" or "name").
+     *   - limit        Cap on rows returned (default 200, hard cap 2000).
+     *
+     * Returns rows of: hostid, host, name, status, maintenance, groups, tags.
+     */
+    public function listHostsFiltered(array $filters = []): array {
+        $params = [
+            'output' => ['hostid', 'host', 'name', 'status', 'maintenance_status'],
+            'selectGroups' => ['groupid', 'name'],
+            'selectTags' => ['tag', 'value'],
+            'sortfield' => 'host',
+            'sortorder' => 'ASC'
+        ];
+
+        $host_group = trim((string) ($filters['host_group'] ?? ''));
+        if ($host_group !== '') {
+            $groups = $this->call('hostgroup.get', [
+                'output' => ['groupid', 'name'],
+                'search' => ['name' => $host_group]
+            ]);
+            $group_ids = array_column($groups, 'groupid');
+            if (!$group_ids) {
+                return [];
+            }
+            $params['groupids'] = $group_ids;
+        }
+
+        $search = trim((string) ($filters['search'] ?? ''));
+        if ($search !== '') {
+            $params['search'] = ['host' => $search, 'name' => $search];
+            $params['searchByAny'] = true;
+        }
+
+        $status = strtolower(trim((string) ($filters['status'] ?? '')));
+        if ($status === 'enabled') {
+            $params['filter']['status'] = 0;
+        }
+        elseif ($status === 'disabled') {
+            $params['filter']['status'] = 1;
+        }
+
+        $tag = trim((string) ($filters['tag'] ?? ''));
+        if ($tag !== '') {
+            if (strpos($tag, '=') !== false) {
+                [$tag_name, $tag_value] = explode('=', $tag, 2);
+                $params['tags'] = [['tag' => trim($tag_name), 'value' => trim($tag_value), 'operator' => 1]];
+            }
+            else {
+                $params['tags'] = [['tag' => $tag, 'operator' => 0]];
+            }
+        }
+
+        $limit = (int) ($filters['limit'] ?? 200);
+        $params['limit'] = max(1, min($limit, 2000));
+
+        $result = $this->call('host.get', $params);
+
+        $rows = [];
+        foreach ($result as $row) {
+            $groups = [];
+            foreach (($row['groups'] ?? []) as $g) {
+                if (!empty($g['name'])) {
+                    $groups[] = $g['name'];
+                }
+            }
+            $tags = [];
+            foreach (($row['tags'] ?? []) as $t) {
+                $tag_str = (string) ($t['tag'] ?? '');
+                if ($tag_str === '') {
+                    continue;
+                }
+                $value = (string) ($t['value'] ?? '');
+                $tags[] = $value !== '' ? $tag_str.'='.$value : $tag_str;
+            }
+            $rows[] = [
+                'hostid' => (string) ($row['hostid'] ?? ''),
+                'host' => (string) ($row['host'] ?? ''),
+                'name' => (string) ($row['name'] ?? ''),
+                'status' => ((string) ($row['status'] ?? '0')) === '0' ? 'enabled' : 'disabled',
+                'maintenance' => ((string) ($row['maintenance_status'] ?? '0')) === '1',
+                'groups' => $groups,
+                'tags' => $tags
+            ];
+        }
+
+        return $rows;
     }
 
     public function getProblems(?string $hostid = null, string $search = '', int $limit = 50): array {
@@ -2254,6 +2351,75 @@ class ZabbixApiClient {
             'templates' => $result[0]['parentTemplates'] ?? [],
             'inherited_tags' => $result[0]['inheritedTags'] ?? []
         ];
+    }
+
+    /**
+     * Look up the value of a global user macro (e.g. "{$ZABBIX.URL}").
+     *
+     * Returns null when the macro does not exist, is empty, is a secret/vault
+     * type (we never surface those), or when the API call fails. Best-effort:
+     * never throws.
+     */
+    public function getGlobalMacroValue(string $macro): ?string {
+        $macro = trim($macro);
+
+        if ($macro === '') {
+            return null;
+        }
+
+        try {
+            $result = $this->call('usermacro.get', [
+                'globalmacro' => true,
+                'output' => ['macro', 'value', 'type'],
+                'filter' => ['macro' => $macro]
+            ]);
+        }
+        catch (\Throwable $e) {
+            return null;
+        }
+
+        if (!is_array($result) || empty($result[0])) {
+            return null;
+        }
+
+        // Type 1 = secret, 2 = vault. Never return non-text macros.
+        if ((int) ($result[0]['type'] ?? 0) !== 0) {
+            return null;
+        }
+
+        $value = trim((string) ($result[0]['value'] ?? ''));
+        return $value !== '' ? $value : null;
+    }
+
+    /**
+     * Best-effort resolution of the Zabbix frontend base URL.
+     *
+     * Order:
+     *   1. The {$ZABBIX.URL} global macro (operator-configured).
+     *   2. Stripping /api_jsonrpc.php from the API URL the module is using.
+     *
+     * Result is cached per request and returned without a trailing slash.
+     */
+    public function getFrontendUrl(): string {
+        if (isset($this->frontend_url_cache)) {
+            return $this->frontend_url_cache;
+        }
+
+        $url = $this->getGlobalMacroValue('{$ZABBIX.URL}');
+
+        if ($url === null || $url === '') {
+            $url = preg_replace('#/?api_jsonrpc\.php/?$#i', '', (string) $this->url);
+        }
+
+        $url = rtrim((string) $url, '/');
+
+        // Only accept http(s) URLs so we never inject something the chat can't link to.
+        if ($url !== '' && !preg_match('#^https?://#i', $url)) {
+            $url = '';
+        }
+
+        $this->frontend_url_cache = $url;
+        return $url;
     }
 
     /**

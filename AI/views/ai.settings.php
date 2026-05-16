@@ -86,8 +86,9 @@ $render_provider_row = static function(array $provider = []) use ($h, $api_key_e
                 <span class="ai-muted ai-provider-model-hint"></span>
             </div>
             <div>
-                <label class="ai-label"><?= $h(_('Timeout')) ?></label>
-                <input class="ai-input" type="number" min="5" max="300" name="providers[<?= $h($id) ?>][timeout]" value="<?= $h($provider['timeout'] ?? 60) ?>">
+                <label class="ai-label"><?= $h(_('Timeout (s)')) ?></label>
+                <input class="ai-input" type="number" min="5" max="600" name="providers[<?= $h($id) ?>][timeout]" value="<?= $h($provider['timeout'] ?? 120) ?>">
+                <span class="ai-muted"><?= $h(_('Increase for long multi-step reports (e.g. 180–240).')) ?></span>
             </div>
             <div>
                 <label class="ai-label"><?= $h(_('Temperature')) ?></label>
@@ -438,6 +439,14 @@ ob_start();
                     <label class="ai-label"><?= $h(_('Token environment variable')) ?></label>
                     <input class="ai-input" type="text" name="netbox[token_env]" value="<?= $h($config['netbox']['token_env'] ?? '') ?>" placeholder="NETBOX_TOKEN">
                 </div>
+                <div class="ai-span-3">
+                    <label class="ai-label"><?= $h(_('Enrichment behaviour')) ?></label>
+                    <label class="ai-checkbox"><input type="checkbox" name="netbox[auto_enrich_chat]" value="1" <?= !empty($config['netbox']['auto_enrich_chat']) ? 'checked' : '' ?>> <?= $h(_('Auto-enrich chat when a specific hostname is mentioned')) ?></label>
+                    <span class="ai-muted" style="display:block;margin:4px 0 8px 24px;">
+                        <?= $h(_('Fires only when the message contains a clear hostname pattern (e.g. LHBHANA101, kt4-jump-linux, srv-web-03). Broad questions like "all servers" do NOT trigger any extra tokens. The enriched hostnames are listed in the chat status after each reply so you can audit usage.')) ?>
+                    </span>
+                    <label class="ai-checkbox"><input type="checkbox" name="netbox[enrich_webhook_host]" value="1" <?= !empty($config['netbox']['enrich_webhook_host']) ? 'checked' : '' ?>> <?= $h(_('Include the NetBox record for the affected host in webhook (notification) prompts')) ?></label>
+                </div>
             </div>
             <div class="ai-section-actions">
                 <button type="button" class="btn ai-test-netbox" data-test-netbox><?= $h(_('Test connection')) ?></button>
@@ -477,7 +486,7 @@ ob_start();
                 </div>
                 <div>
                     <label class="ai-label"><?= $h(_('Include NetBox')) ?></label>
-                    <label class="ai-checkbox"><input type="checkbox" name="webhook[include_netbox]" value="1" <?= !empty($config['webhook']['include_netbox']) ? 'checked' : '' ?>> <?= $h(_('Use NetBox context')) ?></label>
+                    <label class="ai-checkbox"><input type="checkbox" name="webhook[include_netbox]" value="1" <?= !empty($config['webhook']['include_netbox']) ? 'checked' : '' ?>> <?= $h(_('Use NetBox context (legacy — same as "Include NetBox record" toggle in the NetBox section)')) ?></label>
                 </div>
                 <div>
                     <label class="ai-label"><?= $h(_('Include OS hint')) ?></label>
