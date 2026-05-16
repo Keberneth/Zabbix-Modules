@@ -514,6 +514,239 @@
             sendButton.textContent = isBusy ? 'Sending…' : 'Send';
         }
 
+        // Render a restricted subset of Markdown into `target` using only DOM APIs
+        // (no innerHTML), so the AI's output is shown as formatted text without
+        // exposing the page to script injection.
+        function renderMarkdown(target, text) {
+            text = String(text || '').replace(/\r\n?/g, '\n');
+
+            // Pull fenced code blocks out first; restore them as <pre><code>.
+            var codeBlocks = [];
+            text = text.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, function (_, lang, code) {
+                codeBlocks.push({ lang: lang || '', code: code.replace(/\n$/, '') });
+                return ' CODEBLOCK' + (codeBlocks.length - 1) + ' ';
+            });
+
+            var blocks = text.split(/\n{2,}/);
+
+            blocks.forEach(function (block) {
+                block = block.replace(/^\n+|\n+$/g, '');
+                if (block === '') {
+                    return;
+                }
+
+                // Restored code block placeholder.
+                var codeMatch = /^ CODEBLOCK(\d+) $/.exec(block);
+                if (codeMatch) {
+                    var entry = codeBlocks[parseInt(codeMatch[1], 10)];
+                    var pre = document.createElement('pre');
+                    pre.className = 'ai-md-code-block';
+                    var code = document.createElement('code');
+                    if (entry.lang) {
+                        code.className = 'language-' + entry.lang;
+                    }
+                    code.textContent = entry.code;
+                    pre.appendChild(code);
+                    target.appendChild(pre);
+                    return;
+                }
+
+                // Heading.
+                var headingMatch = /^(#{1,6})\s+(.+)$/.exec(block);
+                if (headingMatch) {
+                    var level = headingMatch[1].length;
+                    var h = document.createElement('h' + Math.min(level, 6));
+                    h.className = 'ai-md-h';
+                    renderInline(h, headingMatch[2]);
+                    target.appendChild(h);
+                    return;
+                }
+
+                var lines = block.split('\n');
+
+                // Markdown table: first line is the header row, second line is the separator
+                // ("| --- | :---: |"), remaining lines are body rows. Pipes are required at
+                // least once per row; we are lenient about leading/trailing pipes.
+                if (lines.length >= 2 && /^\s*\|?.+\|.+\|?\s*$/.test(lines[0])
+                    && /^\s*\|?[\s:|-]+\|[\s:|-]+\|?\s*$/.test(lines[1])
+                    && /-/.test(lines[1])) {
+
+                    var splitRow = function (row) {
+                        return row.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(function (c) { return c.trim(); });
+                    };
+
+                    var headerCells = splitRow(lines[0]);
+                    var alignSpec = splitRow(lines[1]).map(function (cell) {
+                        var left = cell.charAt(0) === ':';
+                        var right = cell.charAt(cell.length - 1) === ':';
+                        if (left && right) return 'center';
+                        if (right)         return 'right';
+                        if (left)          return 'left';
+                        return '';
+                    });
+
+                    var table = document.createElement('table');
+                    table.className = 'ai-md-table';
+
+                    var thead = document.createElement('thead');
+                    var headRow = document.createElement('tr');
+                    headerCells.forEach(function (cell, idx) {
+                        var th = document.createElement('th');
+                        if (alignSpec[idx]) th.style.textAlign = alignSpec[idx];
+                        renderInline(th, cell);
+                        headRow.appendChild(th);
+                    });
+                    thead.appendChild(headRow);
+                    table.appendChild(thead);
+
+                    var tbody = document.createElement('tbody');
+                    for (var i = 2; i < lines.length; i++) {
+                        var bodyRow = lines[i];
+                        if (!/\|/.test(bodyRow)) continue;
+                        var cells = splitRow(bodyRow);
+                        var tr = document.createElement('tr');
+                        cells.forEach(function (cell, idx) {
+                            var td = document.createElement('td');
+                            if (alignSpec[idx]) td.style.textAlign = alignSpec[idx];
+                            renderInline(td, cell);
+                            tr.appendChild(td);
+                        });
+                        tbody.appendChild(tr);
+                    }
+                    table.appendChild(tbody);
+
+                    var wrap = document.createElement('div');
+                    wrap.className = 'ai-md-table-wrap';
+                    wrap.appendChild(table);
+                    target.appendChild(wrap);
+                    return;
+                }
+
+                // Bullet list.
+                var isList = lines.every(function (l) { return /^\s*[-*]\s+/.test(l); });
+                if (isList) {
+                    var ul = document.createElement('ul');
+                    ul.className = 'ai-md-list';
+                    lines.forEach(function (l) {
+                        var li = document.createElement('li');
+                        renderInline(li, l.replace(/^\s*[-*]\s+/, ''));
+                        ul.appendChild(li);
+                    });
+                    target.appendChild(ul);
+                    return;
+                }
+
+                // Paragraph. Preserve single newlines as <br>.
+                var p = document.createElement('p');
+                p.className = 'ai-md-p';
+                var paraLines = block.split('\n');
+                paraLines.forEach(function (line, idx) {
+                    renderInline(p, line);
+                    if (idx < paraLines.length - 1) {
+                        p.appendChild(document.createElement('br'));
+                    }
+                });
+                target.appendChild(p);
+            });
+        }
+
+        // Inline markdown handler: image, link, bold, inline code, plain text.
+        // Everything else (escaped via textContent) is rendered literally.
+        function renderInline(target, line) {
+            // Token order matters: image (![…](…)) must run before link ([…](…)).
+            // We do a single left-to-right scan, advancing past consumed spans.
+            var re = /(!\[([^\]]*)\]\(([^\s)]+)\))|(\[([^\]]+)\]\(([^\s)]+)\))|(\*\*([^*]+)\*\*)|(`([^`]+)`)/g;
+            var lastIndex = 0;
+            var match;
+
+            while ((match = re.exec(line)) !== null) {
+                if (match.index > lastIndex) {
+                    target.appendChild(document.createTextNode(line.slice(lastIndex, match.index)));
+                }
+
+                if (match[1]) {
+                    // Image.
+                    var src = safeImageSrc(match[3]);
+                    if (src) {
+                        var img = document.createElement('img');
+                        img.className = 'ai-md-img';
+                        img.src = src;
+                        img.alt = match[2] || '';
+                        img.loading = 'lazy';
+                        target.appendChild(img);
+                    }
+                    else {
+                        target.appendChild(document.createTextNode(match[0]));
+                    }
+                }
+                else if (match[4]) {
+                    // Link.
+                    var href = safeLinkHref(match[6]);
+                    if (href) {
+                        var a = document.createElement('a');
+                        a.href = href;
+                        a.textContent = match[5];
+                        a.target = '_blank';
+                        a.rel = 'noopener noreferrer';
+                        a.className = 'ai-md-link';
+                        target.appendChild(a);
+                    }
+                    else {
+                        target.appendChild(document.createTextNode(match[0]));
+                    }
+                }
+                else if (match[7]) {
+                    // Bold.
+                    var strong = document.createElement('strong');
+                    strong.textContent = match[8];
+                    target.appendChild(strong);
+                }
+                else if (match[9]) {
+                    // Inline code.
+                    var code = document.createElement('code');
+                    code.className = 'ai-md-code-inline';
+                    code.textContent = match[10];
+                    target.appendChild(code);
+                }
+
+                lastIndex = re.lastIndex;
+            }
+
+            if (lastIndex < line.length) {
+                target.appendChild(document.createTextNode(line.slice(lastIndex)));
+            }
+        }
+
+        // Allow links to the same origin and standard web URLs only. Returns the
+        // safe href or null if the URL is rejected.
+        function safeLinkHref(url) {
+            url = String(url || '').trim();
+            if (url === '') {
+                return null;
+            }
+            if (/^https?:\/\//i.test(url)) {
+                return url;
+            }
+            if (/^zabbix\.php(\?|$)/i.test(url)) {
+                return url;
+            }
+            if (url.charAt(0) === '#') {
+                return url;
+            }
+            return null;
+        }
+
+        // Images are restricted to the AI module's own report download endpoint
+        // (same-origin token-bound) to prevent the model from emitting trackers
+        // or exfiltrating data via image src.
+        function safeImageSrc(url) {
+            url = String(url || '').trim();
+            if (/^zabbix\.php\?action=ai\.report\.download(&|$)/i.test(url)) {
+                return url;
+            }
+            return null;
+        }
+
         function renderHistory() {
             transcript.innerHTML = '';
 
@@ -526,7 +759,13 @@
             }
 
             history.forEach(function (message) {
-                var isAction = message.role === 'assistant' && message.content && message.content.indexOf('[Zabbix Action:') === 0;
+                var content = message.content || '';
+                var isAction = message.role === 'assistant' && content.indexOf('[Zabbix Action:') === 0;
+
+                // Strip the redundant "[Zabbix Action: tool]" prefix; the title already shows it.
+                if (isAction) {
+                    content = content.replace(/^\[Zabbix Action:[^\]]*\]\s*\n*/, '');
+                }
 
                 var item = document.createElement('div');
                 item.className = 'ai-msg ai-msg-' + message.role + (isAction ? ' ai-msg-action' : '');
@@ -535,9 +774,17 @@
                 title.className = 'ai-msg-title';
                 title.textContent = isAction ? 'AI (Zabbix Action)' : (message.role === 'assistant' ? 'AI' : 'You');
 
-                var body = document.createElement('pre');
-                body.className = 'ai-msg-body';
-                body.textContent = message.content || '';
+                var body;
+                if (message.role === 'assistant') {
+                    body = document.createElement('div');
+                    body.className = 'ai-msg-body ai-md';
+                    renderMarkdown(body, content);
+                }
+                else {
+                    body = document.createElement('pre');
+                    body.className = 'ai-msg-body';
+                    body.textContent = content;
+                }
 
                 item.appendChild(title);
                 item.appendChild(body);

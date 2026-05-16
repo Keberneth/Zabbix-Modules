@@ -819,6 +819,38 @@ restorecon -Rv /var/log/zabbix-ai</pre>
             </div>
         </section>
 
+        <section class="ai-card">
+            <div class="ai-section-header">
+                <h2><?= $h(_('Reports')) ?></h2>
+                <button type="button" class="ai-faq-toggle" data-faq-target="faq-reports" title="<?= $h(_('Help')) ?>">?</button>
+            </div>
+            <div id="faq-reports" class="ai-faq-box">
+                <p><strong>What is this?</strong> The chat can produce downloadable reports (CSV/HTML/JSON), Markdown evidence bundles, and inline SVG graphs (problem counts over time, with Zabbix severity colours).</p>
+                <p><strong>Directory</strong> &mdash; on-disk location where generated files are kept until their TTL expires. Leave blank to reuse the security state path (a <code>reports/</code> subdirectory). For production, set a dedicated path like <code>/var/lib/zabbix-ai/reports</code> with the same ownership/SELinux context as the state path.</p>
+                <p><strong>TTL (seconds)</strong> &mdash; how long each generated file is kept. 3600 (1 hour) is a sensible default. Files are removed by the next chat request after expiry.</p>
+                <p><strong>Delete after download</strong> &mdash; remove the file as soon as the user clicks the download link. Off by default so the user can re-download or share the link (within TTL).</p>
+                <p><strong>Permissions:</strong> the php-fpm worker user (often <code>apache</code> on RHEL even behind nginx) must be able to <em>create and read</em> files in this directory. SELinux label: <code>httpd_sys_rw_content_t</code>.</p>
+            </div>
+            <div class="ai-repeat-grid ai-settings-grid">
+                <div>
+                    <label class="ai-label"><?= $h(_('Enabled')) ?></label>
+                    <label class="ai-checkbox"><input type="checkbox" name="reports[enabled]" value="1" <?= !empty($config['reports']['enabled']) ? 'checked' : '' ?>> <?= $h(_('Allow report and graph generation')) ?></label>
+                </div>
+                <div>
+                    <label class="ai-label"><?= $h(_('TTL (seconds)')) ?></label>
+                    <input class="ai-input" type="number" min="300" max="86400" name="reports[ttl_seconds]" value="<?= $h($config['reports']['ttl_seconds'] ?? 3600) ?>">
+                </div>
+                <div>
+                    <label class="ai-label"><?= $h(_('Delete after download')) ?></label>
+                    <label class="ai-checkbox"><input type="checkbox" name="reports[delete_after_download]" value="1" <?= !empty($config['reports']['delete_after_download']) ? 'checked' : '' ?>> <?= $h(_('Remove file once user downloads it')) ?></label>
+                </div>
+                <div class="ai-span-3">
+                    <label class="ai-label"><?= $h(_('Directory')) ?></label>
+                    <input class="ai-input" type="text" name="reports[directory]" placeholder="<?= $h(_('Leave blank to reuse the security state path')) ?>" value="<?= $h($config['reports']['directory'] ?? '') ?>">
+                </div>
+            </div>
+        </section>
+
         <div class="ai-section-actions ai-sticky-actions">
             <button type="submit" class="btn"><?= $h(_('Save settings')) ?></button>
         </div>

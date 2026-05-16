@@ -70,6 +70,10 @@
     "ai.config.context": {
       "class": "ConfigContext",
       "layout": "layout.json"
+    },
+    "ai.report.download": {
+      "class": "ReportDownload",
+      "layout": "layout.json"
     }
   },
   "assets": {

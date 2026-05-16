@@ -132,6 +132,12 @@ class Config {
                     'hostgroups' => false
                 ],
                 'require_super_admin_for_write' => true
+            ],
+            'reports' => [
+                'enabled' => true,
+                'ttl_seconds' => 3600,
+                'delete_after_download' => false,
+                'directory' => ''
             ]
         ];
     }
@@ -455,6 +461,15 @@ class Config {
                 'hostgroups' => Util::truthy($za['write_permissions']['hostgroups'] ?? false)
             ],
             'require_super_admin_for_write' => Util::truthy($za['require_super_admin_for_write'] ?? true)
+        ];
+
+        $reports_post = $post['reports'] ?? [];
+        $ttl = (int) ($reports_post['ttl_seconds'] ?? 3600);
+        $new_config['reports'] = [
+            'enabled' => Util::truthy($reports_post['enabled'] ?? true),
+            'ttl_seconds' => max(300, min($ttl, 86400)),
+            'delete_after_download' => Util::truthy($reports_post['delete_after_download'] ?? false),
+            'directory' => Util::cleanPath($reports_post['directory'] ?? '')
         ];
 
         return self::mergeWithDefaults($new_config);

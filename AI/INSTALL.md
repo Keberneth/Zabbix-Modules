@@ -1,5 +1,40 @@
 # Zabbix 7 AI module install instructions
 
+## Zabbix 7 AI module install simple instructions
+Download the AI folder and content from the git to the zabbix module folder
+<br>
+Usually: /usr/share/zabbix/modules/
+<br>
+Some distributions use a different frontend root. The key requirement is that `manifest.json` is directly inside the module directory:
+<br>
+Then run the following commands
+```bash
+WEB_GROUP=apache
+
+# ── 1. Deploy module
+sudo chown -R root:root /usr/share/zabbix/modules/AI
+sudo find /usr/share/zabbix/modules/AI -type d -exec chmod 755 {} \;
+sudo find /usr/share/zabbix/modules/AI -type f -exec chmod 644 {} \;
+sudo restorecon -Rv /usr/share/zabbix/modules/AI
+
+# ── 2. Fix the writable-directory modes (the real bug: 0750 gave group r-x only, no write)
+# 02770 = setgid + rwx for group, so new files inherit the apache group automatically.
+sudo chgrp -R "$WEB_GROUP" /var/lib/zabbix-ai /var/lib/zabbix/ai_reports /var/log/zabbix-ai
+sudo chmod 02770 /var/lib/zabbix-ai /var/lib/zabbix-ai/state /var/lib/zabbix-ai/state/pending
+sudo chmod 02770 /var/lib/zabbix/ai_reports
+sudo chmod 02770 /var/log/zabbix-ai /var/log/zabbix-ai/archive
+
+# ── 3. Verify the php-fpm user can actually write+read each path
+sudo -u "$WEB_GROUP" sh -c 'echo t > /var/lib/zabbix-ai/state/.t && cat /var/lib/zabbix-ai/state/.t > /dev/null && rm /var/lib/zabbix-ai/state/.t'   && echo "State:   OK"
+sudo -u "$WEB_GROUP" sh -c 'echo t > /var/lib/zabbix/ai_reports/.t && cat /var/lib/zabbix/ai_reports/.t > /dev/null && rm /var/lib/zabbix/ai_reports/.t' && echo "Reports: OK"
+sudo -u "$WEB_GROUP" sh -c 'echo t > /var/log/zabbix-ai/.t && cat /var/log/zabbix-ai/.t > /dev/null && rm /var/log/zabbix-ai/.t'                   && echo "Logs:    OK"
+
+# ── 4. Reload php-fpm
+sudo systemctl restart php-fpm
+```
+
+# Zabbix 7 AI module install instructions
+
 ## 1. Copy the module directory
 
 Use the folder name exactly as `AI`.
@@ -137,15 +172,47 @@ sudo semanage fcontext -a -t httpd_sys_rw_content_t '/tmp/zabbix-ai-module(/.*)?
 sudo restorecon -Rv /tmp/zabbix-ai-module
 ```
 
+### Reports directory (downloads + graphs)
+
+The chat can generate downloadable reports (CSV/HTML/JSON/SVG/Markdown) and inline graphs. Generated files are stored token-bound on disk and served back to the user through `zabbix.php?action=ai.report.download`. The web process needs **read and write** access to this directory, and it should be SELinux-labelled `httpd_sys_rw_content_t`.
+
+By default the module reuses the security state path (`reports/` subdirectory). For production, configure a dedicated path in **AI Settings → Reports → Directory**, e.g. `/var/lib/zabbix-ai/reports`.
+
+```bash
+WEB_GROUP=nginx   # or: apache, www-data
+
+sudo install -d -o root -g $WEB_GROUP -m 02770 /var/lib/zabbix-ai/reports
+sudo semanage fcontext -a -t httpd_sys_rw_content_t '/var/lib/zabbix-ai/reports(/.*)?'
+sudo restorecon -Rv /var/lib/zabbix-ai/reports
+
+# Verify the web user can write AND read back.
+sudo -u $WEB_GROUP sh -c 'echo test > /var/lib/zabbix-ai/reports/.write_test && cat /var/lib/zabbix-ai/reports/.write_test && rm /var/lib/zabbix-ai/reports/.write_test' && echo "Reports: OK"
+```
+
+### Important: who is the PHP-FPM user?
+
+On RHEL/Alma/Rocky, php-fpm runs as `apache` **by default even when nginx is the HTTP front-end** — the `WEB_GROUP` in the commands above must match the actual php-fpm worker user, not the HTTP server user. Verify with:
+
+```bash
+ps -eo user,comm | grep php-fpm | head
+# or
+grep -E '^\s*(user|group)' /etc/php-fpm.d/www.conf
+```
+
+If you see `apache`, use `WEB_GROUP=apache` for every write-capable directory below (state, logs, reports). Setting them to `nginx` when php-fpm actually runs as `apache` results in silent permission failures when the module tries to write reports, redaction state, or logs.
+
 ### Verify directory access
 
 After setup, verify the web process can write:
 
 ```bash
 # Test as the web server user
-sudo -u nginx touch /var/lib/zabbix-ai/state/test && rm /var/lib/zabbix-ai/state/test && echo "OK"
-sudo -u nginx touch /var/log/zabbix-ai/test && rm /var/log/zabbix-ai/test && echo "OK"
+sudo -u nginx touch /var/lib/zabbix-ai/state/test && rm /var/lib/zabbix-ai/state/test && echo "State: OK"
+sudo -u nginx touch /var/log/zabbix-ai/test && rm /var/log/zabbix-ai/test && echo "Logs: OK"
+sudo -u nginx touch /var/lib/zabbix-ai/reports/test && rm /var/lib/zabbix-ai/reports/test && echo "Reports: OK"
 ```
+
+If any of these say "Permission denied", the most common cause is using the wrong `WEB_GROUP` (see above) — confirm the actual php-fpm worker user and re-`chown`.
 
 ## 7. Open the module pages
 
@@ -327,28 +394,36 @@ location = /ai-webhook {
 
 Copy-paste all commands to install the module, create writable directories, set permissions, and configure SELinux in one go.
 
-Change `WEB_GROUP=nginx` to `apache` or `www-data` if that is your web server group.
+**Pick the right `WEB_GROUP` first.** On RHEL/Alma/Rocky with nginx + php-fpm, the **php-fpm worker** is the process that reads/writes module files — and it defaults to `apache` even when the HTTP front-end is nginx. Confirm with:
+
+```bash
+ps -eo user,comm | grep php-fpm | head
+```
+
+Set `WEB_GROUP` to whatever the php-fpm pool runs as (`apache`, `nginx`, or `www-data`).
 
 ```bash
 # ── Variables ──
-WEB_GROUP=nginx
+# IMPORTANT: This is the php-fpm worker user, not the HTTP server user.
+WEB_GROUP=apache   # change to nginx or www-data if your php-fpm runs as those
 
 # ── 1. Copy module ──
 sudo cp -a AI /usr/share/zabbix/modules/
-sudo chown -R $WEB_GROUP:$WEB_GROUP /usr/share/zabbix/modules/AI
+sudo chown -R root:root /usr/share/zabbix/modules/AI
 sudo find /usr/share/zabbix/modules/AI -type d -exec chmod 755 {} \;
 sudo find /usr/share/zabbix/modules/AI -type f -exec chmod 644 {} \;
 
 # ── 2. Create writable directories ──
 # Security / redaction state
-sudo mkdir -p /var/lib/zabbix-ai/state /var/lib/zabbix-ai/state/pending
-sudo chown -R root:$WEB_GROUP /var/lib/zabbix-ai
-sudo chmod -R 0750 /var/lib/zabbix-ai
+sudo install -d -o root -g $WEB_GROUP -m 02770 /var/lib/zabbix-ai/state
+sudo install -d -o root -g $WEB_GROUP -m 02770 /var/lib/zabbix-ai/state/pending
+
+# Reports (CSV/HTML/JSON/SVG/MD downloads and inline graphs)
+sudo install -d -o root -g $WEB_GROUP -m 02770 /var/lib/zabbix-ai/reports
 
 # Logs and archives
-sudo mkdir -p /var/log/zabbix-ai /var/log/zabbix-ai/archive
-sudo chown -R root:$WEB_GROUP /var/log/zabbix-ai
-sudo chmod -R 0750 /var/log/zabbix-ai
+sudo install -d -o root -g $WEB_GROUP -m 02770 /var/log/zabbix-ai
+sudo install -d -o root -g $WEB_GROUP -m 02770 /var/log/zabbix-ai/archive
 
 # ── 3. SELinux ──
 sudo semanage fcontext -a -t httpd_sys_content_t '/usr/share/zabbix/modules/AI(/.*)?'
@@ -357,18 +432,34 @@ sudo semanage fcontext -a -t httpd_sys_rw_content_t '/var/log/zabbix-ai(/.*)?'
 sudo restorecon -Rv /usr/share/zabbix/modules/AI /var/lib/zabbix-ai /var/log/zabbix-ai
 sudo setsebool -P httpd_can_network_connect on
 
-# ── 4. Verify writable ──
-sudo -u $WEB_GROUP touch /var/lib/zabbix-ai/state/test && sudo rm /var/lib/zabbix-ai/state/test && echo "State: OK"
-sudo -u $WEB_GROUP touch /var/log/zabbix-ai/test && sudo rm /var/log/zabbix-ai/test && echo "Logs: OK"
+# ── 4. Verify writable AND readable for the web user ──
+# Note: this verifies the actual write+read round-trip the report download path needs.
+sudo -u $WEB_GROUP sh -c 'echo t > /var/lib/zabbix-ai/state/.t && rm /var/lib/zabbix-ai/state/.t'   && echo "State:   OK"
+sudo -u $WEB_GROUP sh -c 'echo t > /var/log/zabbix-ai/.t   && rm /var/log/zabbix-ai/.t'             && echo "Logs:    OK"
+sudo -u $WEB_GROUP sh -c 'echo t > /var/lib/zabbix-ai/reports/.t && cat /var/lib/zabbix-ai/reports/.t > /dev/null && rm /var/lib/zabbix-ai/reports/.t' && echo "Reports: OK"
+
+# ── 5. Reload php-fpm so it picks up the new module ──
+sudo systemctl restart php-fpm
 ```
 
 Then:
 
 1. **Zabbix frontend:** Administration > General > Modules > Scan directory > Enable AI
 2. **AI Settings > Security:** Set state path to `/var/lib/zabbix-ai/state`
-3. **AI Settings > Logging:** Set log path to `/var/log/zabbix-ai`, archive path to `/var/log/zabbix-ai/archive`, and check "Enable logging"
-4. **AI Settings > Providers:** Add at least one provider
-5. **Save settings**
+3. **AI Settings > Reports:** Set directory to `/var/lib/zabbix-ai/reports` (leave blank to reuse the state path)
+4. **AI Settings > Logging:** Set log path to `/var/log/zabbix-ai`, archive path to `/var/log/zabbix-ai/archive`, and check "Enable logging"
+5. **AI Settings > Providers:** Add at least one provider
+6. **Save settings**
+
+### Troubleshooting: report download link or inline chart image is broken
+
+If the download link in chat returns 404 or the inline chart shows a broken-image icon while the same SVG works when copied to the browser address bar:
+
+1. Reports directory not writable by the php-fpm worker — re-run step 2 with the correct `WEB_GROUP` (see `ps -eo user,comm | grep php-fpm`).
+2. SELinux missing on the reports directory — re-run step 3 then `restorecon -Rv`.
+3. Reports directory configured to a path that does not exist — check AI Settings → Reports → Directory matches a directory the web user can write to.
+4. Old SELinux contexts on existing files — fix with: `sudo restorecon -Rv /var/lib/zabbix-ai/reports`
+5. Check for AVC denials: `sudo ausearch -m avc -ts recent | grep -i zabbix`
 
 
 ## 15. Custom paths for redaction state and logs (reference)

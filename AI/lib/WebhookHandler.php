@@ -78,6 +78,28 @@ class WebhookHandler {
         );
         $reply = $redactor->restoreText($reply_masked);
 
+        // Webhook mode never executes Zabbix tools. The AI is instructed not to
+        // emit any tool-call JSON in webhook replies (see PromptBuilder), but as
+        // a defence in depth we strip any tool-call blocks here so injected
+        // text in the payload can never reach a Zabbix event comment as JSON.
+        $reply_cleaned = ZabbixActionExecutor::stripToolCalls($reply);
+        $reply_masked_cleaned = ZabbixActionExecutor::stripToolCalls($reply_masked);
+
+        if ($reply_cleaned !== $reply) {
+            AuditLogger::log($config, 'errors', [
+                'event' => 'webhook.tool_call_leak_stripped',
+                'source' => 'ai.webhook',
+                'status' => 'warn',
+                'meta' => [
+                    'eventid' => (string) ($payload['eventid'] ?? ''),
+                    'note' => 'AI returned a tool-call JSON inside a webhook reply; stripped before posting.'
+                ]
+            ]);
+        }
+
+        $reply = $reply_cleaned;
+        $reply_masked = $reply_masked_cleaned;
+
         $posted_chunks = 0;
         if (Util::truthy($config['webhook']['add_problem_update'] ?? false)) {
             if (empty($payload['eventid'])) {
