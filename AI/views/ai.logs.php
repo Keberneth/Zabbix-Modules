@@ -65,16 +65,21 @@ ob_start();
             <p><strong>Logging is disabled by default.</strong> Enable it in AI Settings &gt; Logging.</p>
             <p><strong>If "Log path writable" shows No</strong>, the web server process cannot write to the log directory. See INSTALL.md for the directory + SELinux setup commands.</p>
         </div>
+        <?php
+        $log_writable = !empty($summary['path_writable']);
+        $archive_writable = !empty($summary['archive_path_writable']);
+        $any_unwritable = !$log_writable || !$archive_writable;
+        ?>
         <div class="ai-repeat-grid ai-settings-grid">
             <div><strong><?= $h(_('Logging enabled')) ?>:</strong><div class="ai-muted"><?= !empty($summary['enabled']) ? $h(_('Yes')) : $h(_('No')) ?></div></div>
             <div><strong><?= $h(_('Retention')) ?>:</strong><div class="ai-muted"><?= $h($summary['retention_days'] ?? 0) ?> <?= $h(_('days')) ?></div></div>
             <div><strong><?= $h(_('Live files')) ?>:</strong><div class="ai-muted"><?= $h($summary['live_file_count'] ?? 0) ?></div></div>
             <div><strong><?= $h(_('Archived files')) ?>:</strong><div class="ai-muted"><?= $h($summary['archive_file_count'] ?? 0) ?></div></div>
-            <div><strong><?= $h(_('Log path writable')) ?>:</strong><div class="ai-muted"><?= !empty($summary['path_writable']) ? $h(_('Yes')) : $h(_('No')) ?></div></div>
-            <div><strong><?= $h(_('Archive path writable')) ?>:</strong><div class="ai-muted"><?= !empty($summary['archive_path_writable']) ? $h(_('Yes')) : $h(_('No')) ?></div></div>
+            <div><strong><?= $h(_('Log path writable')) ?>:</strong><div class="ai-muted"><?= $log_writable ? $h(_('Yes')) : '<strong style="color:#c00">'.$h(_('No')).'</strong>' ?></div></div>
+            <div><strong><?= $h(_('Archive path writable')) ?>:</strong><div class="ai-muted"><?= $archive_writable ? $h(_('Yes')) : '<strong style="color:#c00">'.$h(_('No')).'</strong>' ?></div></div>
         </div>
-        <?php if ($permission_note !== ''): ?>
-            <p class="ai-muted ai-top-margin"><?= $h($permission_note) ?></p>
+        <?php if ($any_unwritable && $permission_note !== ''): ?>
+            <p class="ai-muted ai-top-margin"><strong><?= $h(_('How to fix:')) ?></strong> <?= $h($permission_note) ?></p>
         <?php endif; ?>
     </section>
 

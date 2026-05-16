@@ -251,7 +251,7 @@ class AuditLogger {
     }
 
     public static function permissionNote(): string {
-        return 'The active web/PHP process must be able to create, read, and append files in the selected log and archive directories. Recommended Linux permissions are directories 0750 and files 0640. On SELinux systems, label custom writable paths with httpd_sys_rw_content_t.';
+        return 'The active web/PHP process must be able to create, read, and append files in the selected log and archive directories. Recommended Linux mode is 02770 (rwx for owner and group, setgid so new files inherit the group); files default to 0640. The directory group must match the php-fpm worker user (on RHEL/Alma/Rocky with nginx + php-fpm this is normally "apache", not "nginx" — confirm with `ps -eo user,comm | grep php-fpm`). On SELinux systems, label custom writable paths with httpd_sys_rw_content_t.';
     }
 
     private static function categoryEnabled(array $config, string $category): bool {

@@ -582,17 +582,23 @@ ob_start();
                 </ul>
                 <p><strong>State path:</strong> Alias mappings are stored as files so they persist across messages in the same chat session. The web server must be able to write here.</p>
                 <p><strong>Setup commands (run as root):</strong></p>
-<pre># Set WEB_GROUP to your web server group: nginx, apache, or www-data
-WEB_GROUP=nginx
+<pre># Set WEB_GROUP to the actual php-fpm worker user.
+# On RHEL/Alma/Rocky with nginx + php-fpm this is usually "apache",
+# not "nginx". Confirm with: ps -eo user,comm | grep php-fpm
+WEB_GROUP=apache   # or: nginx, www-data
 
 # Using persistent path (recommended):
-mkdir -p /var/lib/zabbix-ai/state /var/lib/zabbix-ai/state/pending
-chown -R root:$WEB_GROUP /var/lib/zabbix-ai
-chmod -R 0750 /var/lib/zabbix-ai
+install -d -o root -g $WEB_GROUP -m 02770 /var/lib/zabbix-ai/state
+install -d -o root -g $WEB_GROUP -m 02770 /var/lib/zabbix-ai/state/pending
 
 # SELinux (RHEL/CentOS):
 semanage fcontext -a -t httpd_sys_rw_content_t '/var/lib/zabbix-ai(/.*)?'
-restorecon -Rv /var/lib/zabbix-ai</pre>
+restorecon -Rv /var/lib/zabbix-ai
+
+# Verify the worker can both write AND read back:
+sudo -u $WEB_GROUP sh -c 'echo t &gt; /var/lib/zabbix-ai/state/.t \
+  &amp;&amp; cat /var/lib/zabbix-ai/state/.t &gt; /dev/null \
+  &amp;&amp; rm /var/lib/zabbix-ai/state/.t' &amp;&amp; echo "State: OK"</pre>
                 <p>Then set "Local state path" above to <code>/var/lib/zabbix-ai/state</code></p>
             </div>
             <p class="ai-muted">Mask sensitive values before sending text to the AI and restore aliases locally when replies come back.</p>
@@ -680,17 +686,24 @@ restorecon -Rv /var/lib/zabbix-ai</pre>
                 </ul>
                 <p><strong>View logs:</strong> Go to Monitoring &gt; AI &gt; Logs, or browse JSONL files directly on disk.</p>
                 <p><strong>Setup commands (run as root):</strong></p>
-<pre># Set WEB_GROUP to your web server group: nginx, apache, or www-data
-WEB_GROUP=nginx
+<pre># Set WEB_GROUP to the actual php-fpm worker user.
+# On RHEL/Alma/Rocky with nginx + php-fpm this is usually "apache",
+# not "nginx". Confirm with: ps -eo user,comm | grep php-fpm
+WEB_GROUP=apache   # or: nginx, www-data
 
-# Create log directories:
-mkdir -p /var/log/zabbix-ai /var/log/zabbix-ai/archive
-chown -R root:$WEB_GROUP /var/log/zabbix-ai
-chmod -R 0750 /var/log/zabbix-ai
+# Create log directories (02770 = setgid + rwx for group, so new
+# log files inherit the worker group automatically):
+install -d -o root -g $WEB_GROUP -m 02770 /var/log/zabbix-ai
+install -d -o root -g $WEB_GROUP -m 02770 /var/log/zabbix-ai/archive
 
 # SELinux (RHEL/CentOS):
 semanage fcontext -a -t httpd_sys_rw_content_t '/var/log/zabbix-ai(/.*)?'
-restorecon -Rv /var/log/zabbix-ai</pre>
+restorecon -Rv /var/log/zabbix-ai
+
+# Verify the worker can both write AND read back:
+sudo -u $WEB_GROUP sh -c 'echo t &gt; /var/log/zabbix-ai/.t \
+  &amp;&amp; cat /var/log/zabbix-ai/.t &gt; /dev/null \
+  &amp;&amp; rm /var/log/zabbix-ai/.t' &amp;&amp; echo "Logs: OK"</pre>
                 <p>Then set "Log path" to <code>/var/log/zabbix-ai</code> and "Archive path" to <code>/var/log/zabbix-ai/archive</code></p>
                 <p><strong>Troubleshooting:</strong> If no logs appear after enabling, check: (1) at least one log category is selected, (2) the web process can write to the path: <code>sudo -u nginx touch /var/log/zabbix-ai/test &amp;&amp; rm /var/log/zabbix-ai/test</code>, (3) SELinux is not blocking writes: <code>ausearch -m avc -ts recent</code></p>
             </div>
@@ -750,14 +763,19 @@ restorecon -Rv /var/log/zabbix-ai</pre>
                 <?php endforeach; ?>
             </div>
 
+            <?php
+            $log_writable = !empty($log_summary['path_writable']);
+            $archive_writable = !empty($log_summary['archive_path_writable']);
+            $any_unwritable = !$log_writable || !$archive_writable;
+            ?>
             <div class="ai-note-box">
                 <strong><?= $h(_('Current log target')) ?>:</strong>
                 <div class="ai-muted"><?= $h($log_summary['current_log_file'] ?? '') ?></div>
-                <div class="ai-muted"><?= $h(_('Log path writable')) ?>: <?= !empty($log_summary['path_writable']) ? $h(_('Yes')) : $h(_('No')) ?></div>
-                <div class="ai-muted"><?= $h(_('Archive path writable')) ?>: <?= !empty($log_summary['archive_path_writable']) ? $h(_('Yes')) : $h(_('No')) ?></div>
+                <div class="ai-muted"><?= $h(_('Log path writable')) ?>: <?= $log_writable ? $h(_('Yes')) : '<strong style="color:#c00">'.$h(_('No')).'</strong>' ?></div>
+                <div class="ai-muted"><?= $h(_('Archive path writable')) ?>: <?= $archive_writable ? $h(_('Yes')) : '<strong style="color:#c00">'.$h(_('No')).'</strong>' ?></div>
                 <div class="ai-muted"><?= $h(_('Live files')) ?>: <?= $h($log_summary['live_file_count'] ?? 0) ?> | <?= $h(_('Archived files')) ?>: <?= $h($log_summary['archive_file_count'] ?? 0) ?></div>
-                <?php if ($permission_note !== ''): ?>
-                    <p class="ai-muted ai-top-margin"><?= $h($permission_note) ?></p>
+                <?php if ($any_unwritable && $permission_note !== ''): ?>
+                    <p class="ai-muted ai-top-margin"><strong><?= $h(_('How to fix:')) ?></strong> <?= $h($permission_note) ?></p>
                 <?php endif; ?>
             </div>
         </section>

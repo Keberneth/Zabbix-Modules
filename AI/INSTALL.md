@@ -33,7 +33,7 @@ sudo -u "$WEB_GROUP" sh -c 'echo t > /var/log/zabbix-ai/.t && cat /var/log/zabbi
 sudo systemctl restart php-fpm
 ```
 
-# Zabbix 7 AI module install instructions
+# Zabbix 7 AI module install full instructions
 
 ## 1. Copy the module directory
 
@@ -123,13 +123,17 @@ If `PrivateTmp=yes`, either:
 If your web server does NOT use PrivateTmp, the module will auto-create the directories under `/tmp/zabbix-ai-module/`. You can pre-create them for reliability:
 
 ```bash
-# Determine your web server group (apache, nginx, www-data, etc.)
-WEB_GROUP=nginx   # or: apache, www-data
+# Determine the php-fpm worker user. On RHEL/Alma/Rocky with nginx + php-fpm
+# this is usually "apache", not "nginx". Confirm with:
+#   ps -eo user,comm | grep php-fpm
+WEB_GROUP=apache   # or: nginx, www-data
 
-sudo mkdir -p /tmp/zabbix-ai-module/state /tmp/zabbix-ai-module/state/pending
-sudo mkdir -p /tmp/zabbix-ai-module/logs /tmp/zabbix-ai-module/archive
-sudo chown -R root:$WEB_GROUP /tmp/zabbix-ai-module
-sudo chmod -R 0750 /tmp/zabbix-ai-module
+# 02770 = setgid + rwx for the group, so new files inherit the group.
+sudo install -d -o root -g $WEB_GROUP -m 02770 /tmp/zabbix-ai-module
+sudo install -d -o root -g $WEB_GROUP -m 02770 /tmp/zabbix-ai-module/state
+sudo install -d -o root -g $WEB_GROUP -m 02770 /tmp/zabbix-ai-module/state/pending
+sudo install -d -o root -g $WEB_GROUP -m 02770 /tmp/zabbix-ai-module/logs
+sudo install -d -o root -g $WEB_GROUP -m 02770 /tmp/zabbix-ai-module/archive
 ```
 
 Note: `/tmp` directories may be cleared on reboot. This is fine for the default setup since redaction state is ephemeral and logs are optional.
@@ -139,17 +143,15 @@ Note: `/tmp` directories may be cleared on reboot. This is fine for the default 
 For production, use a dedicated path:
 
 ```bash
-WEB_GROUP=nginx   # or: apache, www-data
+WEB_GROUP=apache   # or: nginx, www-data — must match the php-fpm worker user
 
 # Redaction state
-sudo mkdir -p /var/lib/zabbix-ai/state /var/lib/zabbix-ai/state/pending
-sudo chown -R root:$WEB_GROUP /var/lib/zabbix-ai
-sudo chmod -R 0750 /var/lib/zabbix-ai
+sudo install -d -o root -g $WEB_GROUP -m 02770 /var/lib/zabbix-ai/state
+sudo install -d -o root -g $WEB_GROUP -m 02770 /var/lib/zabbix-ai/state/pending
 
 # Logs and archives
-sudo mkdir -p /var/log/zabbix-ai /var/log/zabbix-ai/archive
-sudo chown -R root:$WEB_GROUP /var/log/zabbix-ai
-sudo chmod -R 0750 /var/log/zabbix-ai
+sudo install -d -o root -g $WEB_GROUP -m 02770 /var/log/zabbix-ai
+sudo install -d -o root -g $WEB_GROUP -m 02770 /var/log/zabbix-ai/archive
 ```
 
 Then update the paths in **AI Settings > Security** and **AI Settings > Logging**:
@@ -472,17 +474,18 @@ Defaults:
 If you change these to a persistent custom path, the active web/PHP process must be able to create, read, append, rename, and delete files there.
 
 Recommended Linux permissions:
-- directories: `0750`
+- directories: `02770` (setgid + rwx for owner and group — the setgid bit makes new files inherit the group automatically, so future log files stay writable)
 - files: `0640`
 - owner: `root`
-- group: your web server / php-fpm group (`apache`, `nginx`, or similar)
+- group: the **php-fpm worker user**, which on RHEL/Alma/Rocky with nginx + php-fpm is usually `apache`, not `nginx`. Confirm with `ps -eo user,comm | grep php-fpm`.
 
 Example:
 
 ```bash
-sudo mkdir -p /var/lib/zabbix-ai/state /var/log/zabbix-ai /var/log/zabbix-ai/archive
-sudo chown -R root:nginx /var/lib/zabbix-ai /var/log/zabbix-ai
-sudo chmod 0750 /var/lib/zabbix-ai /var/lib/zabbix-ai/state /var/log/zabbix-ai /var/log/zabbix-ai/archive
+WEB_GROUP=apache   # match the php-fpm worker user
+sudo install -d -o root -g $WEB_GROUP -m 02770 /var/lib/zabbix-ai/state
+sudo install -d -o root -g $WEB_GROUP -m 02770 /var/log/zabbix-ai
+sudo install -d -o root -g $WEB_GROUP -m 02770 /var/log/zabbix-ai/archive
 ```
 
 ### SELinux for writable custom paths on RHEL
