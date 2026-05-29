@@ -160,9 +160,12 @@ ob_start();
     <section class="ai-card ai-log-detail" id="ai-log-detail" hidden>
         <div class="ai-section-header">
             <h2><?= $h(_('Entry details')) ?></h2>
-            <button type="button" class="btn-alt" id="ai-log-detail-close"><?= $h(_('Close')) ?></button>
+            <div class="ai-log-detail-actions">
+                <button type="button" class="btn-alt" id="ai-log-detail-raw" aria-pressed="false"><?= $h(_('Raw JSON')) ?></button>
+                <button type="button" class="btn-alt" id="ai-log-detail-close"><?= $h(_('Close')) ?></button>
+            </div>
         </div>
-        <pre class="ai-msg-body" id="ai-log-detail-body"></pre>
+        <div class="ai-log-detail-body" id="ai-log-detail-body"></div>
     </section>
 </div>
 <?php

@@ -318,18 +318,170 @@
         }
     }
 
+    var detailState = {item: null, raw: false};
+
     function showDetail(item) {
+        detailState.item = item;
+        detailState.raw = false;
+        var rawBtn = qs('#ai-log-detail-raw');
+        if (rawBtn) rawBtn.setAttribute('aria-pressed', 'false');
+        renderDetail();
         var card = qs('#ai-log-detail');
-        var body = qs('#ai-log-detail-body');
-        if (!card || !body) return;
-        body.textContent = JSON.stringify(item, null, 2);
-        card.hidden = false;
-        card.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+        if (card) {
+            card.hidden = false;
+            card.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+        }
     }
 
     function hideDetail() {
         var card = qs('#ai-log-detail');
         if (card) card.hidden = true;
+        detailState.item = null;
+    }
+
+    function toggleDetailRaw() {
+        if (!detailState.item) return;
+        detailState.raw = !detailState.raw;
+        var rawBtn = qs('#ai-log-detail-raw');
+        if (rawBtn) rawBtn.setAttribute('aria-pressed', detailState.raw ? 'true' : 'false');
+        renderDetail();
+    }
+
+    function renderDetail() {
+        var body = qs('#ai-log-detail-body');
+        if (!body || !detailState.item) return;
+        if (detailState.raw) {
+            body.innerHTML = '<pre class="ai-log-raw"></pre>';
+            qs('.ai-log-raw', body).textContent = JSON.stringify(detailState.item, null, 2);
+        } else {
+            body.innerHTML = buildDetailHtml(detailState.item);
+        }
+    }
+
+    function fmtDuration(ms) {
+        var n = Number(ms);
+        if (!isFinite(n) || n <= 0) return '';
+        if (n < 1000) return n + ' ms';
+        return (n / 1000).toFixed(n < 10000 ? 2 : 1) + ' s';
+    }
+
+    function kvRow(label, valueHtml) {
+        if (valueHtml === null || valueHtml === undefined || valueHtml === '') return '';
+        return '<div class="ai-kv-row"><dt>' + escapeHtml(label) + '</dt><dd>' + valueHtml + '</dd></div>';
+    }
+
+    function kvText(label, value) {
+        if (value === null || value === undefined || value === '') return '';
+        return kvRow(label, escapeHtml(String(value)));
+    }
+
+    function section(title, innerHtml) {
+        if (!innerHtml) return '';
+        return '<div class="ai-log-detail-section"><h3>' + escapeHtml(title) + '</h3>' + innerHtml + '</div>';
+    }
+
+    function buildSecurityHtml(sec) {
+        var html = '<dl class="ai-kv-grid">' + kvRow('Enabled', sec.enabled ? 'Yes' : 'No') + '</dl>';
+
+        if (sec.stats && typeof sec.stats === 'object') {
+            var s = sec.stats;
+            var chips = ['<span class="ai-log-chip ai-log-chip-strong">total: ' + escapeHtml(String(s.total || 0)) + '</span>',
+                '<span class="ai-log-chip">unique: ' + escapeHtml(String(s.mapping_count || 0)) + '</span>'];
+            ['hostnames', 'ipv4', 'ipv6', 'fqdns', 'urls', 'os', 'services', 'custom_rules'].forEach(function(k) {
+                var v = Number(s[k] || 0);
+                if (v > 0) chips.push('<span class="ai-log-chip">' + escapeHtml(k) + ': ' + v + '</span>');
+            });
+            html += '<div class="ai-log-chips">' + chips.join('') + '</div>';
+        }
+
+        if (Array.isArray(sec.mapping_details) && sec.mapping_details.length) {
+            var rows = sec.mapping_details.map(function(m) {
+                return '<tr><td>' + escapeHtml(m.type || '') + '</td><td>' + escapeHtml(m.original || '')
+                    + '</td><td>' + escapeHtml(m.alias || '') + '</td></tr>';
+            }).join('');
+            html += '<table class="ai-map-table"><thead><tr><th>Type</th><th>Original</th><th>Alias</th></tr></thead>'
+                + '<tbody>' + rows + '</tbody></table>';
+        }
+
+        return html;
+    }
+
+    function buildDetailHtml(item) {
+        var html = '';
+
+        var statusVal = item.status
+            ? '<span class="ai-log-pill ' + escapeHtml(statusClass(item.status)) + '">' + escapeHtml(item.status) + '</span>'
+            : '';
+
+        var userVal = '';
+        if (item.user && typeof item.user === 'object') {
+            userVal = escapeHtml(item.user.username || '')
+                + (item.user.name ? ' <span class="ai-muted">(' + escapeHtml(item.user.name) + ')</span>' : '')
+                + (item.user.userid ? ' <span class="ai-muted">#' + escapeHtml(item.user.userid) + '</span>' : '');
+        } else if (item.user) {
+            userVal = escapeHtml(String(item.user));
+        }
+
+        html += section('Overview', '<dl class="ai-kv-grid">'
+            + kvText('Time', formatTime(item.ts))
+            + kvText('Category', item.category)
+            + kvText('Event', item.event)
+            + kvText('Source', item.source)
+            + kvRow('Status', statusVal)
+            + kvText('Tool', item.tool)
+            + kvText('Request ID', item.request_id)
+            + kvRow('User', userVal)
+            + kvText('Remote address', item.remote_addr)
+            + kvText('Duration', fmtDuration(item.duration_ms))
+            + '</dl>');
+
+        if (item.provider && typeof item.provider === 'object') {
+            html += section('Provider', '<dl class="ai-kv-grid">'
+                + kvText('Name', item.provider.name)
+                + kvText('Type', item.provider.type)
+                + kvText('Model', item.provider.model)
+                + kvText('ID', item.provider.id)
+                + '</dl>');
+        }
+
+        if (item.security && typeof item.security === 'object') {
+            html += section('Security / redaction', buildSecurityHtml(item.security));
+        }
+
+        var replyText = '';
+        if (item.payload && typeof item.payload === 'object' && item.payload.reply) {
+            replyText = String(item.payload.reply);
+        } else if (item.meta && typeof item.meta === 'object' && item.meta.reply) {
+            replyText = String(item.meta.reply);
+        } else if (item.message) {
+            replyText = String(item.message);
+        }
+        if (replyText.trim()) {
+            html += section('Message / reply', '<pre class="ai-log-reply">' + escapeHtml(replyText) + '</pre>');
+        }
+
+        // Anything not shown above is preserved verbatim in a collapsible block.
+        var consumed = {ts: 1, category: 1, event: 1, source: 1, status: 1, tool: 1, request_id: 1,
+            message: 1, user: 1, remote_addr: 1, duration_ms: 1, provider: 1, security: 1, payload: 1, meta: 1};
+        var extra = {};
+        Object.keys(item).forEach(function(k) { if (!consumed[k]) extra[k] = item[k]; });
+
+        if (item.meta && typeof item.meta === 'object') {
+            var metaCopy = {};
+            Object.keys(item.meta).forEach(function(k) { if (k !== 'reply') metaCopy[k] = item.meta[k]; });
+            if (Object.keys(metaCopy).length) extra.meta = metaCopy;
+        }
+        if (item.payload && typeof item.payload === 'object') {
+            var payloadCopy = {};
+            Object.keys(item.payload).forEach(function(k) { if (k !== 'reply') payloadCopy[k] = item.payload[k]; });
+            if (Object.keys(payloadCopy).length) extra.payload = payloadCopy;
+        }
+        if (Object.keys(extra).length) {
+            html += '<details class="ai-log-detail-extra"><summary>' + escapeHtml('Additional fields') + '</summary>'
+                + '<pre class="ai-log-raw">' + escapeHtml(JSON.stringify(extra, null, 2)) + '</pre></details>';
+        }
+
+        return html;
     }
 
     function debounce(fn, ms) {
@@ -412,6 +564,7 @@
         var clear = qs('#ai-log-clear');
         var search = qs('#ai-log-q');
         var detailClose = qs('#ai-log-detail-close');
+        var detailRaw = qs('#ai-log-detail-raw');
 
         if (refresh) refresh.addEventListener('click', function() { state.offset = 0; fetchItems(false); });
         if (apply) apply.addEventListener('click', function() { state.offset = 0; fetchItems(false); });
@@ -434,6 +587,7 @@
             }
         });
         if (detailClose) detailClose.addEventListener('click', hideDetail);
+        if (detailRaw) detailRaw.addEventListener('click', toggleDetailRaw);
     }
 
     function init() {

@@ -808,6 +808,147 @@ html[theme="hc-dark"] .ai-msg-action .ai-msg-title,
     font-size: 12.5px;
 }
 
+/* ── Readable log entry details ── */
+.ai-log-detail-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.ai-log-detail-body {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.ai-log-detail-section h3 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ai-fg-muted);
+}
+
+.ai-kv-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px 24px;
+    margin: 0;
+}
+
+.ai-kv-row {
+    display: flex;
+    gap: 10px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--ai-border-light);
+    min-width: 0;
+}
+
+.ai-kv-row dt {
+    flex: 0 0 130px;
+    margin: 0;
+    color: var(--ai-fg-muted);
+    font-weight: 600;
+}
+
+.ai-kv-row dd {
+    margin: 0;
+    flex: 1 1 auto;
+    min-width: 0;
+    word-break: break-word;
+}
+
+.ai-log-pill {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    border: 1px solid var(--ai-border);
+    background: var(--ai-bg-accent);
+}
+
+.ai-log-pill.ai-log-status-ok { background: var(--ai-ok-bg); border-color: var(--ai-ok-border); }
+.ai-log-pill.ai-log-status-error { background: var(--ai-error-bg); border-color: var(--ai-error-border); }
+.ai-log-pill.ai-log-status-warn { background: var(--ai-warning-bg); border-color: var(--ai-warning-border); }
+
+.ai-log-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.ai-log-chip {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 10px;
+    font-size: 12px;
+    background: var(--ai-bg-accent);
+    border: 1px solid var(--ai-border);
+    color: var(--ai-fg-muted);
+}
+
+.ai-log-chip-strong {
+    color: var(--ai-fg);
+    font-weight: 600;
+}
+
+.ai-map-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+}
+
+.ai-map-table th,
+.ai-map-table td {
+    text-align: left;
+    padding: 5px 8px;
+    border-bottom: 1px solid var(--ai-border-light);
+    vertical-align: top;
+    word-break: break-word;
+}
+
+.ai-map-table th {
+    color: var(--ai-fg-muted);
+    border-bottom: 1px solid var(--ai-border);
+}
+
+.ai-map-table td:nth-child(3) {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--ai-fg-muted);
+}
+
+.ai-log-reply,
+.ai-log-raw {
+    max-height: 50vh;
+    overflow: auto;
+    background: var(--ai-bg-subtle);
+    border: 1px solid var(--ai-border);
+    border-radius: 4px;
+    padding: 10px;
+    margin: 0;
+    font-size: 12.5px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.ai-log-detail-extra summary {
+    cursor: pointer;
+    color: var(--ai-fg-muted);
+    font-weight: 600;
+    padding: 4px 0;
+}
+
+.ai-log-detail-extra .ai-log-raw {
+    margin-top: 8px;
+}
+
+@media (max-width: 720px) {
+    .ai-kv-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
 /* ── Responsive ── */
 @media (max-width: 1200px) {
     .ai-grid {

@@ -839,27 +839,28 @@ class Redactor {
             return false;
         }
 
-        if (!preg_match('/[0-9_-]/', $value)) {
+        // Underscores are not valid in DNS hostnames, so an underscore token is
+        // almost always a programming identifier, a process/job name, or one of
+        // the module's own prompt fence labels (UNTRUSTED_DATA, ZABBIX_CONTEXT,
+        // NETBOX_CONTEXT, WEBHOOK_PROBLEM, TOOL_RESULT_*). Real Zabbix hosts that
+        // contain underscores are masked earlier by exact inventory matching
+        // (applyZabbixInventoryRedaction runs before this heuristic), so rejecting
+        // them here only drops false positives — it never unmasks a real host.
+        if (strpos($value, '_') !== false) {
+            return false;
+        }
+
+        // Require at least one digit or hyphen so plain dictionary words are not
+        // treated as hostnames.
+        if (!preg_match('/[0-9-]/', $value)) {
             return false;
         }
 
         $lower = strtolower($value);
 
-        // All-lowercase strings with underscores but no digits or hyphens are almost
-        // certainly programming identifiers (get_problems, severity_min, host_group,
-        // confirm_message, tool_name, etc.), not hostnames.  Real hostnames that use
-        // underscores nearly always also contain digits (db_server_1) or uppercase.
-        if ($value === $lower && strpos($value, '_') !== false && !preg_match('/[0-9-]/', $value)) {
-            return false;
-        }
-
         $deny = [
             'rhel7', 'rhel8', 'rhel9', 'ubuntu20', 'ubuntu22', 'windows10', 'windows11', 'gpt4', 'gpt41',
-            'http2', 'tls12', 'tls13', 'sha256', 'sha512',
-            // Zabbix action tool names — belt-and-suspenders in case heuristic above misses an edge case.
-            'get_problems', 'get_unsupported_items', 'get_host_info', 'get_host_uptime',
-            'get_host_os', 'get_triggers', 'get_items', 'create_maintenance',
-            'update_trigger', 'update_item', 'create_user', 'acknowledge_problem'
+            'http2', 'tls12', 'tls13', 'sha256', 'sha512'
         ];
 
         if (in_array($lower, $deny, true)) {
@@ -870,7 +871,7 @@ class Redactor {
             return false;
         }
 
-        if (!preg_match('/^[A-Za-z][A-Za-z0-9_-]{2,62}$/', $value)) {
+        if (!preg_match('/^[A-Za-z][A-Za-z0-9-]{2,62}$/', $value)) {
             return false;
         }
 
