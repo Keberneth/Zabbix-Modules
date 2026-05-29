@@ -27,10 +27,10 @@ class ChatHosts extends CController {
     protected function doAction(): void {
         try {
             $config = Config::get();
-            $zabbix_api = ZabbixApiClient::fromConfig($config);
+            $zabbix_api = ZabbixApiClient::fromFrontendOrConfig($config);
 
             if ($zabbix_api === null) {
-                throw new \RuntimeException('Zabbix API is not configured.');
+                throw new \RuntimeException('Zabbix API is not available. Configure the Zabbix API token or run this from a valid Zabbix frontend session.');
             }
 
             $hosts = $zabbix_api->getHosts();

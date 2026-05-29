@@ -11,14 +11,16 @@ class ZabbixApiClient {
     private bool $verify_peer;
     private int $timeout;
     private string $auth_mode;
+    private string $transport;
     private ?string $frontend_url_cache = null;
 
-    public function __construct(string $url, string $token, bool $verify_peer = true, int $timeout = 15, string $auth_mode = 'auto') {
+    public function __construct(string $url, string $token, bool $verify_peer = true, int $timeout = 15, string $auth_mode = 'auto', string $transport = 'http') {
         $this->url = trim($url);
         $this->token = trim($token);
         $this->verify_peer = $verify_peer;
         $this->timeout = $timeout;
         $this->auth_mode = $auth_mode !== '' ? $auth_mode : 'auto';
+        $this->transport = $transport === 'frontend' ? 'frontend' : 'http';
     }
 
     public static function fromConfig(array $config): ?self {
@@ -43,6 +45,46 @@ class ZabbixApiClient {
         );
     }
 
+    /**
+     * Prefer Zabbix's in-process frontend API facade for authenticated frontend
+     * controllers, falling back to the HTTP JSON-RPC client only when the module
+     * is not running inside a valid Zabbix frontend user session.
+     *
+     * This avoids a fragile frontend -> HTTP -> frontend loop in split
+     * deployments. Webhook/standalone automation should keep using fromConfig()
+     * so it remains token-based and independent of an interactive user session.
+     */
+    public static function fromFrontendOrConfig(array $config): ?self {
+        $frontend = self::fromFrontend($config);
+
+        if ($frontend !== null) {
+            return $frontend;
+        }
+
+        return self::fromConfig($config);
+    }
+
+    /**
+     * Create a client that uses Zabbix's PHP API facade (API::Host()->get(),
+     * API::Problem()->get(), etc.) under the current frontend user's session.
+     */
+    public static function fromFrontend(array $config): ?self {
+        $config = Config::mergeWithDefaults($config);
+
+        if (!self::canUseFrontendApi()) {
+            return null;
+        }
+
+        return new self(
+            '',
+            '',
+            true,
+            (int) ($config['zabbix_api']['timeout'] ?? 15),
+            'frontend',
+            'frontend'
+        );
+    }
+
     public static function deriveApiUrl(): string {
         $https = !empty($_SERVER['HTTPS']) && strtolower((string) $_SERVER['HTTPS']) !== 'off';
         $scheme = $https ? 'https' : 'http';
@@ -54,6 +96,10 @@ class ZabbixApiClient {
     }
 
     public function call(string $method, array $params = []): array {
+        if ($this->transport === 'frontend') {
+            return $this->callWithFrontendApi($method, $params);
+        }
+
         if ($this->auth_mode === 'bearer') {
             return $this->callWithBearer($method, $params);
         }
@@ -2600,6 +2646,81 @@ class ZabbixApiClient {
             'eventids' => [$eventid],
             'action' => 256
         ]);
+    }
+
+    private static function canUseFrontendApi(): bool {
+        if (!class_exists('\API') || !class_exists('\CWebUser')) {
+            return false;
+        }
+
+        if (!isset(\CWebUser::$data) || !is_array(\CWebUser::$data)) {
+            return false;
+        }
+
+        $userid = (string) (\CWebUser::$data['userid'] ?? '');
+        if ($userid === '' || $userid === '0') {
+            return false;
+        }
+
+        if (defined('USER_TYPE_ZABBIX_USER')) {
+            $user_type = (int) (\CWebUser::$data['type'] ?? 0);
+            if ($user_type < USER_TYPE_ZABBIX_USER) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static function frontendServiceName(string $api_object): string {
+        static $map = [
+            'action' => 'Action',
+            'alert' => 'Alert',
+            'auditlog' => 'AuditLog',
+            'discoveryrule' => 'DiscoveryRule',
+            'event' => 'Event',
+            'history' => 'History',
+            'host' => 'Host',
+            'hostgroup' => 'HostGroup',
+            'item' => 'Item',
+            'maintenance' => 'Maintenance',
+            'mediatype' => 'MediaType',
+            'problem' => 'Problem',
+            'proxy' => 'Proxy',
+            'service' => 'Service',
+            'template' => 'Template',
+            'trigger' => 'Trigger',
+            'user' => 'User',
+            'usermacro' => 'UserMacro'
+        ];
+
+        $api_object = strtolower(trim($api_object));
+
+        return $map[$api_object] ?? '';
+    }
+
+    private function callWithFrontendApi(string $method, array $params): array {
+        $parts = explode('.', $method, 2);
+        if (count($parts) !== 2) {
+            throw new RuntimeException('Invalid Zabbix API method: '.$method);
+        }
+
+        [$api_object, $api_action] = $parts;
+        $service_name = self::frontendServiceName($api_object);
+
+        if ($service_name === '') {
+            throw new RuntimeException('No frontend API service mapping for '.$method.'.');
+        }
+
+        try {
+            $service = call_user_func(['\API', $service_name]);
+            $result = $service->{$api_action}($params);
+        }
+        catch (\Throwable $e) {
+            throw new RuntimeException($method.' failed via frontend internal API: '.$e->getMessage(), 0, $e);
+        }
+
+        return is_array($result) ? $result : [$result];
     }
 
     private function callWithBearer(string $method, array $params): array {

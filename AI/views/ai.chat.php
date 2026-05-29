@@ -55,6 +55,7 @@ ob_start();
     data-csrf-field-name="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>"
     data-history-limit="<?= $h($data['history_limit'] ?? 12) ?>"
     data-has-zabbix-api="<?= $h(($data['has_zabbix_api'] ?? false) ? '1' : '0') ?>"
+    data-can-post-event-comment="<?= $h(($data['can_post_event_comment'] ?? false) ? '1' : '0') ?>"
     data-hosts-url="<?= $h($hosts_url) ?>"
     data-problems-url="<?= $h($problems_url) ?>"
     data-execute-url="<?= $h($execute_url) ?>"
@@ -149,8 +150,8 @@ ob_start();
                     type="button"
                     class="btn"
                     id="ai-post-last-answer"
-                    <?= ($data['has_zabbix_api'] ?? false) ? '' : 'disabled' ?>
-                    title="<?= $h(($data['has_zabbix_api'] ?? false) ? _('Post the last AI answer as a problem update comment.') : _('Configure Zabbix API settings first.')) ?>"
+                    <?= (($data['has_zabbix_api'] ?? false) && ($data['can_post_event_comment'] ?? false)) ? '' : 'disabled' ?>
+                    title="<?= $h((!($data['has_zabbix_api'] ?? false)) ? _('Configure Zabbix API settings first.') : (($data['can_post_event_comment'] ?? false) ? _('Post the last AI answer as a problem update comment.') : _('Enable Read & Write mode and problems write permission in AI Settings > Zabbix Actions.'))) ?>"
                 >
                     <?= $h(_('Post last answer to event')) ?>
                 </button>

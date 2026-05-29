@@ -263,7 +263,8 @@ class Config {
                 'timeout' => Util::cleanInt($provider['timeout'] ?? 120, 120, 5, 600),
                 'enabled' => Util::truthy($provider['enabled'] ?? false),
                 'temperature' => Util::cleanFloat($provider['temperature'] ?? '', -1, 0, 2),
-                'max_tokens' => Util::cleanInt($provider['max_tokens'] ?? 0, 0, 0, 128000)
+                'max_tokens' => Util::cleanInt($provider['max_tokens'] ?? 0, 0, 0, 128000),
+                'num_ctx' => Util::cleanInt($provider['num_ctx'] ?? 0, 0, 0, 1048576)
             ];
         }
 

@@ -33,10 +33,10 @@ class ProblemContext extends CController {
             }
 
             $config = Config::get();
-            $client = ZabbixApiClient::fromConfig($config);
+            $client = ZabbixApiClient::fromFrontendOrConfig($config);
 
             if ($client === null) {
-                throw new \RuntimeException('Zabbix API is not configured.');
+                throw new \RuntimeException('Zabbix API is not available. Configure the Zabbix API token or run this from a valid Zabbix frontend session.');
             }
 
             $context = $client->getProblemContext($eventid);

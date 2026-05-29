@@ -35,14 +35,34 @@ class ProviderClient {
             $endpoint = 'http://localhost:11434/api/chat';
         }
 
+        // Ollama's default num_ctx is 2048 on most installs, which is far less
+        // than the system prompt this module assembles (instructions + tools +
+        // anti-injection rules + frontend URL block easily exceed 6k tokens).
+        // Without an explicit override the tools section at the tail of the
+        // prompt gets silently truncated and the model has no idea it can call
+        // anything. Default to 16384; Ollama caps to the model's own maximum
+        // if that's lower, so this is safe for small models too. The operator
+        // can tune this per provider in the settings UI.
+        $num_ctx = (int) ($provider['num_ctx'] ?? 0);
+        if ($num_ctx <= 0) {
+            $num_ctx = 16384;
+        }
+
+        $num_predict = (int) ($provider['max_tokens'] ?? 0);
+
         $payload = [
             'model' => trim((string) ($provider['model'] ?? '')),
             'messages' => $messages,
             'stream' => false,
             'options' => [
-                'temperature' => $temperature
+                'temperature' => $temperature,
+                'num_ctx' => $num_ctx
             ]
         ];
+
+        if ($num_predict > 0) {
+            $payload['options']['num_predict'] = $num_predict;
+        }
 
         if ($payload['model'] === '') {
             throw new RuntimeException('The selected Ollama provider has no model configured.');

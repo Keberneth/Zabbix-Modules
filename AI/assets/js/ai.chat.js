@@ -37,6 +37,7 @@
         var executeCsrf = root.dataset.executeCsrf || '';
         var historyLimit = parseInt(root.dataset.historyLimit || '12', 10);
         var hasZabbixApi = root.dataset.hasZabbixApi === '1';
+        var canPostEventComment = root.dataset.canPostEventComment === '1';
         var csrfFieldName = root.dataset.csrfFieldName || '_csrf_token';
         var contextUrl = root.dataset.contextUrl || '';
         var historyPeriod = parseInt(root.dataset.historyPeriod || '24', 10);
@@ -397,6 +398,11 @@
                     return;
                 }
 
+                if (!canPostEventComment) {
+                    showSideStatus('Enable Read & Write mode and problems write permission in AI Settings > Zabbix Actions.', true);
+                    return;
+                }
+
                 var eventid = (eventidField.value || '').trim();
 
                 if (!eventid) {
@@ -585,7 +591,7 @@
             var codeBlocks = [];
             text = text.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, function (_, lang, code) {
                 codeBlocks.push({ lang: lang || '', code: code.replace(/\n$/, '') });
-                return ' CODEBLOCK' + (codeBlocks.length - 1) + ' ';
+                return 'CODEBLOCK' + (codeBlocks.length - 1) + '';
             });
 
             var blocks = text.split(/\n{2,}/);
@@ -597,7 +603,7 @@
                 }
 
                 // Restored code block placeholder.
-                var codeMatch = /^ CODEBLOCK(\d+) $/.exec(block);
+                var codeMatch = /^CODEBLOCK(\d+)$/.exec(block);
                 if (codeMatch) {
                     var entry = codeBlocks[parseInt(codeMatch[1], 10)];
                     var pre = document.createElement('pre');
@@ -1062,7 +1068,7 @@
                 return;
             }
 
-            postButton.disabled = !hasZabbixApi || !(eventidField.value || '').trim() || !getLastAssistantMessage();
+            postButton.disabled = !hasZabbixApi || !canPostEventComment || !(eventidField.value || '').trim() || !getLastAssistantMessage();
         }
 
         /**

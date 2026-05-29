@@ -1,6 +1,6 @@
-<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.6.6 Chrome/144.0.7559.236 Electron/40.8.4 Safari/537.36" version="29.6.6">
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.6.6 Chrome/144.0.7559.236 Electron/40.8.4 Safari/537.36">
   <diagram id="hld-ai-module" name="High-Level Design">
-    <mxGraphModel dx="1617" dy="1104" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2400" pageHeight="1600" math="0" shadow="0">
+    <mxGraphModel dx="2402" dy="1656" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2400" pageHeight="1600" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -14,7 +14,7 @@
           <mxGeometry height="60" width="40" x="130" y="90" as="geometry" />
         </mxCell>
         <mxCell id="actor_zabbix_server" parent="1" style="shape=mxgraph.aws3.management_console;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;fontSize=11;fontStyle=1;fillColor=#e1d5e7;strokeColor=#9673a6;aspect=fixed;" value="Zabbix Server&#xa;(Media Type)" vertex="1">
-          <mxGeometry height="60" width="60" x="1550" y="100" as="geometry" />
+          <mxGeometry height="60" width="60" x="1550" y="90" as="geometry" />
         </mxCell>
         <mxCell id="boundary_zabbix" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=14;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;fillColor=none;strokeColor=#0e7490;strokeWidth=3;dashed=1;arcSize=6;" value="" vertex="1">
           <mxGeometry height="950" width="1180" x="40" y="210" as="geometry" />
@@ -55,8 +55,8 @@
         <mxCell id="ctrl_problemctx" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#dcfce7;strokeColor=#22c55e;fontStyle=0;verticalAlign=middle;" value="ProblemContext&#xa;(Drawer Data)" vertex="1">
           <mxGeometry height="40" width="120" x="720" y="590" as="geometry" />
         </mxCell>
-        <mxCell id="ctrl_webhook" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#fde68a;strokeColor=#d97706;fontStyle=1;verticalAlign=middle;" value="Webhook&#xa;Endpoint" vertex="1">
-          <mxGeometry height="60" width="120" x="1020" y="500" as="geometry" />
+        <mxCell id="ctrl_webhook" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#fde68a;strokeColor=#d97706;fontStyle=1;verticalAlign=middle;" value="Webhook&#xa;Endpoint&#xa;(HTTP + token only)" vertex="1">
+          <mxGeometry height="60" width="130" x="1015" y="500" as="geometry" />
         </mxCell>
         <mxCell id="ctrl_settingssave" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#dcfce7;strokeColor=#22c55e;fontStyle=0;" value="SettingsSave" vertex="1">
           <mxGeometry height="40" width="100" x="80" y="560" as="geometry" />
@@ -73,8 +73,8 @@
         <mxCell id="svc_provider" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#fef9c3;strokeColor=#eab308;fontStyle=1;verticalAlign=middle;" value="ProviderClient&#xa;(LLM Abstraction)" vertex="1">
           <mxGeometry height="50" width="140" x="80" y="710" as="geometry" />
         </mxCell>
-        <mxCell id="svc_zabbixapi" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#fef9c3;strokeColor=#eab308;fontStyle=1;verticalAlign=middle;" value="ZabbixApiClient&#xa;(Zabbix API Wrapper)" vertex="1">
-          <mxGeometry height="50" width="160" x="247" y="710" as="geometry" />
+        <mxCell id="svc_zabbixapi" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#fef9c3;strokeColor=#eab308;fontStyle=1;verticalAlign=middle;" value="ZabbixApiClient&#xa;(In-process \API::* facade&#xa;+ HTTP/token fallback)" vertex="1">
+          <mxGeometry height="60" width="180" x="237" y="705" as="geometry" />
         </mxCell>
         <mxCell id="svc_executor" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#fef9c3;strokeColor=#eab308;fontStyle=1;verticalAlign=middle;" value="ZabbixActionExecutor&#xa;(13 Tools: 7R + 6W)" vertex="1">
           <mxGeometry height="50" width="170" x="440" y="710" as="geometry" />
@@ -113,24 +113,24 @@
           <mxGeometry height="50" width="260" x="930" y="270" as="geometry" />
         </mxCell>
         <mxCell id="ext_providers" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=13;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;fillColor=#faf5ff;strokeColor=#a855f7;strokeWidth=2;arcSize=8;" value="" vertex="1">
-          <mxGeometry height="250" width="320" x="1340" y="350" as="geometry" />
+          <mxGeometry height="250" width="320" x="1340" y="380" as="geometry" />
         </mxCell>
         <mxCell id="ext_providers_label" parent="1" style="text;html=1;fontSize=14;fontStyle=1;align=center;verticalAlign=middle;fontColor=#7c3aed;" value="AI Providers" vertex="1">
-          <mxGeometry height="25" width="140" x="1420" y="360" as="geometry" />
+          <mxGeometry height="25" width="140" x="1420" y="390" as="geometry" />
         </mxCell>
         <mxCell id="ext_openai" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#f3e8ff;strokeColor=#a855f7;fontStyle=0;verticalAlign=middle;" value="OpenAI / Azure&#xa;/v1/chat/completions" vertex="1">
-          <mxGeometry height="45" width="160" x="1370" y="400" as="geometry" />
+          <mxGeometry height="45" width="160" x="1370" y="430" as="geometry" />
         </mxCell>
         <mxCell id="ext_anthropic" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#f3e8ff;strokeColor=#a855f7;fontStyle=0;verticalAlign=middle;" value="Anthropic Claude&#xa;Messages API" vertex="1">
-          <mxGeometry height="45" width="160" x="1370" y="460" as="geometry" />
+          <mxGeometry height="45" width="160" x="1370" y="490" as="geometry" />
         </mxCell>
-        <mxCell id="ext_ollama" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#f3e8ff;strokeColor=#a855f7;fontStyle=0;verticalAlign=middle;" value="Ollama&#xa;(Local LLM)" vertex="1">
-          <mxGeometry height="45" width="160" x="1370" y="520" as="geometry" />
+        <mxCell id="ext_ollama" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#f3e8ff;strokeColor=#a855f7;fontStyle=0;verticalAlign=middle;" value="Ollama (Local LLM)&#xa;num_ctx ≥ 16384&#xa;(set in provider config)" vertex="1">
+          <mxGeometry height="55" width="160" x="1370" y="550" as="geometry" />
         </mxCell>
         <mxCell id="ext_vllm" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#f3e8ff;strokeColor=#a855f7;fontStyle=0;verticalAlign=middle;" value="vLLM / LocalAI&#xa;(Self-hosted)" vertex="1">
-          <mxGeometry height="50" width="100" x="1550" y="445" as="geometry" />
+          <mxGeometry height="50" width="100" x="1550" y="475" as="geometry" />
         </mxCell>
-        <mxCell id="ext_zabbixapi" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#fce7f3;strokeColor=#ec4899;fontStyle=1;verticalAlign=middle;" value="Zabbix API&#xa;(Internal)&#xa;host.get | problem.get&#xa;trigger.get | item.get&#xa;event.acknowledge&#xa;maintenance.create | ..." vertex="1">
+        <mxCell id="ext_zabbixapi" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#fce7f3;strokeColor=#ec4899;fontStyle=1;verticalAlign=middle;" value="Zabbix API&#xa;(Frontend in-process or HTTP)&#xa;host.get | problem.get&#xa;trigger.get | item.get&#xa;event.acknowledge&#xa;maintenance.create | ..." vertex="1">
           <mxGeometry height="110" width="200" x="1370" y="650" as="geometry" />
         </mxCell>
         <mxCell id="ext_netbox" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#e0e7ff;strokeColor=#6366f1;fontStyle=0;verticalAlign=middle;" value="NetBox CMDB&#xa;(Optional)&#xa;VMs / Devices / Services" vertex="1">
@@ -156,6 +156,12 @@
         </mxCell>
         <mxCell id="store_session" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fontSize=10;fillColor=#dbeafe;strokeColor=#3b82f6;verticalAlign=middle;" value="Browser&#xa;sessionStorage&#xa;(Chat History)" vertex="1">
           <mxGeometry height="70" width="140" x="940" y="975" as="geometry" />
+        </mxCell>
+        <mxCell id="transport_box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=10;fontStyle=0;verticalAlign=top;align=left;spacingLeft=10;spacingTop=22;fillColor=#ecfdf5;strokeColor=#10b981;strokeWidth=2;arcSize=8;" value="Authenticated UI controllers&#xa;  → fromFrontendOrConfig()&#xa;  → in-process \API::Host()-&gt;get() etc.&#xa;  → operator&#39;s session + permissions&#xa;&#xa;Webhook (action route + standalone)&#xa;  → fromConfig()&#xa;  → HTTP JSON-RPC + token&#xa;  → token&#39;s owner permissions&#xa;&#xa;Both paths share the same module-level&#xa;write gates and redaction pipeline." vertex="1">
+          <mxGeometry height="185" width="300" x="1340" y="185" as="geometry" />
+        </mxCell>
+        <mxCell id="transport_label" parent="1" style="text;html=1;fontSize=12;fontStyle=1;align=left;verticalAlign=middle;fontColor=#059669;" value="Transport architecture (v1.2)" vertex="1">
+          <mxGeometry height="20" width="260" x="1352" y="200" as="geometry" />
         </mxCell>
         <mxCell id="security_box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;fillColor=none;strokeColor=#ef4444;strokeWidth=2;dashed=1;dashPattern=5 5;arcSize=6;" value="" vertex="1">
           <mxGeometry height="530" width="280" x="1700" y="210" as="geometry" />

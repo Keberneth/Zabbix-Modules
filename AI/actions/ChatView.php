@@ -29,6 +29,30 @@ class ChatView extends CController {
         return $this->getUserType() >= USER_TYPE_ZABBIX_USER;
     }
 
+
+    private function canPostEventComment(array $config): bool {
+        $actions_config = $config['zabbix_actions'] ?? [];
+
+        if (!Util::truthy($actions_config['enabled'] ?? false)) {
+            return false;
+        }
+
+        if (($actions_config['mode'] ?? 'read') !== 'readwrite') {
+            return false;
+        }
+
+        if (empty($actions_config['write_permissions']['problems'])) {
+            return false;
+        }
+
+        if (Util::truthy($actions_config['require_super_admin_for_write'] ?? true)
+            && $this->getUserType() < USER_TYPE_SUPER_ADMIN) {
+            return false;
+        }
+
+        return true;
+    }
+
     protected function doAction(): void {
         $config = Config::get();
         $providers = [];
@@ -64,7 +88,8 @@ class ChatView extends CController {
             'initial_eventid' => $this->getInput('eventid', ''),
             'initial_hostname' => $this->getInput('hostname', ''),
             'initial_problem_summary' => $this->getInput('problem_summary', ''),
-            'has_zabbix_api' => (ZabbixApiClient::fromConfig($config) !== null),
+            'has_zabbix_api' => (ZabbixApiClient::fromFrontendOrConfig($config) !== null),
+            'can_post_event_comment' => $this->canPostEventComment($config),
             'history_limit' => (int) ($config['chat']['max_history_messages'] ?? 12),
             'security_enabled' => Util::truthy($config['security']['enabled'] ?? false),
             'logging_enabled' => Util::truthy($config['logging']['enabled'] ?? false),

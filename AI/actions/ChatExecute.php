@@ -66,9 +66,9 @@ class ChatExecute extends CController {
                 throw new \RuntimeException('Zabbix actions are not enabled.');
             }
 
-            $zabbix_api = ZabbixApiClient::fromConfig($config);
+            $zabbix_api = ZabbixApiClient::fromFrontendOrConfig($config);
             if ($zabbix_api === null) {
-                throw new \RuntimeException('Zabbix API is not configured.');
+                throw new \RuntimeException('Zabbix API is not available. Configure the Zabbix API token or run this from a valid Zabbix frontend session.');
             }
 
             $write_category = ZabbixActionExecutor::getWriteCategory($tool_name);

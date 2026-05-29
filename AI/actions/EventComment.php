@@ -43,10 +43,12 @@ class EventComment extends CController {
                 : null;
             $message_to_post = $redactor !== null ? $redactor->restoreText($message) : $message;
 
-            $client = ZabbixApiClient::fromConfig($config);
+            $client = ZabbixApiClient::fromFrontendOrConfig($config);
             if ($client === null) {
-                throw new \RuntimeException('Zabbix API token is not configured in AI settings.');
+                throw new \RuntimeException('Zabbix API is not available. Configure the Zabbix API token or run this from a valid Zabbix frontend session.');
             }
+
+            $this->assertProblemWriteAllowed($config);
 
             $chunks = $client->addProblemComment(
                 $eventid,
@@ -87,6 +89,28 @@ class EventComment extends CController {
                 'ok' => false,
                 'error' => $e->getMessage()
             ], 400);
+        }
+    }
+
+
+    private function assertProblemWriteAllowed(array $config): void {
+        $actions_config = $config['zabbix_actions'] ?? [];
+
+        if (!Util::truthy($actions_config['enabled'] ?? false)) {
+            throw new \RuntimeException('Zabbix actions are not enabled.');
+        }
+
+        if (($actions_config['mode'] ?? 'read') !== 'readwrite') {
+            throw new \RuntimeException('Posting a problem update requires Read & Write mode in AI Settings > Zabbix Actions.');
+        }
+
+        if (empty($actions_config['write_permissions']['problems'])) {
+            throw new \RuntimeException('Posting a problem update requires the "problems" write permission in AI Settings > Zabbix Actions.');
+        }
+
+        if (Util::truthy($actions_config['require_super_admin_for_write'] ?? true)
+            && $this->getUserType() < USER_TYPE_SUPER_ADMIN) {
+            throw new \RuntimeException('Posting a problem update requires Super Admin privileges while "Require Super Admin for write" is enabled.');
         }
     }
 

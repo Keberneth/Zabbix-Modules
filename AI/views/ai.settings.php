@@ -98,7 +98,12 @@ $render_provider_row = static function(array $provider = []) use ($h, $api_key_e
             <div>
                 <label class="ai-label"><?= $h(_('Max tokens')) ?></label>
                 <input class="ai-input" type="number" min="0" max="128000" step="1" name="providers[<?= $h($id) ?>][max_tokens]" value="<?= $h(($provider['max_tokens'] ?? 0) > 0 ? $provider['max_tokens'] : '') ?>" placeholder="Provider default">
-                <span class="ai-muted"><?= $h(_('Leave blank for provider default (4096 for Anthropic).')) ?></span>
+                <span class="ai-muted"><?= $h(_('Leave blank for provider default (4096 for Anthropic). For Ollama this maps to num_predict (response cap), not the context window.')) ?></span>
+            </div>
+            <div>
+                <label class="ai-label"><?= $h(_('Context window (Ollama)')) ?></label>
+                <input class="ai-input" type="number" min="0" max="1048576" step="1024" name="providers[<?= $h($id) ?>][num_ctx]" value="<?= $h(($provider['num_ctx'] ?? 0) > 0 ? $provider['num_ctx'] : '') ?>" placeholder="16384">
+                <span class="ai-muted"><?= $h(_('Ollama only. Sets num_ctx. Default 16384. Ollama\'s native default (2048) is too small for the tools system prompt and will silently truncate it, so the model loses access to its Zabbix tools.')) ?></span>
             </div>
             <div>
                 <label class="ai-label"><?= $h(_('Verify TLS')) ?></label>
@@ -351,15 +356,15 @@ ob_start();
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-zabbix-api" title="<?= $h(_('Help')) ?>">?</button>
             </div>
             <div id="faq-zabbix-api" class="ai-faq-box">
-                <p><strong>What is this?</strong> Connection to your Zabbix API. Required for AI-powered Zabbix actions, OS lookup, and posting AI answers back to events.</p>
-                <p><strong>API URL:</strong> Usually <code>https://your-zabbix/api_jsonrpc.php</code></p>
-                <p><strong>Auth mode:</strong></p>
+                <p><strong>What is this?</strong> The module uses the Zabbix frontend internal API for logged-in chat/problem-page actions when possible. The HTTP API URL/token is still used for webhook/standalone automation and as a fallback. Module write gates (read/readwrite mode, per-category write permissions, "Require Super Admin for write") apply on both transports.</p>
+                <p><strong>API URL:</strong> Usually <code>https://your-zabbix/api_jsonrpc.php</code>. This must point to the Zabbix web frontend, not the Zabbix server daemon.</p>
+                <p><strong>Auth mode:</strong> (only used when the HTTP transport is taken — webhook, standalone, or fallback)</p>
                 <ul>
                     <li><strong>auto</strong> &mdash; tries Bearer token first, falls back to legacy auth field (recommended)</li>
                     <li><strong>bearer</strong> &mdash; Zabbix 6.4+ API token in Authorization header</li>
                     <li><strong>legacy_auth_field</strong> &mdash; token sent in JSON auth field (older Zabbix versions)</li>
                 </ul>
-                <p><strong>Token permissions:</strong> The API token needs read access for read actions. For write actions (maintenance, trigger updates, etc.) the token also needs write access to those Zabbix objects.</p>
+                <p><strong>Token permissions:</strong> For webhook/standalone/fallback use, the API token needs read access for read actions and write access for permitted write actions. Logged-in chat actions additionally inherit the current frontend user's Zabbix permissions.</p>
             </div>
             <div class="ai-repeat-grid ai-settings-grid">
                 <div class="ai-span-3">

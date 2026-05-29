@@ -17,7 +17,7 @@ sudo find /usr/share/zabbix/modules/AI -type d -exec chmod 755 {} \;
 sudo find /usr/share/zabbix/modules/AI -type f -exec chmod 644 {} \;
 sudo restorecon -Rv /usr/share/zabbix/modules/AI
 
-# ── 2. Fix the writable-directory modes (the real bug: 0750 gave group r-x only, no write)
+# ── 2. Fix the writable-directory modes
 # 02770 = setgid + rwx for group, so new files inherit the apache group automatically.
 sudo chgrp -R "$WEB_GROUP" /var/lib/zabbix-ai /var/lib/zabbix/ai_reports /var/log/zabbix-ai
 sudo chmod 02770 /var/lib/zabbix-ai /var/lib/zabbix-ai/state /var/lib/zabbix-ai/state/pending
@@ -263,9 +263,10 @@ You can set different default providers for each purpose:
 
 ### Zabbix API
 
-Required for AI-powered Zabbix actions. Configure:
-- API URL and token (or token env var)
-- The token needs read permissions for read actions, and write permissions for write actions on the relevant Zabbix objects
+Logged-in chat/problem-page actions use Zabbix's internal frontend API path when available. Configure the HTTP API URL and token for webhook/standalone automation and as a fallback:
+- API URL must point to the Zabbix web frontend `api_jsonrpc.php`
+- Token or token env var is required for webhook posting and HTTP fallback
+- The token needs read permissions for read actions and write permissions for allowed write actions on the relevant Zabbix objects
 
 ### Zabbix Actions
 
@@ -349,9 +350,11 @@ Write actions require:
 ### AI does not execute Zabbix actions
 Check:
 - Zabbix Actions is enabled in settings
-- Zabbix API URL and token are configured
-- The API token has sufficient permissions
-- The AI model is capable enough (larger models handle tool calls better)
+- For logged-in chat, the request is running inside a valid Zabbix frontend session
+- For webhook/standalone/fallback, the Zabbix API URL and token are configured
+- The current frontend user or API token has sufficient permissions
+- **Ollama provider only:** the per-provider "Context window (Ollama)" field is at least ~8000. Ollama's native default `num_ctx=2048` is too small for the module's tools system prompt — the tools section at the end of the prompt is silently truncated and the model has no idea it can call anything. The module now defaults to 16384, but if you customised this, raise it. Symptom: the "Tools" tab in **Monitoring > AI > Logs** stays at 0 and the AI replies "I cannot do it" to questions like "list all active problems".
+- The AI model is capable enough. `gemma`-family and small `phi`-family models are weak at emitting strict tool-call JSON. Try `llama3.1:8b`, `qwen2.5:7b` or larger to confirm.
 
 ### Logging shows no entries / log directory does not exist
 

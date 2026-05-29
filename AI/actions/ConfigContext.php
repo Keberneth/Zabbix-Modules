@@ -39,7 +39,7 @@ class ConfigContext extends CController {
             $form_type = Util::cleanString($_GET['form_type'] ?? $_POST['form_type'] ?? 'item', 64);
 
             $config = Config::get();
-            $client = ZabbixApiClient::fromConfig($config);
+            $client = ZabbixApiClient::fromFrontendOrConfig($config);
 
             $itemid = Util::cleanString($_GET['itemid'] ?? $_POST['itemid'] ?? '', 128);
             $triggerid = Util::cleanString($_GET['triggerid'] ?? $_POST['triggerid'] ?? '', 128);

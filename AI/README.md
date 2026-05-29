@@ -165,7 +165,8 @@ For Ollama:
 
 - **Type:** `ollama`
 - **Endpoint:** Leave blank for `http://localhost:11434/api/chat` (or set a custom URL)
-- **Model:** e.g. `llama3.2:3b`
+- **Model:** e.g. `llama3.1:8b`, `qwen2.5:7b`, `mistral-nemo`. Small `gemma*` and `phi*` models are weak at emitting strict tool-call JSON.
+- **Context window (Ollama):** sets Ollama's `num_ctx`. Defaults to 16384 — required because Ollama's own default (2048) silently truncates the tools system prompt, leaving the model unable to call anything.
 
 For Anthropic (Claude):
 
@@ -177,13 +178,9 @@ For Anthropic (Claude):
 
 ### 2. Zabbix API
 
-Configure a Zabbix API URL and token. Required for:
+For logged-in frontend users, the module prefers Zabbix's internal frontend API path for chat actions, problem-page context, item history, host/problem lookup, and user-confirmed writes. This uses the current frontend user's Zabbix permissions and avoids a fragile HTTP call back to `api_jsonrpc.php` in split frontend deployments.
 
-- AI-powered Zabbix actions (querying and modifying Zabbix)
-- Problem page AI buttons (context enrichment)
-- Item history fetching
-- OS lookup by hostname
-- Problem update comments back to the event
+Configure a Zabbix API URL and token for webhook/standalone automation and as a fallback when the internal frontend API path is not available. The URL must point to the Zabbix web frontend's `api_jsonrpc.php`, not the Zabbix server daemon.
 
 Example:
 
@@ -191,7 +188,7 @@ Example:
 - **Auth mode:** `auto`
 - **Token env var:** `ZABBIX_API_TOKEN`
 
-**Important:** The API token needs sufficient permissions for the operations you want the AI to perform. For write actions (maintenance, trigger updates, host group management, etc.) the token needs write access to those Zabbix objects.
+**Important:** Write permissions are still controlled by AI Settings > Zabbix Actions before any write is executed. When using the internal frontend API path, Zabbix also enforces the logged-in user's normal frontend/API permissions. When using the HTTP token fallback or webhook path, the token needs sufficient read/write access for the allowed operations.
 
 ### 3. Zabbix Actions
 

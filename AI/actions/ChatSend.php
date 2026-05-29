@@ -58,7 +58,7 @@ class ChatSend extends CController {
             ];
 
             $redactor = $this->buildRedactor($config, $chat_session_id);
-            $zabbix_api = ZabbixApiClient::fromConfig($config);
+            $zabbix_api = ZabbixApiClient::fromFrontendOrConfig($config);
 
             if ($redactor !== null) {
                 $redactor->loadZabbixHostInventory($zabbix_api);
