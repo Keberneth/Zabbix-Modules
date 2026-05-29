@@ -123,6 +123,10 @@ class ChatExecute extends CController {
                 'netbox_client' => NetBoxClient::fromConfig($config)
             ]);
 
+            // Default so the writes-audit entry below has a defined provider even
+            // on the raw-output path (where no formatting provider is selected).
+            $provider = null;
+
             // Tools that build structured output (download URLs, embedded images)
             // can opt out of the AI re-formatting pass to keep the artefacts intact.
             $raw_output = ZabbixActionExecutor::extractRawOutput($tool_result);

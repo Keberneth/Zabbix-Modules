@@ -197,7 +197,7 @@ class ZabbixApiClient {
     public function listHostsFiltered(array $filters = []): array {
         $params = [
             'output' => ['hostid', 'host', 'name', 'status', 'maintenance_status'],
-            'selectGroups' => ['groupid', 'name'],
+            'selectHostGroups' => ['groupid', 'name'],
             'selectTags' => ['tag', 'value'],
             'sortfield' => 'host',
             'sortorder' => 'ASC'
@@ -249,7 +249,7 @@ class ZabbixApiClient {
         $rows = [];
         foreach ($result as $row) {
             $groups = [];
-            foreach (($row['groups'] ?? []) as $g) {
+            foreach (($row['hostgroups'] ?? $row['groups'] ?? []) as $g) {
                 if (!empty($g['name'])) {
                     $groups[] = $g['name'];
                 }
@@ -406,14 +406,23 @@ class ZabbixApiClient {
     public function getHostInfo(string $hostname): ?array {
         $result = $this->call('host.get', [
             'output' => ['hostid', 'host', 'name', 'status', 'description', 'maintenance_status'],
-            'selectGroups' => ['groupid', 'name'],
+            'selectHostGroups' => ['groupid', 'name'],
             'selectInterfaces' => ['ip', 'dns', 'port', 'type', 'main'],
             'selectInventory' => 'extend',
             'selectTags' => ['tag', 'value'],
             'filter' => ['host' => [$hostname]]
         ]);
 
-        return $result[0] ?? null;
+        $host = $result[0] ?? null;
+
+        // selectHostGroups (Zabbix 7.0+; selectGroups was removed in 7.4) returns
+        // host groups under 'hostgroups'. Expose them as 'groups' so the spread-out
+        // consumers of this raw row keep a single, stable shape on every version.
+        if (is_array($host) && !isset($host['groups'])) {
+            $host['groups'] = $host['hostgroups'] ?? [];
+        }
+
+        return $host;
     }
 
     /**
@@ -692,7 +701,7 @@ class ZabbixApiClient {
         $params = [
             'output' => ['maintenanceid', 'name', 'description', 'active_since', 'active_till', 'maintenance_type', 'tags_evaltype'],
             'selectHosts' => ['hostid', 'host', 'name'],
-            'selectGroups' => ['groupid', 'name'],
+            'selectHostGroups' => ['groupid', 'name'],
             'selectTags' => ['tag', 'operator', 'value'],
             'selectTimeperiods' => 'extend',
             'sortfield' => 'active_since',
@@ -701,6 +710,15 @@ class ZabbixApiClient {
         ];
 
         $result = $this->call('maintenance.get', $params);
+
+        // Normalize selectHostGroups output ('hostgroups') to the 'groups' key
+        // that downstream formatting relies on (selectGroups removed in 7.4).
+        foreach ($result as &$m_row) {
+            if (is_array($m_row) && !isset($m_row['groups'])) {
+                $m_row['groups'] = $m_row['hostgroups'] ?? [];
+            }
+        }
+        unset($m_row);
 
         if ($only_active) {
             $now = time();
@@ -1450,10 +1468,10 @@ class ZabbixApiClient {
             $host_details = $this->call('host.get', [
                 'hostids' => $host_ids,
                 'output' => ['hostid'],
-                'selectGroups' => ['groupid', 'name']
+                'selectHostGroups' => ['groupid', 'name']
             ]);
             foreach ($host_details as $hd) {
-                foreach (($hd['groups'] ?? []) as $g) {
+                foreach (($hd['hostgroups'] ?? $hd['groups'] ?? []) as $g) {
                     $host_group_ids[] = (string) ($g['groupid'] ?? '');
                 }
             }

@@ -720,7 +720,7 @@ class ConfigContext extends CController {
         $result = $client->call('host.get', [
             'hostids' => [$hostid],
             'output' => ['hostid', 'host', 'name', 'status'],
-            'selectGroups' => ['groupid', 'name'],
+            'selectHostGroups' => ['groupid', 'name'],
             'selectInterfaces' => ['interfaceid', 'ip', 'dns', 'port', 'type', 'main'],
             'selectParentTemplates' => ['templateid', 'name'],
             'limit' => 1
@@ -757,7 +757,7 @@ class ConfigContext extends CController {
             'name' => $host['name'],
             'is_template' => false,
             'interfaces' => $host['interfaces'] ?? [],
-            'groups' => $host['groups'] ?? [],
+            'groups' => $host['hostgroups'] ?? $host['groups'] ?? [],
             'parent_templates' => $host['parentTemplates'] ?? []
         ];
     }

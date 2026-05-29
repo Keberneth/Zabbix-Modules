@@ -16,6 +16,10 @@ class WebhookHandler {
         $payload = self::normalizePayload($decoded);
         self::validateSecret($config, $payload);
 
+        // The shared secret is only needed for validation above. Drop it now so
+        // it can never be written to the audit log or echoed back in responses.
+        unset($payload['shared_secret']);
+
         if (Util::truthy($config['webhook']['skip_resolved'] ?? false)
             && (string) ($payload['event_value'] ?? '1') === '0') {
             AuditLogger::log($config, 'webhook', [

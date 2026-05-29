@@ -107,10 +107,15 @@ class NetBoxClient {
             }
         }
 
+        // Filters are applied client-side below, so fetching only $limit rows
+        // would silently under-return matches that sit past the first page.
+        // Pull a larger (hard-capped) page when any filter is active.
+        $fetch_limit = $needles ? min(1000, max($limit * 5, 200)) : $limit;
+
         $rows = [];
 
         if ($kind === 'vm' || $kind === 'both') {
-            $vms = $this->get('/api/virtualization/virtual-machines/', ['limit' => $limit]);
+            $vms = $this->get('/api/virtualization/virtual-machines/', ['limit' => $fetch_limit]);
             foreach (($vms['results'] ?? []) as $vm) {
                 if (!$this->matchesFilters($vm, $needles, 'vm')) {
                     continue;
@@ -123,7 +128,7 @@ class NetBoxClient {
         }
 
         if ($kind === 'device' || $kind === 'both') {
-            $devices = $this->get('/api/dcim/devices/', ['limit' => $limit]);
+            $devices = $this->get('/api/dcim/devices/', ['limit' => $fetch_limit]);
             foreach (($devices['results'] ?? []) as $device) {
                 if (!$this->matchesFilters($device, $needles, 'device')) {
                     continue;

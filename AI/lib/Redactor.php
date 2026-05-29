@@ -562,13 +562,21 @@ class Redactor {
             }
 
             if ($type === 'regex') {
-                $pattern = '~'.$match.'~u';
+                // Escape any unescaped delimiter in the admin-supplied pattern so a
+                // literal '~' can't terminate or redefine the regex (delimiter
+                // injection). Already-escaped '\~' is left intact. A callback is
+                // used so the replacement is inserted literally (a plain
+                // preg_replace replacement would reinterpret the backslash).
+                $safe_match = preg_replace_callback('/(?<!\\\\)~/', static function() {
+                    return '\\~';
+                }, $match);
+                $pattern = '~'.$safe_match.'~u';
                 $test = @preg_match($pattern, 'test');
                 if ($test === false) {
                     continue;
                 }
 
-                $text = preg_replace_callback($pattern, function(array $m) use ($pattern, $replace) {
+                $replaced = preg_replace_callback($pattern, function(array $m) use ($pattern, $replace) {
                     $original = $m[0];
                     if ($original === '' || $this->isAliasValue($original)) {
                         return $original;
@@ -583,6 +591,12 @@ class Redactor {
                     $this->bumpStat('custom_rules');
                     return $alias;
                 }, $text);
+
+                // preg_* returns null on a PCRE failure (e.g. backtrack limit on a
+                // pathological pattern); never let that wipe the text being masked.
+                if (is_string($replaced)) {
+                    $text = $replaced;
+                }
             }
         }
 
@@ -921,16 +935,30 @@ class Redactor {
         $current = (int) ($this->state['counters']['ipv4'] ?? 0) + 1;
         $this->state['counters']['ipv4'] = $current;
 
+        // RFC 5737 documentation ranges first (instantly recognizable as fake).
         $blocks = [
             [192, 0, 2],
             [198, 51, 100],
             [203, 0, 113]
         ];
+        $doc_capacity = count($blocks) * 254; // 762 unique addresses
 
-        $block = $blocks[(int) floor(($current - 1) / 254) % count($blocks)];
-        $last = (($current - 1) % 254) + 1;
+        if ($current <= $doc_capacity) {
+            $block = $blocks[(int) floor(($current - 1) / 254)];
+            $last = (($current - 1) % 254) + 1;
 
-        return $block[0].'.'.$block[1].'.'.$block[2].'.'.$last;
+            return $block[0].'.'.$block[1].'.'.$block[2].'.'.$last;
+        }
+
+        // Once the documentation ranges are exhausted, map the overflow into the
+        // RFC 6598 shared-address space (100.64.0.0/10, ~4.19M addresses) so we
+        // never repeat an alias and never fall back to an invalid "x.x.x.x-2" form.
+        $idx = $current - $doc_capacity - 1;
+        $second = 64 + (int) (floor($idx / 65536) % 64);
+        $third = (int) (floor($idx / 256) % 256);
+        $fourth = $idx % 256;
+
+        return '100.'.$second.'.'.$third.'.'.$fourth;
     }
 
     private function nextIpv6Alias(): string {

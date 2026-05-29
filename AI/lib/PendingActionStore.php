@@ -28,6 +28,11 @@ class PendingActionStore {
     }
 
     public static function consume(array $config, string $server_session_id, string $action_id): array {
+        // Sanitize once so the path used to delete the file is identical to the
+        // one load() reads from. Otherwise a whitespace-padded action_id loads
+        // the real file but unlinks a non-existent one, leaving the single-use
+        // write-confirmation token on disk for replay.
+        $action_id = Util::cleanId($action_id, 'action');
         $data = self::load($config, $server_session_id, $action_id);
         $path = self::path($config, $action_id);
         if (is_file($path)) {

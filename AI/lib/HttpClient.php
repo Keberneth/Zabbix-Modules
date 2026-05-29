@@ -76,7 +76,7 @@ class HttpClient {
         $json = null;
 
         if ($response_body !== '' && (stripos($content_type, 'json') !== false || self::looksLikeJson($response_body))) {
-            $decoded = json_decode($response_body, true);
+            $decoded = json_decode(self::stripBom($response_body), true);
 
             if (json_last_error() === JSON_ERROR_NONE) {
                 $json = $decoded;
@@ -141,8 +141,24 @@ class HttpClient {
     }
 
     private static function looksLikeJson(string $body): bool {
-        $body = ltrim($body);
+        $body = ltrim(self::stripBom($body));
 
-        return $body !== '' && ($body[0] === '{' || $body[0] === '[');
+        if ($body === '') {
+            return false;
+        }
+
+        $first = $body[0];
+
+        // Accept any JSON value start (object, array, string, number, literal)
+        // so a JSON body served without a "json" content-type is still decoded.
+        return $first === '{' || $first === '[' || $first === '"' || $first === '-'
+            || ctype_digit($first)
+            || strncmp($body, 'true', 4) === 0
+            || strncmp($body, 'false', 5) === 0
+            || strncmp($body, 'null', 4) === 0;
+    }
+
+    private static function stripBom(string $body): string {
+        return strncmp($body, "\xEF\xBB\xBF", 3) === 0 ? substr($body, 3) : $body;
     }
 }
