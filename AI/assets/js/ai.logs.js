@@ -32,6 +32,8 @@
     var root;
     var fetchUrl;
     var clearUrl;
+    var exportUrl;
+    var clearState = {pending: false, requestedBy: '', mine: false};
 
     function qs(sel, r) {
         return (r || document).querySelector(sel);
@@ -130,7 +132,8 @@
         return filters;
     }
 
-    function buildRequestUrl(filters, extra) {
+    function buildRequestUrl(filters, extra, base) {
+        base = base || fetchUrl;
         var params = new URLSearchParams();
         params.set('category', state.tab || 'all');
 
@@ -149,8 +152,22 @@
             Object.keys(extra).forEach(function(k) { params.set(k, extra[k]); });
         }
 
-        var sep = fetchUrl.indexOf('?') === -1 ? '?' : '&';
-        return fetchUrl + sep + params.toString();
+        var sep = base.indexOf('?') === -1 ? '?' : '&';
+        return base + sep + params.toString();
+    }
+
+    function exportLogs(format) {
+        if (!exportUrl) {
+            showStatus('Export endpoint is not available.', 'error');
+            return;
+        }
+        var url = buildRequestUrl(buildFilters(), {format: format}, exportUrl);
+        var a = document.createElement('a');
+        a.href = url;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
     }
 
     function fetchItems(append) {
@@ -506,19 +523,61 @@
         fetchItems(false);
     }
 
-    function clearLog() {
-        if (!window.confirm('This will delete every AI log file (live and archive) on disk. Continue?')) {
-            return;
+    function renderClearButton() {
+        var clear = qs('#ai-log-clear');
+        var cancel = qs('#ai-log-clear-cancel');
+
+        if (clear) {
+            if (clearState.pending) {
+                clear.textContent = 'Approve Clear Log';
+                clear.classList.add('ai-btn-danger');
+                clear.title = 'Requested by ' + (clearState.requestedBy || 'another user')
+                    + '. A different super admin must approve to delete the logs.';
+            } else {
+                clear.textContent = 'Clear log';
+                clear.classList.remove('ai-btn-danger');
+                clear.title = 'Request deletion of all AI logs. A second super admin must approve.';
+            }
         }
 
+        if (cancel) {
+            cancel.hidden = !clearState.pending;
+        }
+    }
+
+    function handleClearClick() {
+        if (clearState.pending) {
+            // Armed: this is an approval attempt (the server blocks self-approval).
+            if (!window.confirm('Permanently delete every AI log file (live and archive) now?\n\nRequested by '
+                + (clearState.requestedBy || 'another super admin') + '.')) {
+                return;
+            }
+            postClear('');
+        } else {
+            // Idle: arm a request. Nothing is deleted until a different super admin approves.
+            if (!window.confirm('Request deletion of all AI logs?\n\nNothing is deleted yet — a different super admin must approve before the logs are removed.')) {
+                return;
+            }
+            postClear('');
+        }
+    }
+
+    function handleCancelClick() {
+        postClear('cancel');
+    }
+
+    function postClear(op) {
         var form = new FormData();
         var name = root.getAttribute('data-csrf-name');
         var token = root.getAttribute('data-csrf-clear');
         if (name && token) {
             form.append(name, token);
         }
+        if (op) {
+            form.append('op', op);
+        }
 
-        showStatus('Clearing log…', 'warn');
+        showStatus('Working…', 'warn');
 
         fetch(clearUrl, {
             method: 'POST',
@@ -540,8 +599,23 @@
                     showStatus((payload && payload.error) || 'Clear failed.', 'error');
                     return;
                 }
-                showStatus('Removed ' + (payload.removed || 0) + ' log files.', 'ok');
-                fetchItems(false);
+
+                if (payload.state === 'cleared') {
+                    clearState = {pending: false, requestedBy: '', mine: false};
+                    renderClearButton();
+                    showStatus('Removed ' + (payload.removed || 0) + ' log files.', 'ok');
+                    fetchItems(false);
+                } else if (payload.state === 'pending') {
+                    clearState = {pending: true, requestedBy: payload.requested_by || '', mine: !!payload.mine};
+                    renderClearButton();
+                    showStatus(payload.note
+                        || ('Log clear requested by ' + (payload.requested_by || 'a super admin')
+                            + ' — a different super admin must click Approve Clear Log to delete the logs.'), 'warn');
+                } else {
+                    clearState = {pending: false, requestedBy: '', mine: false};
+                    renderClearButton();
+                    showStatus('Clear request cancelled.', 'ok');
+                }
             })
             .catch(function(err) {
                 showStatus('Clear failed: ' + (err && err.message ? err.message : err), 'error');
@@ -562,9 +636,12 @@
         var reset = qs('#ai-log-reset');
         var more = qs('#ai-log-load-more');
         var clear = qs('#ai-log-clear');
+        var clearCancel = qs('#ai-log-clear-cancel');
         var search = qs('#ai-log-q');
         var detailClose = qs('#ai-log-detail-close');
         var detailRaw = qs('#ai-log-detail-raw');
+        var exportCsv = qs('#ai-log-export-csv');
+        var exportJson = qs('#ai-log-export-json');
 
         if (refresh) refresh.addEventListener('click', function() { state.offset = 0; fetchItems(false); });
         if (apply) apply.addEventListener('click', function() { state.offset = 0; fetchItems(false); });
@@ -578,7 +655,8 @@
             fetchItems(false);
         });
         if (more) more.addEventListener('click', function() { fetchItems(true); });
-        if (clear) clear.addEventListener('click', function() { clearLog(); });
+        if (clear) clear.addEventListener('click', handleClearClick);
+        if (clearCancel) clearCancel.addEventListener('click', handleCancelClick);
         if (search) search.addEventListener('keydown', function(event) {
             if (event.key === 'Enter') {
                 event.preventDefault();
@@ -588,6 +666,8 @@
         });
         if (detailClose) detailClose.addEventListener('click', hideDetail);
         if (detailRaw) detailRaw.addEventListener('click', toggleDetailRaw);
+        if (exportCsv) exportCsv.addEventListener('click', function() { exportLogs('csv'); });
+        if (exportJson) exportJson.addEventListener('click', function() { exportLogs('json'); });
     }
 
     function init() {
@@ -596,9 +676,17 @@
 
         fetchUrl = root.getAttribute('data-fetch-url');
         clearUrl = root.getAttribute('data-clear-url');
+        exportUrl = root.getAttribute('data-export-url');
+
+        clearState = {
+            pending: root.getAttribute('data-clear-pending') === '1',
+            requestedBy: root.getAttribute('data-clear-requested-by') || '',
+            mine: root.getAttribute('data-clear-mine') === '1'
+        };
 
         initTabs();
         initControls();
+        renderClearButton();
         fetchItems(false);
     }
 

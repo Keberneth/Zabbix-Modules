@@ -61,6 +61,9 @@
         var allProblems = [];
         var problemsLoaded = false;
         var problemsFetchController = null;
+        // When a problem is selected, the host dropdown is constrained to that
+        // problem's host(s). null = no constraint (show all hosts).
+        var problemHostLock = null;
 
         var history = loadJson(HISTORY_KEY, []);
         var context = loadJson(CONTEXT_KEY, {});
@@ -114,7 +117,8 @@
         });
 
         initSearchableDropdown(hostnameSearchField, hostnameList, {
-            getItems: function () { return allHosts; },
+            // While a problem is selected, only its related host(s) are offered.
+            getItems: function () { return problemHostLock || allHosts; },
             formatItem: function (host) {
                 var label = host.host;
                 if (host.name && host.name !== host.host) {
@@ -131,8 +135,14 @@
                 hostnameField.value = host.host;
                 hostnameIdField.value = host.hostid;
                 hostnameSearchField.value = host.host;
-                eventidField.value = '';
-                eventidSearchField.value = '';
+                // Selecting a host re-scopes the problem list to that host. Drop a
+                // previously selected problem only when it belongs to a different
+                // host, so picking the problem's own host doesn't wipe it.
+                if (!hostMatchesSelectedProblem(host)) {
+                    eventidField.value = '';
+                    eventidSearchField.value = '';
+                    problemHostLock = null;
+                }
                 allProblems = [];
                 problemsLoaded = false;
                 saveContext();
@@ -162,16 +172,11 @@
                 searchProblems(query);
             },
             onSelect: function (problem) {
-                eventidField.value = problem.eventid;
-                var sev = SEVERITY_LABELS[parseInt(problem.severity, 10)] || 'Unknown';
-                eventidSearchField.value = problem.eventid + ' \u2014 [' + sev + '] ' + problem.name;
-                if (problem.name && !problemSummaryField.value) {
-                    problemSummaryField.value = problem.name;
-                }
-                saveContext();
+                selectProblem(problem);
             },
             onClear: function () {
                 eventidField.value = '';
+                problemHostLock = null;
                 saveContext();
             },
             onFocus: function () {
@@ -180,6 +185,51 @@
                 }
             }
         });
+
+        function selectProblem(problem) {
+            eventidField.value = problem.eventid;
+            var sev = SEVERITY_LABELS[parseInt(problem.severity, 10)] || 'Unknown';
+            eventidSearchField.value = problem.eventid + ' — [' + sev + '] ' + problem.name;
+            if (problem.name && !problemSummaryField.value) {
+                problemSummaryField.value = problem.name;
+            }
+            applyProblemHost(problem);
+            saveContext();
+        }
+
+        // Bind a selected problem to its host: fill the host fields and constrain
+        // the host dropdown to that problem's host(s) so the two stay consistent.
+        function applyProblemHost(problem) {
+            var hosts = (problem && Array.isArray(problem.hosts)) ? problem.hosts : [];
+            if (!hosts.length) {
+                return;
+            }
+
+            var primary = hosts[0];
+            if (primary && primary.host) {
+                hostnameField.value = primary.host;
+                hostnameIdField.value = primary.hostid || '';
+                var label = primary.host;
+                if (primary.name && primary.name !== primary.host) {
+                    label += ' (' + primary.name + ')';
+                }
+                hostnameSearchField.value = label;
+            }
+
+            problemHostLock = hosts;
+        }
+
+        function hostMatchesSelectedProblem(host) {
+            if (!eventidField.value || !problemHostLock) {
+                return false;
+            }
+            for (var i = 0; i < problemHostLock.length; i++) {
+                if (problemHostLock[i].hostid && host.hostid && problemHostLock[i].hostid === host.hostid) {
+                    return true;
+                }
+            }
+            return false;
+        }
 
         function loadHosts() {
             if (!hostsUrl) return;
@@ -234,13 +284,7 @@
                             },
                             filterItem: function () { return true; },
                             onSelect: function (problem) {
-                                eventidField.value = problem.eventid;
-                                var sev = SEVERITY_LABELS[parseInt(problem.severity, 10)] || 'Unknown';
-                                eventidSearchField.value = problem.eventid + ' \u2014 [' + sev + '] ' + problem.name;
-                                if (problem.name && !problemSummaryField.value) {
-                                    problemSummaryField.value = problem.name;
-                                }
-                                saveContext();
+                                selectProblem(problem);
                                 eventidList.classList.add('ai-hidden');
                             }
                         }, '');
@@ -384,6 +428,7 @@
             }
             allProblems = [];
             problemsLoaded = false;
+            problemHostLock = null;
             pendingAction = null;
             removeConfirmBar();
             renderHistory();

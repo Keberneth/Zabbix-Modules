@@ -538,6 +538,7 @@ class ZabbixActionExecutor {
                     'period_days' => '(int, optional, default 14) Number of days back from now to include.',
                     'group_by' => '(string, optional, default "day") Bucket size: "hour", "day", or "week".',
                     'severity_min' => '(int, optional, default 0) Minimum severity 0-5.',
+                    'host' => '(string, optional) Restrict to a single host by technical or visible name.',
                     'host_group' => '(string, optional) Restrict to a host group name.'
                 ],
                 'rw' => 'read',
@@ -1682,7 +1683,18 @@ class ZabbixActionExecutor {
         }
 
         $severity_min = max(0, min((int) ($params['severity_min'] ?? 0), 5));
+        $host = trim((string) ($params['host'] ?? ''));
         $host_group = trim((string) ($params['host_group'] ?? ''));
+
+        $host_ids = [];
+
+        if ($host !== '') {
+            $hid = $api->getHostIdByName($host);
+            if ($hid === null) {
+                return 'Error: host "'.$host.'" not found.';
+            }
+            $host_ids[] = (string) $hid;
+        }
 
         $host_group_ids = [];
 
@@ -1697,7 +1709,7 @@ class ZabbixActionExecutor {
         $until = time();
         $since = $until - ($period_days * 86400);
 
-        $events = $api->getProblemsTimeline($since, $until, $severity_min, $host_group_ids, 20000);
+        $events = $api->getProblemsTimeline($since, $until, $severity_min, $host_group_ids, 20000, $host_ids);
 
         $buckets = self::bucketProblems($events, $since, $until, $group_by);
 
@@ -1710,8 +1722,16 @@ class ZabbixActionExecutor {
             }
         }
 
+        $scope = [];
+        if ($host !== '') {
+            $scope[] = $host;
+        }
+        if ($host_group !== '') {
+            $scope[] = $host_group;
+        }
+
         $title = 'Problems over the last '.$period_days.' day(s)'
-            .($host_group !== '' ? ' — '.$host_group : '')
+            .($scope ? ' — '.implode(', ', $scope) : '')
             .($severity_min > 0 ? ' (severity ≥ '.$severity_min.')' : '');
 
         $svg = self::renderProblemBarChartSvg($title, $buckets, $by_severity_total, $total);

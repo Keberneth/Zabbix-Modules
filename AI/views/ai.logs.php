@@ -37,6 +37,10 @@ ob_start();
      data-ai-theme="<?= $h($ai_theme) ?>"
      data-fetch-url="<?= $h($fetch_url) ?>"
      data-clear-url="<?= $h($clear_url) ?>"
+     data-export-url="<?= $h((string) ($data['export_url'] ?? '')) ?>"
+     data-clear-pending="<?= !empty($data['clear_pending']) ? '1' : '0' ?>"
+     data-clear-requested-by="<?= $h((string) ($data['clear_requested_by'] ?? '')) ?>"
+     data-clear-mine="<?= !empty($data['clear_requested_by_me']) ? '1' : '0' ?>"
      data-csrf-name="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>"
      data-csrf-clear="<?= $h(CCsrfTokenHelper::get('ai.logs.clear')) ?>">
     <div class="ai-header">
@@ -52,6 +56,7 @@ ob_start();
             <a class="btn" href="<?= $h($settings_url) ?>"><?= $h(_('Open settings')) ?></a>
             <button type="button" id="ai-log-refresh" class="btn"><?= $h(_('Refresh')) ?></button>
             <button type="button" id="ai-log-clear" class="btn"><?= $h(_('Clear log')) ?></button>
+            <button type="button" id="ai-log-clear-cancel" class="btn" hidden><?= $h(_('Cancel clear request')) ?></button>
         </div>
     </div>
 
@@ -80,6 +85,66 @@ ob_start();
         </div>
         <?php if ($any_unwritable && $permission_note !== ''): ?>
             <p class="ai-muted ai-top-margin"><strong><?= $h(_('How to fix:')) ?></strong> <?= $h($permission_note) ?></p>
+        <?php endif; ?>
+    </section>
+
+    <?php $clear_audit = is_array($data['clear_audit'] ?? null) ? $data['clear_audit'] : []; ?>
+    <section class="ai-card">
+        <div class="ai-section-header">
+            <h2><?= $h(_('Log deletion history (protected)')) ?></h2>
+        </div>
+        <p class="ai-muted"><?= $h(_('Every use of the Clear log button — request, approval, and cancellation — is recorded here in a separate protected file that is never removed by a log clear.')) ?></p>
+        <?php if (!$clear_audit): ?>
+            <p class="ai-muted"><?= $h(_('No log-deletion activity recorded yet.')) ?></p>
+        <?php else: ?>
+            <div class="ai-log-grid-wrap">
+                <table class="ai-map-table">
+                    <thead><tr>
+                        <th><?= $h(_('Time')) ?></th>
+                        <th><?= $h(_('Action')) ?></th>
+                        <th><?= $h(_('User')) ?></th>
+                        <th><?= $h(_('Details')) ?></th>
+                    </tr></thead>
+                    <tbody>
+                    <?php foreach ($clear_audit as $row):
+                        $event = (string) ($row['event'] ?? '');
+                        if ($event === 'logs.clear') {
+                            $action_label = _('Approved & cleared');
+                        }
+                        elseif ($event === 'logs.clear_requested') {
+                            $action_label = _('Requested');
+                        }
+                        elseif ($event === 'logs.clear_cancelled') {
+                            $action_label = _('Cancelled');
+                        }
+                        elseif ($event === 'logs.clear_self_approval_blocked') {
+                            $action_label = _('Self-approval blocked');
+                        }
+                        else {
+                            $action_label = $event;
+                        }
+                        $ts = (string) ($row['ts'] ?? '');
+                        $ts_unix = $ts !== '' ? strtotime($ts) : false;
+                        $ts_str = $ts_unix !== false ? date('Y-m-d H:i:s', $ts_unix) : $ts;
+                        $audit_user = is_array($row['user'] ?? null) ? (string) ($row['user']['username'] ?? '') : '';
+                        $meta = is_array($row['meta'] ?? null) ? $row['meta'] : [];
+                        $details = [];
+                        if (!empty($meta['requested_by'])) { $details[] = _('requested by').' '.$meta['requested_by']; }
+                        if (!empty($meta['approved_by'])) { $details[] = _('approved by').' '.$meta['approved_by']; }
+                        if (!empty($meta['attempted_by'])) { $details[] = _('attempted by').' '.$meta['attempted_by']; }
+                        if (!empty($meta['cancelled_by'])) { $details[] = _('cancelled by').' '.$meta['cancelled_by']; }
+                        if (isset($meta['removed_files'])) { $details[] = (int) $meta['removed_files'].' '._('files removed'); }
+                    ?>
+                        <tr>
+                            <td><?= $h($ts_str) ?></td>
+                            <td><?= $h($action_label) ?></td>
+                            <td><?= $h($audit_user) ?></td>
+                            <td><?= $h(implode(', ', $details)) ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
         <?php endif; ?>
     </section>
 
@@ -137,6 +202,8 @@ ob_start();
         <div class="ai-log-filter-actions">
             <button type="button" id="ai-log-apply" class="btn"><?= $h(_('Apply filters')) ?></button>
             <button type="button" id="ai-log-reset" class="btn"><?= $h(_('Reset')) ?></button>
+            <button type="button" id="ai-log-export-csv" class="btn" title="<?= $h(_('Download the current filtered entries as CSV (flat columns).')) ?>"><?= $h(_('Export CSV')) ?></button>
+            <button type="button" id="ai-log-export-json" class="btn" title="<?= $h(_('Download the current filtered entries as JSON (full records).')) ?>"><?= $h(_('Export JSON')) ?></button>
             <span class="ai-muted" id="ai-log-count">0 <?= $h(_('rows')) ?></span>
         </div>
     </section>

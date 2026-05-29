@@ -226,6 +226,125 @@ class AuditLogger {
         return $removed;
     }
 
+    /**
+     * Four-eyes control for log deletion. A clear must be requested by one
+     * super admin and approved by a *different* super admin (enforced in the
+     * controller). The pending request lives in the module state dir; the
+     * existing RedactionStore cleanup expires a stale request after the
+     * session TTL, so a forgotten request cannot stay armed indefinitely.
+     */
+    private static function clearRequestPath(array $config): string {
+        return RedactionStore::baseDir($config).'/log_clear_request.json';
+    }
+
+    public static function clearRequest(array $config): array {
+        try {
+            $data = Filesystem::readJson(self::clearRequestPath($config));
+        }
+        catch (\Throwable $e) {
+            // A misconfigured/unwritable state dir must not break the logs page.
+            $data = [];
+        }
+
+        if (!is_array($data) || ($data['userid'] ?? '') === '') {
+            return ['pending' => false, 'userid' => '', 'username' => '', 'requested_at' => 0];
+        }
+
+        return [
+            'pending' => true,
+            'userid' => (string) ($data['userid'] ?? ''),
+            'username' => (string) ($data['username'] ?? ''),
+            'requested_at' => (int) ($data['requested_at'] ?? 0)
+        ];
+    }
+
+    public static function armClear(array $config, string $userid, string $username): void {
+        Filesystem::writeJsonAtomic(self::clearRequestPath($config), [
+            'userid' => $userid,
+            'username' => $username,
+            'requested_at' => time()
+        ]);
+    }
+
+    public static function cancelClear(array $config): void {
+        $path = self::clearRequestPath($config);
+
+        if (is_file($path)) {
+            @unlink($path);
+        }
+    }
+
+    private static function clearAuditPath(array $config): string {
+        // Deliberately not an "ai-*.jsonl" name, so clear() and the retention
+        // maintenance globs never match it. This is the immutable trail.
+        return self::logDir($config).'/clear-audit.jsonl';
+    }
+
+    /**
+     * Append a Clear-log lifecycle event (request / approve / cancel) to a
+     * PROTECTED file that clear() never deletes. Written regardless of the
+     * logging.enabled toggle because it records a destructive admin action,
+     * and it is never archived or pruned. Best-effort: never throws.
+     */
+    public static function logClearAudit(array $config, array $entry): void {
+        try {
+            $config = Config::mergeWithDefaults($config);
+            Filesystem::ensureDir(self::logDir($config));
+
+            $record = [
+                'ts' => gmdate('c'),
+                'request_id' => self::requestId(),
+                'category' => 'clear_audit',
+                'event' => Util::cleanString($entry['event'] ?? 'event', 128),
+                'source' => 'ai.logs.clear',
+                'status' => Util::cleanString($entry['status'] ?? 'ok', 32),
+                'user' => self::currentUserInfo(),
+                'remote_addr' => Util::cleanString($_SERVER['REMOTE_ADDR'] ?? '', 128),
+                'meta' => Util::truncateMixed($entry['meta'] ?? [], 1000, 100)
+            ];
+
+            Filesystem::appendLine(
+                self::clearAuditPath($config),
+                json_encode($record, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+            );
+        }
+        catch (\Throwable $e) {
+            // Never break the module on an audit-write failure.
+        }
+    }
+
+    /**
+     * Recent protected Clear-log audit events, newest first.
+     */
+    public static function readClearAudit(array $config, int $limit = 50): array {
+        try {
+            $config = Config::mergeWithDefaults($config);
+            $lines = self::readFileLines(self::clearAuditPath($config)); // newest first
+        }
+        catch (\Throwable $e) {
+            return [];
+        }
+
+        $cap = max(1, min($limit, 500));
+        $entries = [];
+
+        foreach ($lines as $line) {
+            $line = trim((string) $line);
+            if ($line === '') {
+                continue;
+            }
+            $decoded = json_decode($line, true);
+            if (is_array($decoded)) {
+                $entries[] = $decoded;
+            }
+            if (count($entries) >= $cap) {
+                break;
+            }
+        }
+
+        return $entries;
+    }
+
     public static function summary(array $config): array {
         $config = Config::mergeWithDefaults($config);
         self::runMaintenance($config);

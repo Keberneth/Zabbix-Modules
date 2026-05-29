@@ -96,6 +96,7 @@ class Config {
                     'ipv6' => true,
                     'fqdns' => true,
                     'urls' => true,
+                    'services' => false,
                     'strip_url_query' => false,
                     'os_mode' => 'family_only'
                 ],
@@ -422,6 +423,7 @@ class Config {
                 'ipv6' => Util::truthy($security['categories']['ipv6'] ?? false),
                 'fqdns' => Util::truthy($security['categories']['fqdns'] ?? false),
                 'urls' => Util::truthy($security['categories']['urls'] ?? false),
+                'services' => Util::truthy($security['categories']['services'] ?? false),
                 'strip_url_query' => Util::truthy($security['categories']['strip_url_query'] ?? false),
                 'os_mode' => Util::cleanEnum($security['categories']['os_mode'] ?? 'family_only', ['off', 'family_only', 'full_alias'], 'family_only')
             ],

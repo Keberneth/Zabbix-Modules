@@ -781,6 +781,19 @@ html[theme="hc-dark"] .ai-msg-action .ai-msg-title,
 .ai-log-status-error { color: #c14545; font-weight: 600; }
 .ai-log-status-warn { color: #c08a1f; font-weight: 600; }
 
+/* Armed "Approve Clear Log" state — solid red reads clearly in both themes. */
+.btn.ai-btn-danger {
+    background: #c0392b;
+    border-color: #a93226;
+    color: #fff;
+    font-weight: 600;
+}
+
+.btn.ai-btn-danger:hover {
+    background: #a93226;
+    border-color: #922b21;
+}
+
 .ai-log-empty {
     text-align: center;
     padding: 30px 20px;

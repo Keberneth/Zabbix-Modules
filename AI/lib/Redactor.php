@@ -24,6 +24,11 @@ class Redactor {
     /** [lowercase_canonical => original_case_hostname] — preserves case for restoration. */
     private array $zbx_inventory_canonical = [];
 
+    /** [lowercase_service_name => alias] — Zabbix service aliases (opt-in category). */
+    private array $zbx_service_aliases = [];
+    /** [lowercase_service_name => original_case_name] — preserves case for restoration. */
+    private array $zbx_service_canonical = [];
+
     private array $stats = [
         'hostnames' => 0,
         'ipv4' => 0,
@@ -139,6 +144,7 @@ class Redactor {
 
         $text = $this->applyCustomRules($text);
         $text = $this->applyZabbixInventoryRedaction($text);
+        $text = $this->applyServiceRedaction($text);
         $text = $this->applyOsRedaction($text);
         $text = $this->applyUrlRedaction($text);
         $text = $this->applyIpV4Redaction($text);
@@ -169,7 +175,10 @@ class Redactor {
             return;
         }
 
-        if (!Util::truthy($this->config['security']['categories']['zabbix_inventory'] ?? true)) {
+        $host_inventory_on = Util::truthy($this->config['security']['categories']['zabbix_inventory'] ?? true);
+        $services_on = Util::truthy($this->config['security']['categories']['services'] ?? false);
+
+        if (!$host_inventory_on && !$services_on) {
             return;
         }
 
@@ -184,7 +193,7 @@ class Redactor {
 
         $highest_alias_index = 0;
 
-        foreach (($cache['hosts'] ?? []) as $entry) {
+        foreach (($host_inventory_on ? ($cache['hosts'] ?? []) : []) as $entry) {
             if (!is_array($entry)) {
                 continue;
             }
@@ -228,6 +237,29 @@ class Redactor {
         $current_counter = (int) ($this->state['counters']['hostname'] ?? 0);
         if ($highest_alias_index > $current_counter) {
             $this->state['counters']['hostname'] = $highest_alias_index;
+        }
+
+        // Optional, opt-in service-name aliases (security.categories.services).
+        $this->zbx_service_aliases = [];
+        $this->zbx_service_canonical = [];
+
+        if ($services_on) {
+            foreach (($cache['services'] ?? []) as $entry) {
+                if (!is_array($entry)) {
+                    continue;
+                }
+
+                $canonical = trim((string) ($entry['canonical'] ?? ''));
+                $alias = trim((string) ($entry['alias'] ?? ''));
+
+                if ($canonical === '' || $alias === '') {
+                    continue;
+                }
+
+                $key = strtolower($canonical);
+                $this->zbx_service_aliases[$key] = $alias;
+                $this->zbx_service_canonical[$key] = $canonical;
+            }
         }
     }
 
@@ -288,6 +320,55 @@ class Redactor {
             $this->bumpStat('hostnames');
             return $alias;
         }, $text);
+    }
+
+    /**
+     * Replace every appearance of a known Zabbix service name with its stable
+     * ai-service-NNN alias. Opt-in (security.categories.services). Service names
+     * are matched in full (no substrings) with token-edge boundaries so a name
+     * embedded inside a larger identifier is not masked.
+     */
+    private function applyServiceRedaction(string $text): string {
+        if (empty($this->zbx_service_aliases)) {
+            return $text;
+        }
+
+        $names = Util::sortByLengthDesc(array_keys($this->zbx_service_aliases));
+
+        $escaped = array_map(static function(string $n): string {
+            return preg_quote($n, '~');
+        }, $names);
+
+        $pattern = '~(?<![A-Za-z0-9_.\-])(?:'.implode('|', $escaped).')(?![A-Za-z0-9_.\-])~iu';
+
+        $replaced = preg_replace_callback($pattern, function(array $m): string {
+            $matched = $m[0];
+
+            if ($this->isAliasValue($matched)) {
+                return $matched;
+            }
+
+            $key = strtolower($matched);
+            $alias = $this->zbx_service_aliases[$key] ?? null;
+            if ($alias === null) {
+                return $matched;
+            }
+
+            $canonical = $this->zbx_service_canonical[$key] ?? $matched;
+
+            if (!isset($this->state['reverse'][$alias])) {
+                $this->state['reverse'][$alias] = $canonical;
+            }
+            if (!isset($this->state['forward'][$canonical])) {
+                $this->state['forward'][$canonical] = $alias;
+                $this->state['meta'][$canonical] = ['type' => 'service', 'alias' => $alias];
+            }
+
+            $this->bumpStat('services');
+            return $alias;
+        }, $text);
+
+        return is_string($replaced) ? $replaced : $text;
     }
 
     /**
@@ -360,7 +441,11 @@ class Redactor {
             }
 
             $fetched_at = (int) ($existing['fetched_at'] ?? 0);
-            if ($fetched_at > 0 && ($now - $fetched_at) < $ttl) {
+            // Force a rebuild when services redaction was just enabled but the
+            // cached payload predates it (so the toggle takes effect promptly).
+            $services_missing = Util::truthy($this->config['security']['categories']['services'] ?? false)
+                && !array_key_exists('services', $existing);
+            if ($fetched_at > 0 && ($now - $fetched_at) < $ttl && !$services_missing) {
                 return $existing;
             }
         }
@@ -438,8 +523,69 @@ class Redactor {
 
         return [
             'fetched_at' => time(),
-            'hosts' => array_values($rebuilt)
+            'hosts' => array_values($rebuilt),
+            'services' => $this->buildServiceInventory($api, $existing)
         ];
+    }
+
+    /**
+     * Build the stable ai-service-NNN alias list for Zabbix service names.
+     * Only runs when the opt-in services category is enabled; otherwise returns
+     * an empty list so the host cache stays cheap for the common case.
+     */
+    private function buildServiceInventory(ZabbixApiClient $api, array $existing): array {
+        if (!Util::truthy($this->config['security']['categories']['services'] ?? false)) {
+            return [];
+        }
+
+        $previous = [];
+        $highest_index = 0;
+
+        if (isset($existing['services']) && is_array($existing['services'])) {
+            foreach ($existing['services'] as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                $canonical = (string) ($row['canonical'] ?? '');
+                $alias = (string) ($row['alias'] ?? '');
+                if ($canonical === '' || $alias === '') {
+                    continue;
+                }
+                $previous[strtolower($canonical)] = $row;
+                if (preg_match('/(\d+)$/', $alias, $m)) {
+                    $highest_index = max($highest_index, (int) $m[1]);
+                }
+            }
+        }
+
+        $rebuilt = [];
+
+        foreach ($api->getServiceNames() as $name) {
+            $name = trim((string) $name);
+            // Skip very short names — they would mask common words and create
+            // noisy, confusing redactions.
+            if (strlen($name) < 3) {
+                continue;
+            }
+
+            $key = strtolower($name);
+            if (isset($rebuilt[$key])) {
+                continue;
+            }
+
+            if (isset($previous[$key])) {
+                $rebuilt[$key] = $previous[$key];
+            }
+            else {
+                $highest_index++;
+                $rebuilt[$key] = [
+                    'canonical' => $name,
+                    'alias' => 'ai-service-'.str_pad((string) $highest_index, 3, '0', STR_PAD_LEFT)
+                ];
+            }
+        }
+
+        return array_values($rebuilt);
     }
 
     public function restoreText(string $text): string {
@@ -764,8 +910,13 @@ class Redactor {
             return $text;
         }
 
+        // The boundary lookarounds reject tokens that are glued to a '.', '_' or
+        // '-' on either side, so a fragment embedded in a dotted version/build
+        // string (e.g. "amd64fre" inside "17763.1.amd64fre.rs5_release") is never
+        // treated as a standalone hostname. Internal hyphens are still allowed,
+        // so "db-prod-01" matches as one token.
         return preg_replace_callback(
-            '~\b[A-Za-z][A-Za-z0-9_-]{2,62}\b~u',
+            '~(?<![A-Za-z0-9._-])[A-Za-z][A-Za-z0-9_-]{2,62}(?![A-Za-z0-9._-])~u',
             function(array $m) {
                 $original = $m[0];
 
@@ -853,6 +1004,12 @@ class Redactor {
         // Require at least one digit or hyphen so plain dictionary words are not
         // treated as hostnames.
         if (!preg_match('/[0-9-]/', $value)) {
+            return false;
+        }
+
+        // All-lowercase hyphenated words with no digits are almost always compound
+        // English terms (date-time, first-line, evidence-gathering), not hostnames.
+        if ($value === strtolower($value) && strpos($value, '-') !== false && !preg_match('/[0-9]/', $value)) {
             return false;
         }
 
@@ -1000,10 +1157,11 @@ class Redactor {
 
             $type = $this->state['meta'][$original]['type'] ?? '';
 
-            if ($type === 'hostname' || $type === 'hostname_partial') {
-                // Hostname tokens are always matched with word boundaries,
+            if ($type === 'hostname' || $type === 'hostname_partial' || $type === 'service') {
+                // Hostname and service tokens are matched with word boundaries,
                 // so substring hits inside unrelated identifiers don't count
-                // as leaks (e.g. "redb-01x" vs the host "db-01").
+                // as leaks (e.g. "redb-01x" vs the host "db-01", or the service
+                // "Web" appearing inside "Website").
                 $pattern = '~(?<![A-Za-z0-9_.\-])'.preg_quote($original, '~').'(?![A-Za-z0-9_.\-])~iu';
                 if (@preg_match($pattern, $text) === 1) {
                     throw new RuntimeException('Security redaction blocked a request because a known sensitive value remained after masking. Review the custom rules or disable strict mode if you need best-effort behavior.');

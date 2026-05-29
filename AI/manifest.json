@@ -39,6 +39,10 @@
       "class": "LogsClear",
       "layout": "layout.json"
     },
+    "ai.logs.export": {
+      "class": "LogsExport",
+      "layout": "layout.json"
+    },
     "ai.chat.send": {
       "class": "ChatSend",
       "layout": "layout.json"

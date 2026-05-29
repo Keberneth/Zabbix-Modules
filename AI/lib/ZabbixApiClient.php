@@ -182,6 +182,36 @@ class ZabbixApiClient {
     }
 
     /**
+     * Flat list of Zabbix business-service names. Used by the optional services
+     * redaction category to mask service names before they reach the AI
+     * provider. Best-effort: returns [] when there are no services or the call
+     * fails (insufficient permissions, no service tree, etc.).
+     */
+    public function getServiceNames(int $limit = 2000): array {
+        try {
+            $result = $this->call('service.get', [
+                'output' => ['name'],
+                'sortfield' => 'name',
+                'limit' => min(max($limit, 1), 5000)
+            ]);
+        }
+        catch (\Throwable $e) {
+            return [];
+        }
+
+        $names = [];
+
+        foreach ($result as $row) {
+            $name = trim((string) ($row['name'] ?? ''));
+            if ($name !== '') {
+                $names[] = $name;
+            }
+        }
+
+        return array_values(array_unique($names));
+    }
+
+    /**
      * Bulk-list hosts with optional filters. Used by the AI `list_zabbix_hosts`
      * tool to support multi-host inventory reports in a single API call.
      *
@@ -279,7 +309,7 @@ class ZabbixApiClient {
 
     public function getProblems(?string $hostid = null, string $search = '', int $limit = 50): array {
         $params = [
-            'output' => ['eventid', 'name', 'severity'],
+            'output' => ['eventid', 'name', 'severity', 'objectid'],
             'source' => 0,
             'object' => 0,
             'sortfield' => ['eventid'],
@@ -299,13 +329,21 @@ class ZabbixApiClient {
 
         $result = $this->call('problem.get', $params);
 
+        // problem.get cannot return host data directly, so resolve the trigger
+        // (objectid) → host(s) in one batched trigger.get, the same pattern used
+        // by getProblemContext().
+        $trigger_hosts = $this->resolveTriggerHosts($result);
+
         $problems = [];
 
         foreach ($result as $row) {
+            $triggerid = (string) ($row['objectid'] ?? '');
+
             $problems[] = [
                 'eventid' => $row['eventid'],
                 'name' => $row['name'] ?? '',
-                'severity' => $row['severity'] ?? '0'
+                'severity' => $row['severity'] ?? '0',
+                'hosts' => $trigger_hosts[$triggerid] ?? []
             ];
         }
 
@@ -313,12 +351,60 @@ class ZabbixApiClient {
     }
 
     /**
+     * Map trigger id → host list for a set of problem rows in a single
+     * trigger.get (problem.get does not support selectHosts).
+     */
+    private function resolveTriggerHosts(array $problem_rows): array {
+        $triggerids = [];
+        foreach ($problem_rows as $row) {
+            $tid = (string) ($row['objectid'] ?? '');
+            if ($tid !== '' && $tid !== '0') {
+                $triggerids[$tid] = true;
+            }
+        }
+
+        if (!$triggerids) {
+            return [];
+        }
+
+        $triggers = $this->call('trigger.get', [
+            'triggerids' => array_keys($triggerids),
+            'output' => ['triggerid'],
+            'selectHosts' => ['hostid', 'host', 'name']
+        ]);
+
+        $map = [];
+        foreach ($triggers as $tr) {
+            $tid = (string) ($tr['triggerid'] ?? '');
+            if ($tid === '') {
+                continue;
+            }
+
+            $hosts = [];
+            foreach (($tr['hosts'] ?? []) as $h) {
+                $host = (string) ($h['host'] ?? '');
+                if ($host === '') {
+                    continue;
+                }
+                $hosts[] = [
+                    'hostid' => (string) ($h['hostid'] ?? ''),
+                    'host' => $host,
+                    'name' => (string) ($h['name'] ?? $host)
+                ];
+            }
+
+            $map[$tid] = $hosts;
+        }
+
+        return $map;
+    }
+
+    /**
      * Get problems with extended filters for AI actions.
      */
     public function getProblemsFiltered(array $params = []): array {
         $api_params = [
-            'output' => ['eventid', 'name', 'severity', 'acknowledged', 'clock', 'r_eventid'],
-            'selectHosts' => ['hostid', 'host', 'name'],
+            'output' => ['eventid', 'name', 'severity', 'acknowledged', 'clock', 'r_eventid', 'objectid'],
             'selectTags' => ['tag', 'value'],
             'source' => 0,
             'object' => 0,
@@ -352,7 +438,16 @@ class ZabbixApiClient {
             $api_params['search'] = ['name' => (string) $params['search']];
         }
 
-        return $this->call('problem.get', $api_params);
+        $rows = $this->call('problem.get', $api_params);
+
+        // problem.get has no selectHosts; resolve trigger → host(s) separately.
+        $trigger_hosts = $this->resolveTriggerHosts($rows);
+        foreach ($rows as &$row) {
+            $row['hosts'] = $trigger_hosts[(string) ($row['objectid'] ?? '')] ?? [];
+        }
+        unset($row);
+
+        return $rows;
     }
 
     /**
@@ -2090,8 +2185,9 @@ class ZabbixApiClient {
      *
      * @param int $severity_min Lowest severity to include (0-5).
      * @param array $host_group_ids Optional restriction to host group IDs.
+     * @param array $host_ids Optional restriction to specific host IDs.
      */
-    public function getProblemsTimeline(int $since_unix, int $until_unix, int $severity_min = 0, array $host_group_ids = [], int $max_rows = 10000): array {
+    public function getProblemsTimeline(int $since_unix, int $until_unix, int $severity_min = 0, array $host_group_ids = [], int $max_rows = 10000, array $host_ids = []): array {
         $severity_min = max(0, min($severity_min, 5));
         $max_rows = max(100, min($max_rows, 50000));
 
@@ -2120,6 +2216,10 @@ class ZabbixApiClient {
 
             if ($host_group_ids) {
                 $params['groupids'] = array_values(array_map('strval', $host_group_ids));
+            }
+
+            if ($host_ids) {
+                $params['hostids'] = array_values(array_map('strval', $host_ids));
             }
 
             $batch = $this->call('event.get', $params);
