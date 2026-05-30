@@ -7,7 +7,8 @@ require_once __DIR__.'/../lib/bootstrap.php';
 use CController,
     CControllerResponseData,
     Modules\AI\Lib\AuditLogger,
-    Modules\AI\Lib\Config;
+    Modules\AI\Lib\Config,
+    Modules\AI\Lib\ZabbixActionExecutor;
 
 class SettingsView extends CController {
 
@@ -36,7 +37,8 @@ class SettingsView extends CController {
             'title' => _('AI settings'),
             'config' => $config,
             'log_summary' => AuditLogger::summary($config),
-            'permission_note' => AuditLogger::permissionNote()
+            'permission_note' => AuditLogger::permissionNote(),
+            'actions_catalog' => ZabbixActionExecutor::allTools()
         ]);
 
         $this->setResponse($response);

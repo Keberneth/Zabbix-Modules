@@ -81,22 +81,23 @@ When enabled, you can type natural language commands in the chat and the AI will
 
 #### Available tools
 
-| Tool | Type | Description |
-|------|------|-------------|
-| `get_problems` | Read | Get active problems with severity/acknowledged/host filters |
-| `get_unsupported_items` | Read | Get items in unsupported state, grouped by host |
-| `get_host_info` | Read | Host details: inventory, groups, interfaces, tags |
-| `get_host_uptime` | Read | Query system.uptime item value |
-| `get_host_os` | Read | Query OS via system.sw.os |
-| `get_triggers` | Read | Get triggers with filters |
-| `get_items` | Read | Get items with filters |
-| `create_maintenance` | Write | Create a maintenance window for host(s) |
-| `update_trigger` | Write | Modify trigger expression, status, priority |
-| `update_item` | Write | Modify item settings (status, interval, etc.) |
-| `create_user` | Write | Create a Zabbix user |
-| `acknowledge_problem` | Write | Acknowledge, close, or comment on a problem |
-| `add_hosts_to_group` | Write | Add hosts to a host group (optionally create the group) |
-| `create_host_group` | Write | Create a new host group |
+The AI exposes a large, growing set of tools (dozens of read and write actions) spanning problem
+triage, host/trigger/item diagnostics, maintenance, problem operations, audit-log search, reporting,
+notification visibility, configuration context, and NetBox inventory.
+
+Because this set changes as tools are added, it is **not** hand-maintained here — that list always
+drifts. The authoritative, always-current catalog is generated directly from the module code
+(`ZabbixActionExecutor::allTools()`):
+
+- **In the UI:** Settings → **Zabbix** tab → *Zabbix actions* → the **"?"** help box lists every tool,
+  grouped by read/write and by write-permission category, with live counts.
+- **Programmatically:** `GET zabbix.php?action=ai.actions.catalog` (Super Admin) returns the full
+  registry as JSON — names, descriptions, parameters, categories, and counts.
+
+Representative examples — reads: `get_problems`, `get_host_info`, `get_items`, `get_metric_summary`,
+`get_host_interfaces`, `get_trigger_dependencies`, `get_noisy_triggers`, `get_audit_log`,
+`get_service_impact`; writes: `create_maintenance`, `update_trigger`, `update_item`,
+`acknowledge_problem`, `change_problem_severity`, `suppress_problem`, `add_hosts_to_group`.
 
 #### Permission model
 

@@ -60,6 +60,7 @@ class Config {
                 'enabled' => true,
                 'shared_secret' => '',
                 'shared_secret_env' => '',
+                'require_secret' => false,
                 'add_problem_update' => true,
                 'problem_update_action' => 4,
                 'comment_chunk_size' => 1900,
@@ -132,9 +133,18 @@ class Config {
                     'triggers' => false,
                     'users' => false,
                     'problems' => false,
-                    'hostgroups' => false
+                    'hostgroups' => false,
+                    'hosts' => false,
+                    'interfaces' => false,
+                    'web' => false,
+                    'dashboards' => false,
+                    'templates' => false,
+                    'discovery' => false,
+                    'bulk' => false
                 ],
-                'require_super_admin_for_write' => true
+                'require_super_admin_for_write' => true,
+                'bulk_max_hosts' => 25,
+                'bulk_max_items' => 100
             ],
             'reports' => [
                 'enabled' => true,
@@ -383,6 +393,7 @@ class Config {
                 ? ''
                 : (($secret_input !== '') ? $secret_input : (string) ($current_webhook['shared_secret'] ?? '')),
             'shared_secret_env' => Util::cleanString($post['webhook']['shared_secret_env'] ?? '', 128),
+            'require_secret' => Util::truthy($post['webhook']['require_secret'] ?? false),
             'add_problem_update' => Util::truthy($post['webhook']['add_problem_update'] ?? false),
             'problem_update_action' => Util::cleanInt($post['webhook']['problem_update_action'] ?? 4, 4, 1, 256),
             'comment_chunk_size' => Util::cleanInt($post['webhook']['comment_chunk_size'] ?? 1900, 1900, 200, 2000),
@@ -465,9 +476,18 @@ class Config {
                 'triggers' => Util::truthy($za['write_permissions']['triggers'] ?? false),
                 'users' => Util::truthy($za['write_permissions']['users'] ?? false),
                 'problems' => Util::truthy($za['write_permissions']['problems'] ?? false),
-                'hostgroups' => Util::truthy($za['write_permissions']['hostgroups'] ?? false)
+                'hostgroups' => Util::truthy($za['write_permissions']['hostgroups'] ?? false),
+                'hosts' => Util::truthy($za['write_permissions']['hosts'] ?? false),
+                'interfaces' => Util::truthy($za['write_permissions']['interfaces'] ?? false),
+                'web' => Util::truthy($za['write_permissions']['web'] ?? false),
+                'dashboards' => Util::truthy($za['write_permissions']['dashboards'] ?? false),
+                'templates' => Util::truthy($za['write_permissions']['templates'] ?? false),
+                'discovery' => Util::truthy($za['write_permissions']['discovery'] ?? false),
+                'bulk' => Util::truthy($za['write_permissions']['bulk'] ?? false)
             ],
-            'require_super_admin_for_write' => Util::truthy($za['require_super_admin_for_write'] ?? true)
+            'require_super_admin_for_write' => Util::truthy($za['require_super_admin_for_write'] ?? true),
+            'bulk_max_hosts' => Util::cleanInt($za['bulk_max_hosts'] ?? 25, 25, 1, 1000),
+            'bulk_max_items' => Util::cleanInt($za['bulk_max_items'] ?? 100, 100, 1, 5000)
         ];
 
         $reports_post = $post['reports'] ?? [];

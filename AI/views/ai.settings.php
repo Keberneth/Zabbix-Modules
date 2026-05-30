@@ -11,6 +11,7 @@ $reference_links = is_array($config['reference_links'] ?? null) ? $config['refer
 $custom_rules = is_array($config['security']['custom_rules'] ?? null) ? $config['security']['custom_rules'] : [];
 $log_summary = $data['log_summary'] ?? [];
 $permission_note = (string) ($data['permission_note'] ?? '');
+$actions_catalog = is_array($data['actions_catalog'] ?? null) ? $data['actions_catalog'] : [];
 
 $settings_save_url = (new CUrl('zabbix.php'))
     ->setArgument('action', 'ai.settings.save')
@@ -521,6 +522,19 @@ ob_start();
                     <label class="ai-label"><?= $h(_('Comment chunk size')) ?></label>
                     <input class="ai-input" type="number" min="200" max="2000" name="webhook[comment_chunk_size]" value="<?= $h($config['webhook']['comment_chunk_size'] ?? 1900) ?>">
                 </div>
+                <div class="ai-span-3">
+                    <label class="ai-label">
+                        <?= $h(_('Require shared secret')) ?>
+                        <span class="ai-recommended-badge" title="<?= $h(_('Strongly recommended when the webhook is enabled.')) ?>"><?= $h(_('Recommended')) ?></span>
+                        <button type="button" class="ai-faq-toggle" data-faq-target="faq-webhook-require-secret" title="<?= $h(_('Help')) ?>">?</button>
+                    </label>
+                    <label class="ai-checkbox"><input type="checkbox" name="webhook[require_secret]" value="1" <?= !empty($config['webhook']['require_secret']) ? 'checked' : '' ?>> <?= $h(_('Reject webhook calls that have no valid shared secret')) ?></label>
+                    <div id="faq-webhook-require-secret" class="ai-faq-box">
+                        <p><strong><?= $h(_('Why this matters:')) ?></strong> <?= $h(_('The webhook endpoint intentionally has CSRF disabled and open permission checks so Zabbix (a machine, not a logged-in user) can call it. Authentication therefore relies entirely on the shared secret.')) ?></p>
+                        <p><?= $h(_('If the webhook is enabled but no shared secret is configured, the endpoint is UNAUTHENTICATED: any host that can reach the URL could trigger AI calls and — if "Post update back to event" is on — post AI-generated comments onto your Zabbix events.')) ?></p>
+                        <p><?= $h(_('When enabled, requests with a missing or invalid secret (including the case where no secret is configured at all) are rejected and each rejection is logged with the source IP. Leave it off only if you deliberately allow unauthenticated access (e.g. the endpoint is already protected by an upstream proxy or network ACL).')) ?></p>
+                    </div>
+                </div>
                 <div class="ai-span-2">
                     <label class="ai-label"><?= $h(_('Shared secret')) ?></label>
                     <input class="ai-input" type="password" name="webhook[shared_secret]" value="" placeholder="<?= !empty($config['webhook']['shared_secret_present']) ? $h(_('Leave blank to keep current secret')) : '' ?>">
@@ -827,8 +841,37 @@ sudo -u $WEB_GROUP sh -c 'echo t &gt; /var/log/zabbix-ai/.t \
             </div>
             <div id="faq-actions" class="ai-faq-box">
                 <p><strong>What is this?</strong> Lets the AI query and modify Zabbix through natural language. Ask things like "Show me all high-severity problems" or "Create a maintenance window for host db-01".</p>
-                <p><strong>Read actions</strong> (always safe): get_problems, get_unsupported_items, get_host_info, get_host_uptime, get_host_os, get_triggers, get_items</p>
-                <p><strong>Write actions</strong> (require confirmation): create_maintenance, update_trigger, update_item, create_user, acknowledge_problem</p>
+                <?php
+                $cat_reads = [];
+                $cat_writes = [];
+                foreach ($actions_catalog as $tool_name => $tool_def) {
+                    if ((($tool_def['rw'] ?? 'read')) === 'write') {
+                        $cat = (string) ($tool_def['category'] ?? '');
+                        $cat_writes[$cat !== '' ? $cat : 'other'][] = $tool_name;
+                    }
+                    else {
+                        $cat_reads[] = $tool_name;
+                    }
+                }
+                $write_total = 0;
+                foreach ($cat_writes as $names) { $write_total += count($names); }
+                ksort($cat_writes);
+                sort($cat_reads);
+                ?>
+                <p><strong><?= $h(_('Live action catalog')) ?>:</strong>
+                    <?= $h(sprintf(_('The AI currently has %1$d tools — %2$d read, %3$d write. This list is generated from the module code, so it stays accurate as tools are added.'), count($cat_reads) + $write_total, count($cat_reads), $write_total)) ?>
+                </p>
+                <?php if ($cat_reads): ?>
+                    <p><strong><?= $h(_('Read actions')) ?></strong> (<?= (int) count($cat_reads) ?>, <?= $h(_('always safe, no confirmation')) ?>): <?= $h(implode(', ', $cat_reads)) ?></p>
+                <?php endif; ?>
+                <?php if ($cat_writes): ?>
+                    <p><strong><?= $h(_('Write actions')) ?></strong> (<?= (int) $write_total ?>, <?= $h(_('require confirmation; each category is gated by the Write permissions below')) ?>):</p>
+                    <ul>
+                        <?php foreach ($cat_writes as $cat => $names): sort($names); ?>
+                            <li><strong><?= $h($cat) ?></strong>: <?= $h(implode(', ', $names)) ?></li>
+                        <?php endforeach; ?>
+                    </ul>
+                <?php endif; ?>
                 <p><strong>Settings:</strong></p>
                 <ul>
                     <li><strong>Mode</strong> &mdash; "Read only" = AI can query but not modify. "Read &amp; Write" = AI can also suggest modifications (always with user confirmation).</li>
@@ -861,9 +904,21 @@ sudo -u $WEB_GROUP sh -c 'echo t &gt; /var/log/zabbix-ai/.t \
             <div id="ai-write-permissions" style="<?= (($config['zabbix_actions']['mode'] ?? 'read') === 'readwrite') ? '' : 'display:none;' ?>">
                 <h3><?= $h(_('Write permissions')) ?></h3>
                 <div class="ai-check-grid">
-                    <?php foreach (['maintenance', 'items', 'triggers', 'users', 'problems', 'hostgroups'] as $perm): ?>
+                    <?php foreach (['maintenance', 'items', 'triggers', 'users', 'problems', 'hostgroups', 'hosts', 'interfaces', 'web', 'dashboards', 'templates', 'discovery', 'bulk'] as $perm): ?>
                         <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[write_permissions][<?= $h($perm) ?>]" value="1" <?= !empty($config['zabbix_actions']['write_permissions'][$perm]) ? 'checked' : '' ?>> <?= $h(ucfirst($perm)) ?></label>
                     <?php endforeach; ?>
+                </div>
+                <h3><?= $h(_('Bulk safety limits')) ?></h3>
+                <p class="ai-muted"><?= $h(_('Maximum number of objects a single bulk action may affect. Bulk previews and writes are capped to these values.')) ?></p>
+                <div class="ai-repeat-grid ai-settings-grid">
+                    <div>
+                        <label class="ai-label"><?= $h(_('Max hosts per bulk action')) ?></label>
+                        <input class="ai-input" type="number" min="1" max="1000" name="zabbix_actions[bulk_max_hosts]" value="<?= $h((int) ($config['zabbix_actions']['bulk_max_hosts'] ?? 25)) ?>">
+                    </div>
+                    <div>
+                        <label class="ai-label"><?= $h(_('Max items/triggers per bulk action')) ?></label>
+                        <input class="ai-input" type="number" min="1" max="5000" name="zabbix_actions[bulk_max_items]" value="<?= $h((int) ($config['zabbix_actions']['bulk_max_items'] ?? 100)) ?>">
+                    </div>
                 </div>
             </div>
         </section>

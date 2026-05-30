@@ -252,15 +252,39 @@ class WebhookHandler {
             $config['webhook']['shared_secret'] ?? '',
             $config['webhook']['shared_secret_env'] ?? ''
         );
+        $require = Util::truthy($config['webhook']['require_secret'] ?? false);
 
         if ($expected === '') {
+            // No secret configured. By default this passes, preserving existing
+            // behavior. When "require_secret" is enabled, reject instead so an
+            // enabled-but-unauthenticated webhook endpoint cannot be reached.
+            if ($require) {
+                self::logRejectedWebhook($config, 'secret_required_but_not_configured');
+                throw new RuntimeException('Webhook rejected: a shared secret is required but none is configured.');
+            }
             return;
         }
 
         $provided = trim((string) ($_SERVER['HTTP_X_AI_WEBHOOK_SECRET'] ?? $payload['shared_secret'] ?? ''));
         if ($provided === '' || !hash_equals($expected, $provided)) {
+            self::logRejectedWebhook($config, 'invalid_or_missing_secret');
             throw new RuntimeException('Invalid webhook shared secret.');
         }
+    }
+
+    /**
+     * Best-effort audit trail for rejected webhook requests. AuditLogger
+     * captures the source IP (remote_addr) automatically and never throws,
+     * so this cannot break webhook processing.
+     */
+    private static function logRejectedWebhook(array $config, string $reason): void {
+        AuditLogger::log($config, 'webhook', [
+            'event' => 'webhook.rejected',
+            'source' => 'ai.webhook',
+            'status' => 'error',
+            'message' => 'Webhook request rejected ('.$reason.').',
+            'meta' => ['reason' => $reason]
+        ]);
     }
 
     private static function providerInfo(?array $provider): array {

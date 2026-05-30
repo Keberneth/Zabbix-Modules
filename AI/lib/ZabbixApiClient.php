@@ -1093,6 +1093,13 @@ class ZabbixApiClient {
             }
         }
 
+        // Guard against empty/no-op updates (mirrors updateTrigger): if no
+        // allowed field survived the whitelist, reject instead of issuing a
+        // misleading "success" for an item.update that changes nothing.
+        if (count($update) <= 1) {
+            throw new RuntimeException('No valid fields to update. Allowed: '.implode(', ', $allowed));
+        }
+
         return $this->call('item.update', $update);
     }
 
@@ -2618,7 +2625,7 @@ class ZabbixApiClient {
         }
 
         $masked = static function ($m) {
-            if ((int) ($m['type'] ?? 0) === 1) {  // secret
+            if (in_array((int) ($m['type'] ?? 0), [1, 2], true)) {  // secret or vault
                 $m['value'] = '*****';
             }
             return $m;
@@ -2715,22 +2722,125 @@ class ZabbixApiClient {
     }
 
     /**
+     * Resolve a Zabbix username to its numeric user id. Returns null if no such
+     * user exists or the API user lacks permission to list users.
+     */
+    public function getUserIdByUsername(string $username): ?string {
+        $username = trim($username);
+
+        if ($username === '') {
+            return null;
+        }
+
+        try {
+            $result = $this->call('user.get', [
+                'output' => ['userid', 'username'],
+                'filter' => ['username' => [$username]]
+            ]);
+        }
+        catch (\Throwable $e) {
+            return null;
+        }
+
+        return isset($result[0]['userid']) ? (string) $result[0]['userid'] : null;
+    }
+
+    /**
+     * Search the audit log (auditlog.get). $filter may contain userid, action
+     * (int or array of ints), resourcetype, etc. Returns [] on error/permission
+     * denied — the Zabbix audit log is readable by Super Admin users only.
+     */
+    public function getAuditLog(array $filter = [], int $time_from = 0, int $time_till = 0, int $limit = 50): array {
+        $params = [
+            'output' => 'extend',
+            'sortfield' => 'clock',
+            'sortorder' => 'DESC',
+            'limit' => min(max($limit, 1), 500)
+        ];
+
+        $params = self::promoteAuditUserids($params, $filter);
+        if ($filter) {
+            $params['filter'] = $filter;
+        }
+        if ($time_from > 0) {
+            $params['time_from'] = $time_from;
+        }
+        if ($time_till > 0) {
+            $params['time_till'] = $time_till;
+        }
+
+        try {
+            return $this->call('auditlog.get', $params);
+        }
+        catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    /**
+     * Count audit-log entries matching $filter (auditlog.get with countOutput).
+     * Returns null on error/permission denied so callers can tell "0 matches"
+     * apart from "could not read the audit log".
+     */
+    public function countAuditLog(array $filter = [], int $time_from = 0, int $time_till = 0): ?int {
+        $params = ['countOutput' => true];
+
+        $params = self::promoteAuditUserids($params, $filter);
+        if ($filter) {
+            $params['filter'] = $filter;
+        }
+        if ($time_from > 0) {
+            $params['time_from'] = $time_from;
+        }
+        if ($time_till > 0) {
+            $params['time_till'] = $time_till;
+        }
+
+        try {
+            $result = $this->call('auditlog.get', $params);
+        }
+        catch (\Throwable $e) {
+            return null;
+        }
+
+        // countOutput returns a scalar count, which extractResult() wraps as a
+        // single-element array.
+        if (!isset($result[0]) || !is_scalar($result[0])) {
+            return null;
+        }
+
+        return (int) $result[0];
+    }
+
+    /**
+     * auditlog.get expects userid as the top-level "userids" parameter, not a
+     * filter field. Move it there and drop it from the filter.
+     */
+    private static function promoteAuditUserids(array $params, array &$filter): array {
+        if (isset($filter['userid'])) {
+            $uid = $filter['userid'];
+            unset($filter['userid']);
+            if ($uid !== '' && $uid !== []) {
+                $params['userids'] = is_array($uid) ? array_values($uid) : [$uid];
+            }
+        }
+        return $params;
+    }
+
+    /**
      * Suppress a problem event.
      *
      * @param string $eventid
      * @param int    $until_unix If 0, suppression is indefinite (until manual unsuppress).
      */
     public function suppressProblem(string $eventid, int $until_unix = 0): array {
-        $params = [
+        // Zabbix requires suppress_until with the suppress action bit; 0 means
+        // suppress indefinitely. Always send it so the API never rejects it.
+        return $this->call('event.acknowledge', [
             'eventids' => [$eventid],
-            'action' => 32
-        ];
-
-        if ($until_unix > 0) {
-            $params['suppress_until'] = $until_unix;
-        }
-
-        return $this->call('event.acknowledge', $params);
+            'action' => 32,
+            'suppress_until' => max(0, $until_unix)
+        ]);
     }
 
     /**
@@ -2754,16 +2864,1140 @@ class ZabbixApiClient {
     }
 
     /**
-     * Mark a problem event as a "symptom" of another cause event.
+     * Mark a problem event as a "symptom" of a specific cause event.
      *
-     * In Zabbix 7 the action bit alone changes the rank; the API picks the
-     * cause automatically based on existing event relations.
+     * Zabbix requires cause_eventid when changing an event's rank to symptom
+     * (event.acknowledge action bit 256); without it the API rejects the call.
      */
-    public function markProblemAsSymptom(string $eventid): array {
+    public function markProblemAsSymptom(string $eventid, string $cause_eventid): array {
         return $this->call('event.acknowledge', [
             'eventids' => [$eventid],
-            'action' => 256
+            'action' => 256,
+            'cause_eventid' => $cause_eventid
         ]);
+    }
+
+    /**
+     * Change a problem event's severity (event.acknowledge action bit 8).
+     *
+     * @param int $severity 0=Not classified .. 5=Disaster.
+     */
+    public function changeProblemSeverity(string $eventid, int $severity): array {
+        return $this->call('event.acknowledge', [
+            'eventids' => [$eventid],
+            'action' => 8,
+            'severity' => $severity
+        ]);
+    }
+
+    /**
+     * Un-acknowledge a problem event (event.acknowledge action bit 16).
+     */
+    public function unacknowledgeProblem(string $eventid): array {
+        return $this->call('event.acknowledge', [
+            'eventids' => [$eventid],
+            'action' => 16
+        ]);
+    }
+
+    // ── Phase 2 read diagnostics ──────────────────────────────────────────
+
+    /**
+     * List a host's interfaces (Agent/SNMP/IPMI/JMX) with availability/errors.
+     */
+    public function getHostInterfaces(string $hostname): array {
+        $hid = $this->getHostIdByName($hostname);
+        if ($hid === null) {
+            return [];
+        }
+
+        try {
+            return $this->call('hostinterface.get', [
+                'output' => 'extend',
+                'hostids' => [$hid]
+            ]);
+        }
+        catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    /**
+     * Summarise a numeric item over a window (last/min/max/avg/p95) using raw
+     * history for short windows and hourly trends for longer ones, so callers
+     * never have to ship raw history to the model. Returns ['error' => reason]
+     * on failure, otherwise an aggregate array.
+     */
+    public function getMetricSummary(string $hostname, string $item_search, int $period_hours = 24): array {
+        $hid = $this->getHostIdByName($hostname);
+        if ($hid === null) {
+            return ['error' => 'host_not_found'];
+        }
+
+        $params = [
+            'output' => ['itemid', 'name', 'key_', 'value_type', 'units', 'lastvalue', 'lastclock'],
+            'hostids' => [$hid],
+            'sortfield' => 'name',
+            'limit' => 10
+        ];
+        if ($item_search !== '') {
+            $params['search'] = ['name' => $item_search];
+        }
+
+        try {
+            $items = $this->call('item.get', $params);
+        }
+        catch (\Throwable $e) {
+            return ['error' => 'item_query_failed'];
+        }
+        if (!$items) {
+            return ['error' => 'no_item'];
+        }
+
+        $item = null;
+        foreach ($items as $it) {
+            if (in_array((int) ($it['value_type'] ?? -1), [0, 3], true)) {
+                $item = $it;
+                break;
+            }
+        }
+        if ($item === null) {
+            return [
+                'error' => 'not_numeric',
+                'candidates' => array_slice(array_map(static function($i) { return (string) ($i['name'] ?? ''); }, $items), 0, 10)
+            ];
+        }
+
+        $value_type = (int) $item['value_type'];
+        $period_hours = max(1, min($period_hours, 8760));
+        $time_from = time() - $period_hours * 3600;
+
+        if ($period_hours <= 12) {
+            try {
+                $history = $this->call('history.get', [
+                    'itemids' => [$item['itemid']],
+                    'history' => $value_type,
+                    'time_from' => $time_from,
+                    'output' => ['clock', 'value'],
+                    'sortfield' => 'clock',
+                    'sortorder' => 'ASC',
+                    'limit' => 50000
+                ]);
+            }
+            catch (\Throwable $e) {
+                $history = [];
+            }
+
+            $nums = [];
+            foreach ($history as $h) {
+                $nums[] = (float) ($h['value'] ?? 0);
+            }
+            if ($nums) {
+                $first = $nums[0];
+                $last = $nums[count($nums) - 1];
+                sort($nums);
+                $n = count($nums);
+                return [
+                    'item' => $item,
+                    'source' => 'history',
+                    'period_hours' => $period_hours,
+                    'count' => $n,
+                    'min' => $nums[0],
+                    'max' => $nums[$n - 1],
+                    'avg' => array_sum($nums) / $n,
+                    'p95' => $nums[(int) floor(0.95 * ($n - 1))],
+                    'first' => $first,
+                    'last' => $last,
+                    'units' => (string) ($item['units'] ?? '')
+                ];
+            }
+            // fall through to trends if no raw history is kept
+        }
+
+        try {
+            $trends = $this->call('trend.get', [
+                'itemids' => [$item['itemid']],
+                'time_from' => $time_from,
+                'output' => ['clock', 'num', 'value_min', 'value_avg', 'value_max'],
+                'limit' => 9000
+            ]);
+        }
+        catch (\Throwable $e) {
+            $trends = [];
+        }
+
+        if (!$trends) {
+            return ['error' => 'no_data', 'item' => $item, 'period_hours' => $period_hours];
+        }
+
+        $min = null;
+        $max = null;
+        $sum = 0.0;
+        $weight = 0;
+        $first = null;
+        $last = null;
+        $first_clock = PHP_INT_MAX;
+        $last_clock = -1;
+        foreach ($trends as $t) {
+            $vmin = (float) ($t['value_min'] ?? 0);
+            $vmax = (float) ($t['value_max'] ?? 0);
+            $vavg = (float) ($t['value_avg'] ?? 0);
+            $num = max(1, (int) ($t['num'] ?? 1));
+            $clock = (int) ($t['clock'] ?? 0);
+            $min = ($min === null) ? $vmin : min($min, $vmin);
+            $max = ($max === null) ? $vmax : max($max, $vmax);
+            $sum += $vavg * $num;
+            $weight += $num;
+            if ($clock < $first_clock) { $first_clock = $clock; $first = $vavg; }
+            if ($clock > $last_clock) { $last_clock = $clock; $last = $vavg; }
+        }
+
+        return [
+            'item' => $item,
+            'source' => 'trends',
+            'period_hours' => $period_hours,
+            'count' => count($trends),
+            'min' => $min,
+            'max' => $max,
+            'avg' => $weight > 0 ? $sum / $weight : 0,
+            'first' => $first,
+            'last' => $last,
+            'units' => (string) ($item['units'] ?? '')
+        ];
+    }
+
+    /**
+     * Triggers with their dependencies (for root-cause vs symptom analysis).
+     */
+    public function getTriggerDependencies(string $hostname = '', string $search = ''): array {
+        $params = [
+            'output' => ['triggerid', 'description', 'status', 'value', 'priority'],
+            'selectDependencies' => ['triggerid', 'description'],
+            'selectHosts' => ['host'],
+            'expandDescription' => true,
+            'sortfield' => 'description',
+            'limit' => 300
+        ];
+        if ($hostname !== '') {
+            $hid = $this->getHostIdByName($hostname);
+            if ($hid === null) {
+                return [];
+            }
+            $params['hostids'] = [$hid];
+        }
+        if ($search !== '') {
+            $params['search'] = ['description' => $search];
+        }
+
+        try {
+            return $this->call('trigger.get', $params);
+        }
+        catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    /**
+     * Web monitoring scenarios (HTTP checks) with their steps and status.
+     */
+    public function getWebScenarios(string $hostname = ''): array {
+        $params = [
+            'output' => ['httptestid', 'name', 'delay', 'status'],
+            'selectSteps' => ['no', 'name', 'url', 'status_codes'],
+            'selectHosts' => ['host'],
+            'sortfield' => 'name',
+            'limit' => 200
+        ];
+        if ($hostname !== '') {
+            $hid = $this->getHostIdByName($hostname);
+            if ($hid === null) {
+                return [];
+            }
+            $params['hostids'] = [$hid];
+        }
+
+        try {
+            return $this->call('httptest.get', $params);
+        }
+        catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    /**
+     * Triggers that fired the most problem events over a window (noisiest).
+     */
+    public function getNoisyTriggers(int $period_hours = 24, int $limit = 15): array {
+        $time_from = time() - max(1, $period_hours) * 3600;
+
+        try {
+            $events = $this->call('event.get', [
+                'output' => ['eventid', 'objectid', 'name'],
+                'source' => 0,
+                'object' => 0,
+                'value' => 1,
+                'time_from' => $time_from,
+                'sortfield' => ['clock'],
+                'sortorder' => 'DESC',
+                'limit' => 10000
+            ]);
+        }
+        catch (\Throwable $e) {
+            return [];
+        }
+
+        $counts = [];
+        $names = [];
+        foreach ($events as $ev) {
+            $tid = (string) ($ev['objectid'] ?? '');
+            if ($tid === '') {
+                continue;
+            }
+            $counts[$tid] = ($counts[$tid] ?? 0) + 1;
+            if (!isset($names[$tid])) {
+                $names[$tid] = (string) ($ev['name'] ?? '');
+            }
+        }
+        if (!$counts) {
+            return [];
+        }
+
+        arsort($counts);
+        $top = array_slice($counts, 0, max(1, $limit), true);
+
+        $hostmap = [];
+        try {
+            $triggers = $this->call('trigger.get', [
+                'triggerids' => array_keys($top),
+                'output' => ['triggerid'],
+                'selectHosts' => ['host']
+            ]);
+            foreach ($triggers as $t) {
+                $hostmap[(string) $t['triggerid']] = (string) ($t['hosts'][0]['host'] ?? '');
+            }
+        }
+        catch (\Throwable $e) {
+        }
+
+        $rows = [];
+        foreach ($top as $tid => $count) {
+            $rows[] = [
+                'triggerid' => (string) $tid,
+                'name' => $names[$tid] ?? '',
+                'host' => $hostmap[$tid] ?? '',
+                'count' => $count
+            ];
+        }
+        return $rows;
+    }
+
+    /**
+     * SLA definitions with their target SLO and service tags.
+     */
+    public function getSlaOverview(int $limit = 50): array {
+        try {
+            return $this->call('sla.get', [
+                'output' => ['slaid', 'name', 'period', 'slo', 'status', 'timezone'],
+                'selectServiceTags' => ['tag', 'operator', 'value'],
+                'sortfield' => 'name',
+                'limit' => min(max($limit, 1), 200)
+            ]);
+        }
+        catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    // ── Phase 3 controlled host administration (writes) ───────────────────
+
+    /**
+     * Enable (status 0) or disable (status 1) monitoring for a host.
+     */
+    public function setHostStatus(string $hostname, int $status): array {
+        $hid = $this->getHostIdByName($hostname);
+        if ($hid === null) {
+            throw new RuntimeException('Host "'.$hostname.'" not found.');
+        }
+
+        return $this->call('host.update', [
+            'hostid' => $hid,
+            'status' => ($status === 1) ? 1 : 0
+        ]);
+    }
+
+    /**
+     * Add, remove, or replace a host's tags. For add/remove the current tag set
+     * is read first and merged, so other tags are preserved.
+     */
+    public function updateHostTags(string $hostname, string $operation, array $tags): array {
+        $hid = $this->getHostIdByName($hostname);
+        if ($hid === null) {
+            throw new RuntimeException('Host "'.$hostname.'" not found.');
+        }
+
+        $input = [];
+        foreach ($tags as $t) {
+            if (!is_array($t)) {
+                continue;
+            }
+            $name = trim((string) ($t['tag'] ?? ''));
+            if ($name === '') {
+                continue;
+            }
+            $input[] = ['tag' => $name, 'value' => (string) ($t['value'] ?? '')];
+        }
+        if (!$input) {
+            throw new RuntimeException('No valid tags provided (each tag needs a "tag" name).');
+        }
+
+        $key = static function(array $t): string {
+            return ($t['tag'] ?? '').'='.($t['value'] ?? '');
+        };
+
+        if ($operation === 'replace') {
+            $final = $input;
+        }
+        else {
+            $current = $this->call('host.get', [
+                'hostids' => [$hid],
+                'output' => ['hostid'],
+                'selectTags' => ['tag', 'value']
+            ]);
+            $existing = $current[0]['tags'] ?? [];
+
+            if ($operation === 'remove') {
+                $remove = [];
+                foreach ($input as $t) {
+                    $remove[$key($t)] = true;
+                }
+                $final = [];
+                foreach ($existing as $t) {
+                    $norm = ['tag' => (string) ($t['tag'] ?? ''), 'value' => (string) ($t['value'] ?? '')];
+                    if (!isset($remove[$key($norm)])) {
+                        $final[] = $norm;
+                    }
+                }
+            }
+            else {
+                // add (default): keep existing, append new ones not already present.
+                $final = [];
+                $seen = [];
+                foreach ($existing as $t) {
+                    $norm = ['tag' => (string) ($t['tag'] ?? ''), 'value' => (string) ($t['value'] ?? '')];
+                    $final[] = $norm;
+                    $seen[$key($norm)] = true;
+                }
+                foreach ($input as $t) {
+                    if (!isset($seen[$key($t)])) {
+                        $final[] = $t;
+                        $seen[$key($t)] = true;
+                    }
+                }
+            }
+        }
+
+        return $this->call('host.update', [
+            'hostid' => $hid,
+            'tags' => $final
+        ]);
+    }
+
+    /**
+     * Update host inventory fields. Sets inventory to manual mode so the values
+     * persist. $fields is a map of inventory field name => value.
+     */
+    public function updateHostInventory(string $hostname, array $fields): array {
+        $hid = $this->getHostIdByName($hostname);
+        if ($hid === null) {
+            throw new RuntimeException('Host "'.$hostname.'" not found.');
+        }
+
+        $inventory = [];
+        foreach ($fields as $k => $v) {
+            $k = trim((string) $k);
+            if ($k === '') {
+                continue;
+            }
+            $inventory[$k] = (string) $v;
+        }
+        if (!$inventory) {
+            throw new RuntimeException('No inventory fields provided.');
+        }
+
+        return $this->call('host.update', [
+            'hostid' => $hid,
+            'inventory_mode' => 0,
+            'inventory' => $inventory
+        ]);
+    }
+
+    /**
+     * Create or update host-level user macros via usermacro.create/update, so
+     * other macros (including secret ones, whose values the API never returns)
+     * are never touched or blanked. Returns metadata only — never macro values.
+     */
+    public function updateHostMacros(string $hostname, array $macros): array {
+        $hid = $this->getHostIdByName($hostname);
+        if ($hid === null) {
+            throw new RuntimeException('Host "'.$hostname.'" not found.');
+        }
+
+        $existing = $this->call('usermacro.get', [
+            'hostids' => [$hid],
+            'output' => ['hostmacroid', 'macro', 'type']
+        ]);
+        $by_macro = [];
+        foreach ($existing as $m) {
+            $by_macro[(string) ($m['macro'] ?? '')] = $m;
+        }
+
+        $created = [];
+        $updated = [];
+        foreach ($macros as $m) {
+            if (!is_array($m)) {
+                continue;
+            }
+            $macro = trim((string) ($m['macro'] ?? ''));
+            if ($macro === '') {
+                continue;
+            }
+            $value = (string) ($m['value'] ?? '');
+            $type = isset($m['type']) ? (int) $m['type'] : 0; // 0=text, 1=secret, 2=vault
+
+            if (isset($by_macro[$macro])) {
+                $this->call('usermacro.update', [
+                    'hostmacroid' => $by_macro[$macro]['hostmacroid'],
+                    'value' => $value,
+                    'type' => $type
+                ]);
+                $updated[] = ['macro' => $macro, 'type' => $type];
+            }
+            else {
+                $this->call('usermacro.create', [
+                    'hostid' => $hid,
+                    'macro' => $macro,
+                    'value' => $value,
+                    'type' => $type
+                ]);
+                $created[] = ['macro' => $macro, 'type' => $type];
+            }
+        }
+
+        if (!$created && !$updated) {
+            throw new RuntimeException('No valid macros provided (each needs a "macro" name like {$NAME}).');
+        }
+
+        return ['created' => $created, 'updated' => $updated];
+    }
+
+    /**
+     * Update a host interface's IP / DNS / port / useip. Requires interfaceid
+     * (find it with getHostInterfaces). Guards against empty updates.
+     */
+    public function updateHostInterface(string $interfaceid, array $changes): array {
+        $allowed = ['ip', 'dns', 'port', 'useip'];
+        $update = ['interfaceid' => $interfaceid];
+        foreach ($changes as $k => $v) {
+            if (in_array($k, $allowed, true)) {
+                $update[$k] = ($k === 'useip') ? (string) ((int) $v) : (string) $v;
+            }
+        }
+        if (count($update) <= 1) {
+            throw new RuntimeException('No valid interface fields to update. Allowed: '.implode(', ', $allowed));
+        }
+
+        return $this->call('hostinterface.update', $update);
+    }
+
+    // ── Phase 3b + 4: web, dashboards, templates, discovery (writes) ──────
+
+    /**
+     * Create a single-step web monitoring scenario (HTTP check) on a host.
+     */
+    public function createWebScenario(string $hostname, string $name, string $url, array $opts): array {
+        $hid = $this->getHostIdByName($hostname);
+        if ($hid === null) {
+            throw new RuntimeException('Host "'.$hostname.'" not found.');
+        }
+
+        if (!preg_match('#^https?://#i', $url)) {
+            throw new RuntimeException('Web scenario URL must start with http:// or https://.');
+        }
+        $delay = (string) ($opts['delay'] ?? '60s');
+        if (!preg_match('/^\d+[smhd]?$/', $delay)) {
+            throw new RuntimeException('Invalid delay format. Use e.g. 30s, 60s, 5m, 1h.');
+        }
+        $status_codes = (string) ($opts['status_codes'] ?? '200');
+        if (!preg_match('/^\d{3}(,\d{3})*$/', $status_codes)) {
+            throw new RuntimeException('Invalid HTTP status code list. Use e.g. 200 or 200,301.');
+        }
+
+        $params = [
+            'name' => $name,
+            'hostid' => $hid,
+            'delay' => $delay,
+            'steps' => [[
+                'name' => (string) ($opts['step_name'] ?? 'Check'),
+                'url' => $url,
+                'no' => 1,
+                'status_codes' => $status_codes
+            ]]
+        ];
+
+        if (!empty($opts['tags']) && is_array($opts['tags'])) {
+            $tags = [];
+            foreach ($opts['tags'] as $t) {
+                if (is_array($t) && trim((string) ($t['tag'] ?? '')) !== '') {
+                    $tags[] = ['tag' => (string) $t['tag'], 'value' => (string) ($t['value'] ?? '')];
+                }
+            }
+            if ($tags) {
+                $params['tags'] = $tags;
+            }
+        }
+
+        return $this->call('httptest.create', $params);
+    }
+
+    /**
+     * Create a private dashboard with a single Problems widget. Filters can be
+     * refined in the UI afterwards.
+     */
+    public function createProblemDashboard(string $name): array {
+        return $this->call('dashboard.create', [
+            'name' => $name,
+            'private' => 1,
+            'pages' => [[
+                'widgets' => [[
+                    'type' => 'problems',
+                    'x' => 0,
+                    'y' => 0,
+                    'width' => 24,
+                    'height' => 12,
+                    'view_mode' => 0,
+                    'fields' => []
+                ]]
+            ]]
+        ]);
+    }
+
+    /**
+     * Link a template to an EXPLICIT list of hosts (host.massadd — existing
+     * templates are preserved). Enforces $max_hosts; throws if a host/template
+     * cannot be resolved.
+     */
+    public function linkTemplateToHosts(string $template_name, array $hostnames, int $max_hosts): array {
+        $tid = $this->getTemplateIdByName($template_name);
+        if ($tid === null) {
+            throw new RuntimeException('Template "'.$template_name.'" not found.');
+        }
+
+        $hosts = [];
+        $resolved = [];
+        foreach ($hostnames as $hn) {
+            $hn = trim((string) $hn);
+            if ($hn === '') {
+                continue;
+            }
+            $hid = $this->getHostIdByName($hn);
+            if ($hid === null) {
+                throw new RuntimeException('Host "'.$hn.'" not found.');
+            }
+            $hosts[] = ['hostid' => $hid];
+            $resolved[] = $hn;
+        }
+        if (!$hosts) {
+            throw new RuntimeException('No valid hosts provided.');
+        }
+        if (count($hosts) > $max_hosts) {
+            throw new RuntimeException('Refusing to modify '.count($hosts).' hosts (limit '.$max_hosts.'). Narrow the host list or raise bulk_max_hosts.');
+        }
+
+        $this->call('host.massadd', [
+            'hosts' => $hosts,
+            'templates' => [['templateid' => $tid]]
+        ]);
+
+        return ['template' => $template_name, 'hosts' => $resolved];
+    }
+
+    /**
+     * Unlink a template from an EXPLICIT list of hosts (host.massremove). When
+     * $clear is true, also removes the items/triggers the template created.
+     */
+    public function unlinkTemplateFromHosts(string $template_name, array $hostnames, bool $clear, int $max_hosts): array {
+        $tid = $this->getTemplateIdByName($template_name);
+        if ($tid === null) {
+            throw new RuntimeException('Template "'.$template_name.'" not found.');
+        }
+
+        $hostids = [];
+        $resolved = [];
+        foreach ($hostnames as $hn) {
+            $hn = trim((string) $hn);
+            if ($hn === '') {
+                continue;
+            }
+            $hid = $this->getHostIdByName($hn);
+            if ($hid === null) {
+                throw new RuntimeException('Host "'.$hn.'" not found.');
+            }
+            $hostids[] = $hid;
+            $resolved[] = $hn;
+        }
+        if (!$hostids) {
+            throw new RuntimeException('No valid hosts provided.');
+        }
+        if (count($hostids) > $max_hosts) {
+            throw new RuntimeException('Refusing to modify '.count($hostids).' hosts (limit '.$max_hosts.'). Narrow the host list or raise bulk_max_hosts.');
+        }
+
+        $params = ['hostids' => $hostids];
+        if ($clear) {
+            $params['templateids_clear'] = [$tid];
+        }
+        else {
+            $params['templateids'] = [$tid];
+        }
+
+        $this->call('host.massremove', $params);
+
+        return ['template' => $template_name, 'hosts' => $resolved, 'cleared' => $clear];
+    }
+
+    /**
+     * Enable (status 0) or disable (status 1) a low-level discovery rule.
+     */
+    public function setLldRuleStatus(string $lld_rule_id, int $status): array {
+        return $this->call('discoveryrule.update', [
+            'itemid' => $lld_rule_id,
+            'status' => ($status === 1) ? 1 : 0
+        ]);
+    }
+
+    /**
+     * Create a new host. At least one group is required; missing groups are
+     * created. Templates are linked if provided (must already exist). An agent
+     * interface is added only when an IP or DNS is given (otherwise agentless,
+     * which is fine for web/URL monitoring or template-only hosts).
+     */
+    public function createHost(string $hostname, array $group_names, array $opts): array {
+        $groupids = [];
+        foreach ($group_names as $gn) {
+            $gn = trim((string) $gn);
+            if ($gn === '') {
+                continue;
+            }
+            $existing = $this->call('hostgroup.get', [
+                'output' => ['groupid'],
+                'filter' => ['name' => [$gn]]
+            ]);
+            $gid = $existing[0]['groupid'] ?? null;
+            if ($gid === null) {
+                if (empty($opts['create_missing_groups'])) {
+                    throw new RuntimeException('Host group "'.$gn.'" does not exist. Create it first (create_host_group) or set create_missing_groups=true.');
+                }
+                $res = $this->call('hostgroup.create', ['name' => $gn]);
+                $gid = $res['groupids'][0] ?? null;
+            }
+            if ($gid !== null) {
+                $groupids[] = ['groupid' => (string) $gid];
+            }
+        }
+        if (!$groupids) {
+            throw new RuntimeException('At least one valid host group is required.');
+        }
+
+        $params = ['host' => $hostname, 'groups' => $groupids];
+
+        if (trim((string) ($opts['visible_name'] ?? '')) !== '') {
+            $params['name'] = (string) $opts['visible_name'];
+        }
+        if (trim((string) ($opts['description'] ?? '')) !== '') {
+            $params['description'] = (string) $opts['description'];
+        }
+
+        if (!empty($opts['templates']) && is_array($opts['templates'])) {
+            $tids = [];
+            foreach ($opts['templates'] as $tn) {
+                $tn = trim((string) $tn);
+                if ($tn === '') {
+                    continue;
+                }
+                $tid = $this->getTemplateIdByName($tn);
+                if ($tid === null) {
+                    throw new RuntimeException('Template "'.$tn.'" not found.');
+                }
+                $tids[] = ['templateid' => $tid];
+            }
+            if ($tids) {
+                $params['templates'] = $tids;
+            }
+        }
+
+        $ip = trim((string) ($opts['interface_ip'] ?? ''));
+        $dns = trim((string) ($opts['interface_dns'] ?? ''));
+        if ($ip !== '' || $dns !== '') {
+            $params['interfaces'] = [[
+                'type' => 1,
+                'main' => 1,
+                'useip' => ($ip !== '') ? 1 : 0,
+                'ip' => $ip,
+                'dns' => $dns,
+                'port' => (string) ($opts['interface_port'] ?? '10050')
+            ]];
+        }
+
+        return $this->call('host.create', $params);
+    }
+
+    /**
+     * Create a trigger from a Zabbix trigger expression.
+     */
+    public function createTrigger(string $description, string $expression, array $opts): array {
+        $params = [
+            'description' => $description,
+            'expression' => $expression
+        ];
+        if (isset($opts['priority'])) {
+            $params['priority'] = (int) $opts['priority'];
+        }
+        if (!empty($opts['comments'])) {
+            $params['comments'] = (string) $opts['comments'];
+        }
+        if (!empty($opts['recovery_expression'])) {
+            $params['recovery_mode'] = 1;
+            $params['recovery_expression'] = (string) $opts['recovery_expression'];
+        }
+
+        return $this->call('trigger.create', $params);
+    }
+
+    /**
+     * Show which hosts are assigned to each proxy. Fetches all proxies (there
+     * are few) and filters by name in PHP so it works across the Zabbix 6.x
+     * ("host" field) / 7.0 ("name" field) proxy API difference.
+     */
+    public function getProxyAssignedHosts(string $proxy_name = ''): array {
+        try {
+            $proxies = $this->call('proxy.get', [
+                'output' => 'extend',
+                'selectHosts' => ['hostid', 'host', 'name', 'status']
+            ]);
+        }
+        catch (\Throwable $e) {
+            return [];
+        }
+
+        $proxy_name = trim($proxy_name);
+        if ($proxy_name === '') {
+            return $proxies;
+        }
+
+        $needle = strtolower($proxy_name);
+        $out = [];
+        foreach ($proxies as $p) {
+            $pname = strtolower((string) ($p['name'] ?? ($p['host'] ?? '')));
+            if ($pname === $needle || strpos($pname, $needle) !== false) {
+                $out[] = $p;
+            }
+        }
+        return $out;
+    }
+
+    // ── Phase 4 bulk: preview queries + capped bulk executors ─────────────
+
+    private function groupIdByName(string $name): ?string {
+        $name = trim($name);
+        if ($name === '') {
+            return null;
+        }
+        try {
+            $r = $this->call('hostgroup.get', [
+                'output' => ['groupid'],
+                'filter' => ['name' => [$name]]
+            ]);
+        }
+        catch (\Throwable $e) {
+            return null;
+        }
+        return $r[0]['groupid'] ?? null;
+    }
+
+    /**
+     * Find ENABLED triggers whose (expanded) name matches a pattern, optionally
+     * within a host group. Returns [{triggerid, host, description}].
+     */
+    public function findEnabledTriggersByName(string $name_pattern, string $group_name, int $limit): array {
+        $params = [
+            'output' => ['triggerid', 'description', 'status'],
+            'selectHosts' => ['host'],
+            'search' => ['description' => $name_pattern],
+            'filter' => ['status' => 0],
+            'expandDescription' => true,
+            'sortfield' => 'description',
+            'limit' => max(1, $limit)
+        ];
+        if ($group_name !== '') {
+            $gid = $this->groupIdByName($group_name);
+            if ($gid === null) {
+                return [];
+            }
+            $params['groupids'] = [$gid];
+        }
+
+        try {
+            $rows = $this->call('trigger.get', $params);
+        }
+        catch (\Throwable $e) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $t) {
+            $out[] = [
+                'triggerid' => (string) ($t['triggerid'] ?? ''),
+                'host' => (string) ($t['hosts'][0]['host'] ?? ''),
+                'description' => (string) ($t['description'] ?? '')
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Find ENABLED but UNSUPPORTED items whose error message contains a pattern,
+     * optionally within a host group. Returns [{itemid, host, name, error}].
+     */
+    public function findUnsupportedItemsByError(string $error_pattern, string $group_name, int $limit): array {
+        $params = [
+            'output' => ['itemid', 'name', 'key_', 'error', 'status', 'state'],
+            'selectHosts' => ['host'],
+            'filter' => ['state' => 1, 'status' => 0],
+            'sortfield' => 'name',
+            'limit' => 2000
+        ];
+        if ($group_name !== '') {
+            $gid = $this->groupIdByName($group_name);
+            if ($gid === null) {
+                return [];
+            }
+            $params['groupids'] = [$gid];
+        }
+
+        try {
+            $rows = $this->call('item.get', $params);
+        }
+        catch (\Throwable $e) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $it) {
+            $err = (string) ($it['error'] ?? '');
+            if ($error_pattern !== '' && stripos($err, $error_pattern) === false) {
+                continue;
+            }
+            $out[] = [
+                'itemid' => (string) ($it['itemid'] ?? ''),
+                'host' => (string) ($it['hosts'][0]['host'] ?? ''),
+                'name' => (string) ($it['name'] ?? ''),
+                'error' => $err
+            ];
+            if (count($out) >= $limit) {
+                break;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Find DISABLED items matching a name search, optionally within a host
+     * group. Returns [{itemid, host, name}].
+     */
+    public function findDisabledItems(string $item_search, string $group_name, int $limit): array {
+        $params = [
+            'output' => ['itemid', 'name', 'key_', 'status'],
+            'selectHosts' => ['host'],
+            'filter' => ['status' => 1],
+            'sortfield' => 'name',
+            'limit' => max(1, $limit)
+        ];
+        if ($item_search !== '') {
+            $params['search'] = ['name' => $item_search];
+        }
+        if ($group_name !== '') {
+            $gid = $this->groupIdByName($group_name);
+            if ($gid === null) {
+                return [];
+            }
+            $params['groupids'] = [$gid];
+        }
+
+        try {
+            $rows = $this->call('item.get', $params);
+        }
+        catch (\Throwable $e) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $it) {
+            $out[] = [
+                'itemid' => (string) ($it['itemid'] ?? ''),
+                'host' => (string) ($it['hosts'][0]['host'] ?? ''),
+                'name' => (string) ($it['name'] ?? '')
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * List hosts in a group. Returns [{hostid, host}].
+     */
+    public function findHostsInGroup(string $group_name, int $limit): array {
+        $gid = $this->groupIdByName($group_name);
+        if ($gid === null) {
+            return [];
+        }
+        try {
+            $rows = $this->call('host.get', [
+                'output' => ['hostid', 'host'],
+                'groupids' => [$gid],
+                'sortfield' => 'host',
+                'limit' => max(1, $limit)
+            ]);
+        }
+        catch (\Throwable $e) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $h) {
+            $out[] = ['hostid' => (string) ($h['hostid'] ?? ''), 'host' => (string) ($h['host'] ?? '')];
+        }
+        return $out;
+    }
+
+    /**
+     * Bulk-set trigger status (0=enabled, 1=disabled) for an explicit id list.
+     */
+    public function bulkSetTriggerStatus(array $trigger_ids, int $status): void {
+        $updates = [];
+        foreach ($trigger_ids as $id) {
+            $id = trim((string) $id);
+            if ($id !== '') {
+                $updates[] = ['triggerid' => $id, 'status' => ($status === 1) ? 1 : 0];
+            }
+        }
+        if (!$updates) {
+            throw new RuntimeException('No trigger IDs to update.');
+        }
+        $this->call('trigger.update', $updates);
+    }
+
+    /**
+     * Bulk-set item status (0=enabled, 1=disabled) for an explicit id list.
+     */
+    public function bulkSetItemStatus(array $item_ids, int $status): void {
+        $updates = [];
+        foreach ($item_ids as $id) {
+            $id = trim((string) $id);
+            if ($id !== '') {
+                $updates[] = ['itemid' => $id, 'status' => ($status === 1) ? 1 : 0];
+            }
+        }
+        if (!$updates) {
+            throw new RuntimeException('No item IDs to update.');
+        }
+        $this->call('item.update', $updates);
+    }
+
+    /**
+     * Add a tag to each host in an explicit id list (read-modify-write per host
+     * so existing tags are preserved; skips hosts that already have it).
+     */
+    public function bulkAddTagToHosts(array $host_ids, string $tag, string $value): void {
+        $tag = trim($tag);
+        if ($tag === '') {
+            throw new RuntimeException('Tag name is required.');
+        }
+
+        foreach ($host_ids as $hid) {
+            $hid = trim((string) $hid);
+            if ($hid === '') {
+                continue;
+            }
+
+            $cur = $this->call('host.get', [
+                'hostids' => [$hid],
+                'output' => ['hostid'],
+                'selectTags' => ['tag', 'value']
+            ]);
+            $existing = $cur[0]['tags'] ?? [];
+
+            $final = [];
+            $present = false;
+            foreach ($existing as $t) {
+                $tname = (string) ($t['tag'] ?? '');
+                $tval = (string) ($t['value'] ?? '');
+                $final[] = ['tag' => $tname, 'value' => $tval];
+                if ($tname === $tag && $tval === $value) {
+                    $present = true;
+                }
+            }
+            if (!$present) {
+                $final[] = ['tag' => $tag, 'value' => $value];
+            }
+
+            $this->call('host.update', ['hostid' => $hid, 'tags' => $final]);
+        }
+    }
+
+    /**
+     * Link a template to an explicit list of host IDs (host.massadd).
+     */
+    public function bulkLinkTemplateByHostIds(array $host_ids, string $templateid): void {
+        $templateid = trim($templateid);
+        $hosts = [];
+        foreach ($host_ids as $id) {
+            $id = trim((string) $id);
+            if ($id !== '') {
+                $hosts[] = ['hostid' => $id];
+            }
+        }
+        if (!$hosts || $templateid === '') {
+            throw new RuntimeException('No hosts or template to link.');
+        }
+        $this->call('host.massadd', [
+            'hosts' => $hosts,
+            'templates' => [['templateid' => $templateid]]
+        ]);
+    }
+
+    /**
+     * Unlink a template from an explicit list of host IDs (host.massremove).
+     * When $clear is true, also removes the items/triggers it created.
+     */
+    public function bulkUnlinkTemplateByHostIds(array $host_ids, string $templateid, bool $clear): void {
+        $templateid = trim($templateid);
+        $ids = [];
+        foreach ($host_ids as $id) {
+            $id = trim((string) $id);
+            if ($id !== '') {
+                $ids[] = $id;
+            }
+        }
+        if (!$ids || $templateid === '') {
+            throw new RuntimeException('No hosts or template to unlink.');
+        }
+        $params = ['hostids' => $ids];
+        if ($clear) {
+            $params['templateids_clear'] = [$templateid];
+        }
+        else {
+            $params['templateids'] = [$templateid];
+        }
+        $this->call('host.massremove', $params);
     }
 
     private static function canUseFrontendApi(): bool {
@@ -2795,18 +4029,23 @@ class ZabbixApiClient {
             'action' => 'Action',
             'alert' => 'Alert',
             'auditlog' => 'AuditLog',
+            'dashboard' => 'Dashboard',
             'discoveryrule' => 'DiscoveryRule',
             'event' => 'Event',
             'history' => 'History',
             'host' => 'Host',
             'hostgroup' => 'HostGroup',
+            'hostinterface' => 'HostInterface',
+            'httptest' => 'HttpTest',
             'item' => 'Item',
             'maintenance' => 'Maintenance',
             'mediatype' => 'MediaType',
             'problem' => 'Problem',
             'proxy' => 'Proxy',
             'service' => 'Service',
+            'sla' => 'Sla',
             'template' => 'Template',
+            'trend' => 'Trend',
             'trigger' => 'Trigger',
             'user' => 'User',
             'usermacro' => 'UserMacro'

@@ -635,33 +635,11 @@ html[theme="hc-dark"] .ai-msg-action .ai-msg-title,
     flex-wrap: wrap;
 }
 
-.ai-log-tab {
-    background: transparent;
-    border: 1px solid transparent;
-    border-bottom: none;
-    padding: 8px 14px;
-    cursor: pointer;
-    color: var(--ai-fg-muted);
-    font: inherit;
-    font-weight: 600;
-    border-top-left-radius: 6px;
-    border-top-right-radius: 6px;
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.ai-log-tab:hover {
-    color: var(--ai-fg);
-}
-
-.ai-log-tab.is-active {
-    background: var(--ai-bg);
-    border-color: var(--ai-border);
-    color: var(--ai-fg);
-    margin-bottom: -1px;
-}
-
+/* The log tab buttons are styled together with the settings tabs (see
+   "Settings & log tabs" near the end of this file) so the two pages stay
+   identical. Only the log-specific count badge lives here. The badge
+   backgrounds are chosen to stay visible against both tab states now that
+   inactive tabs have an accent background. */
 .ai-log-tab-count {
     min-width: 22px;
     text-align: center;
@@ -669,7 +647,8 @@ html[theme="hc-dark"] .ai-msg-action .ai-msg-title,
     font-weight: 700;
     padding: 1px 6px;
     border-radius: 999px;
-    background: var(--ai-bg-accent);
+    border: 1px solid var(--ai-border);
+    background: var(--ai-bg);
     color: var(--ai-fg-muted);
 }
 
@@ -1470,7 +1449,7 @@ html[theme="hc-dark"] .ai-md .ai-link-btn:focus,
     box-shadow: 0 2px 6px rgba(96, 165, 250, 0.35);
 }
 
-/* ── Settings tabs ── */
+/* ── Settings & log tabs (shared, so both pages stay identical) ── */
 .ai-settings-tabs {
     display: flex;
     gap: 4px;
@@ -1479,13 +1458,16 @@ html[theme="hc-dark"] .ai-md .ai-link-btn:focus,
     flex-wrap: wrap;
 }
 
-.ai-settings-tab {
+.ai-settings-tab,
+.ai-log-tab {
     /* Flex-centre the label so it sits dead-centre regardless of font metrics.
        Every tab uses the selected "box" look; inactive tabs are simply dimmed,
-       so they all read as tabs while the active one still stands out. */
+       so they all read as tabs while the active one still stands out. The gap
+       spaces the optional count badge carried by the log tabs. */
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    gap: 8px;
     box-sizing: border-box;
     min-height: 44px;
     background: var(--ai-bg-accent);
@@ -1503,19 +1485,22 @@ html[theme="hc-dark"] .ai-md .ai-link-btn:focus,
     transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 
-.ai-settings-tab:hover {
+.ai-settings-tab:hover,
+.ai-log-tab:hover {
     color: var(--ai-fg);
     opacity: 0.85;
 }
 
-.ai-settings-tab.is-active {
+.ai-settings-tab.is-active,
+.ai-log-tab.is-active {
     background: var(--ai-bg);
     color: var(--ai-fg);
     opacity: 1;
     margin-bottom: -1px;
 }
 
-.ai-settings-tab:focus-visible {
+.ai-settings-tab:focus-visible,
+.ai-log-tab:focus-visible {
     outline: 2px solid #2e7dd1;
     outline-offset: -2px;
 }

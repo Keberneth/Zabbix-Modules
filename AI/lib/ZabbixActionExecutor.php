@@ -133,7 +133,19 @@ class ZabbixActionExecutor {
                 'eventid' => ['string', true]
             ],
             'mark_problem_as_symptom' => [
+                'eventid'       => ['string', true],
+                'cause_eventid' => ['string', true]
+            ],
+            'change_problem_severity' => [
+                'eventid'  => ['string', true],
+                'severity' => ['int',    true]
+            ],
+            'unacknowledge_problem' => [
                 'eventid' => ['string', true]
+            ],
+            'add_problem_message' => [
+                'eventid' => ['string', true],
+                'message' => ['string', true]
             ],
             'add_hosts_to_group' => [
                 'hostnames'    => ['array_str', true],
@@ -147,6 +159,88 @@ class ZabbixActionExecutor {
                 'eventid'      => ['string', true],
                 'report_token' => ['string', true],
                 'note'         => ['string', false]
+            ],
+            'enable_host' => [
+                'hostname' => ['string', true]
+            ],
+            'disable_host' => [
+                'hostname' => ['string', true]
+            ],
+            'update_host_tags' => [
+                'hostname'  => ['string', true],
+                'operation' => ['string', true],
+                'tags'      => ['array',  true]
+            ],
+            'update_host_inventory' => [
+                'hostname' => ['string', true],
+                'fields'   => ['object', true]
+            ],
+            'update_host_macros' => [
+                'hostname' => ['string', true],
+                'macros'   => ['array',  true]
+            ],
+            'update_host_interface' => [
+                'interfaceid' => ['string', true],
+                'ip'          => ['string', false],
+                'dns'         => ['string', false],
+                'port'        => ['string', false],
+                'useip'       => ['int',    false]
+            ],
+            'create_web_scenario' => [
+                'hostname'            => ['string', true],
+                'name'                => ['string', true],
+                'url'                 => ['string', true],
+                'delay'               => ['string', false],
+                'status_codes'        => ['string', false],
+                'step_name'           => ['string', false],
+                'tags'                => ['array',  false],
+                'add_failure_trigger' => ['bool',   false],
+                'trigger_priority'    => ['int',    false]
+            ],
+            'create_web_scenario_trigger' => [
+                'hostname'      => ['string', true],
+                'scenario_name' => ['string', true],
+                'name'          => ['string', false],
+                'priority'      => ['int',    false]
+            ],
+            'create_problem_dashboard' => [
+                'name' => ['string', true]
+            ],
+            'link_template_to_host' => [
+                'template'  => ['string',    true],
+                'hostnames' => ['array_str', true]
+            ],
+            'unlink_template_from_host' => [
+                'template'  => ['string',    true],
+                'hostnames' => ['array_str', true],
+                'clear'     => ['bool',      false]
+            ],
+            'enable_lld_rule' => [
+                'lld_rule_id' => ['string', true]
+            ],
+            'disable_lld_rule' => [
+                'lld_rule_id' => ['string', true]
+            ],
+            'create_host' => [
+                'hostname'              => ['string',    true],
+                'groups'                => ['array_str', true],
+                'visible_name'          => ['string',    false],
+                'templates'             => ['array_str', false],
+                'description'           => ['string',    false],
+                'interface_ip'          => ['string',    false],
+                'interface_dns'         => ['string',    false],
+                'interface_port'        => ['string',    false],
+                'create_missing_groups' => ['bool',      false]
+            ],
+            'create_trigger' => [
+                'description'         => ['string', true],
+                'expression'          => ['string', true],
+                'priority'            => ['int',    false],
+                'comments'            => ['string', false],
+                'recovery_expression' => ['string', false]
+            ],
+            'apply_bulk_action' => [
+                'preview_token' => ['string', true]
             ]
         ];
     }
@@ -411,7 +505,7 @@ class ZabbixActionExecutor {
                 'description' => 'Acknowledge, close, or add a message to a problem event.',
                 'params' => [
                     'eventid' => '(string, required) The event ID.',
-                    'action' => '(int, required) Bitmask: 1=close, 2=acknowledge, 4=add message, 8=change severity. Combine with +.',
+                    'action' => '(int, required) Bitmask: 1=close, 2=acknowledge, 4=add message. Combine with +. To change severity use change_problem_severity; to add a plain comment use add_problem_message.',
                     'message' => '(string, optional) Comment message.'
                 ],
                 'rw' => 'write',
@@ -641,6 +735,73 @@ class ZabbixActionExecutor {
                 'rw' => 'read',
                 'category' => ''
             ],
+            'get_audit_log' => [
+                'description' => 'Search the Zabbix audit log (Reports > Audit log): user logins/logouts and configuration changes (add/update/delete/execute). Use this for questions like "how many times did user niska log in?", "show failed logins today", or "who changed something recently?". Filter by user and/or action over a time window. Set count_only=true to get just the number — best for "how many times" questions. NOTE: the Zabbix audit log is readable by Super Admin users only, and only covers the period kept by your Zabbix audit housekeeping (older events are purged). To inspect the change history of one specific object id (a given trigger/host/item), use get_auditlog_for_object instead.',
+                'params' => [
+                    'username' => '(string, optional) Zabbix username to filter by, e.g. "niska". Automatically resolved to its numeric user id.',
+                    'userid' => '(string, optional) Zabbix user id to filter by. Use instead of username when you already have it.',
+                    'action' => '(string, optional) One of: login, login_failed, logout, add, update, delete, execute. Omit for all actions.',
+                    'resourcetype' => '(int, optional) Narrow config changes to a Zabbix audit resourcetype constant (e.g. 4=host, 13=trigger, 15=item, 11=user).',
+                    'since_unix' => '(int, optional) UNIX timestamp lower bound (time_from). 0 = no lower bound.',
+                    'until_unix' => '(int, optional) UNIX timestamp upper bound (time_till). 0 = no upper bound.',
+                    'count_only' => '(bool, optional) When true, return only the number of matching entries. Best for "how many times" questions.',
+                    'limit' => '(int, optional, default 50, max 500) Max entries to return when not counting.'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'get_host_interfaces' => [
+                'description' => 'List a host\'s configured interfaces (Agent/SNMP/IPMI/JMX) with IP/DNS, port, which is the default interface, availability state, and any interface error. Use this first for "host unreachable", "agent not responding", or SNMP connectivity problems.',
+                'params' => [
+                    'hostname' => '(string, required) The technical hostname.'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'get_metric_summary' => [
+                'description' => 'Summarise a numeric item over a time window WITHOUT dumping raw history: returns last/min/max/avg/p95 and the first->last change. Use this for "was CPU actually high before the trigger fired?", "is disk growth gradual or sudden?", "spike or sustained?". Picks the best-matching numeric item on the host.',
+                'params' => [
+                    'host' => '(string, required) The technical hostname.',
+                    'item' => '(string, required) Text to match the item name, e.g. "CPU utilization", "available memory", "disk space /".',
+                    'period_hours' => '(int, optional, default 24) Look-back window in hours. Windows <= 12h use raw history (incl. p95); longer windows use hourly trends.'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'get_trigger_dependencies' => [
+                'description' => 'List triggers that have dependencies configured (trigger A depends on trigger B). Use this to separate a root cause from its symptoms and avoid recommending remediation for a downstream/dependent alert.',
+                'params' => [
+                    'hostname' => '(string, optional) Restrict to one host.',
+                    'search' => '(string, optional) Match trigger names.'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'get_noisy_triggers' => [
+                'description' => 'Rank the triggers that generated the most problem events over a time window (alert noise / flapping). Use this for "what is the noisiest alert this week?" or to find tuning candidates.',
+                'params' => [
+                    'period_hours' => '(int, optional, default 24) Look-back window in hours.',
+                    'limit' => '(int, optional, default 15) How many top triggers to return.'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'get_web_scenarios' => [
+                'description' => 'List web monitoring scenarios (HTTP checks) with their steps, expected status codes, interval and enabled/disabled status. Use this to diagnose failing URL/endpoint checks.',
+                'params' => [
+                    'hostname' => '(string, optional) Restrict to one host.'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'get_sla_overview' => [
+                'description' => 'List configured SLAs with their target SLO percentage, reporting period, status and the service tags they apply to. Use this to bring business SLA/SLO context into an incident. Returns nothing if the Services/SLA feature is unused.',
+                'params' => [
+                    'limit' => '(int, optional, default 50) Max SLAs to return.'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
             'suppress_problem' => [
                 'description' => 'Suppress a problem event so it no longer escalates / pages anyone. Supports an optional "suppress_until" UNIX timestamp; omit for indefinite suppression.',
                 'params' => [
@@ -667,9 +828,36 @@ class ZabbixActionExecutor {
                 'category' => 'problems'
             ],
             'mark_problem_as_symptom' => [
-                'description' => 'Mark a problem event as a symptom of another cause event.',
+                'description' => 'Mark a problem event as a symptom of a specific cause event. Requires the cause event ID — Zabbix needs cause_eventid to change an event to symptom rank.',
                 'params' => [
-                    'eventid' => '(string, required) The event ID to mark as a symptom.'
+                    'eventid' => '(string, required) The event ID to mark as a symptom.',
+                    'cause_eventid' => '(string, required) The event ID of the parent CAUSE problem this is a symptom of.'
+                ],
+                'rw' => 'write',
+                'category' => 'problems'
+            ],
+            'change_problem_severity' => [
+                'description' => 'Change the severity of a problem event. Use this (not acknowledge_problem) for severity changes — Zabbix requires the new severity value.',
+                'params' => [
+                    'eventid' => '(string, required) The event ID.',
+                    'severity' => '(int, required) New severity: 0=Not classified, 1=Information, 2=Warning, 3=Average, 4=High, 5=Disaster.'
+                ],
+                'rw' => 'write',
+                'category' => 'problems'
+            ],
+            'unacknowledge_problem' => [
+                'description' => 'Remove the acknowledgement from a problem event (reverses acknowledge_problem).',
+                'params' => [
+                    'eventid' => '(string, required) The event ID.'
+                ],
+                'rw' => 'write',
+                'category' => 'problems'
+            ],
+            'add_problem_message' => [
+                'description' => 'Add a comment/message to a problem event WITHOUT acknowledging or closing it. Use this for plain operator notes when the user just wants to record a comment.',
+                'params' => [
+                    'eventid' => '(string, required) The event ID.',
+                    'message' => '(string, required) The comment text to add.'
                 ],
                 'rw' => 'write',
                 'category' => 'problems'
@@ -683,6 +871,232 @@ class ZabbixActionExecutor {
                 ],
                 'rw' => 'write',
                 'category' => 'problems'
+            ],
+            'enable_host' => [
+                'description' => 'Enable monitoring for a host (sets host status to "monitored"). Use to bring a host back online after maintenance or migration.',
+                'params' => [
+                    'hostname' => '(string, required) The technical hostname.'
+                ],
+                'rw' => 'write',
+                'category' => 'hosts'
+            ],
+            'disable_host' => [
+                'description' => 'Disable monitoring for a host (sets host status to "not monitored"). Use for decommissioned or very noisy hosts. Always state a reason in the confirmation message.',
+                'params' => [
+                    'hostname' => '(string, required) The technical hostname.'
+                ],
+                'rw' => 'write',
+                'category' => 'hosts'
+            ],
+            'update_host_tags' => [
+                'description' => 'Add, remove, or replace a host\'s tags (used for maintenance scoping, routing, ownership, service impact). For "add"/"remove" existing tags are preserved/merged; "replace" overwrites the whole tag set.',
+                'params' => [
+                    'hostname' => '(string, required) The technical hostname.',
+                    'operation' => '(string, required) One of: add, remove, replace.',
+                    'tags' => '(array, required) Array of {"tag":"name","value":"val"} objects. value may be empty.'
+                ],
+                'rw' => 'write',
+                'category' => 'hosts'
+            ],
+            'update_host_inventory' => [
+                'description' => 'Update host inventory metadata (owner, site, asset fields, etc.). Sets the host inventory to MANUAL mode so the values persist. Useful to align Zabbix with NetBox / operator input.',
+                'params' => [
+                    'hostname' => '(string, required) The technical hostname.',
+                    'fields' => '(object, required) Map of inventory field name to value, e.g. {"location":"DC1","contact":"netops"}. Use standard Zabbix inventory field keys.'
+                ],
+                'rw' => 'write',
+                'category' => 'hosts'
+            ],
+            'update_host_macros' => [
+                'description' => 'Create or update host-level user macros (e.g. thresholds). Other macros are left untouched. NEVER display secret macro VALUES back to the user. Set "type":1 for a secret macro, 2 for a Vault macro, 0 (default) for plain text.',
+                'params' => [
+                    'hostname' => '(string, required) The technical hostname.',
+                    'macros' => '(array, required) Array of {"macro":"{$NAME}","value":"...","type":0} objects. type: 0=text, 1=secret, 2=vault.'
+                ],
+                'rw' => 'write',
+                'category' => 'hosts'
+            ],
+            'update_host_interface' => [
+                'description' => 'Update a host interface\'s IP, DNS name, port, or IP/DNS mode. HIGH RISK: a wrong value stops monitoring the host. First call get_host_interfaces to get the interfaceid and current values, then confirm the exact change.',
+                'params' => [
+                    'interfaceid' => '(string, required) The interface ID (from get_host_interfaces).',
+                    'ip' => '(string, optional) New IP address.',
+                    'dns' => '(string, optional) New DNS name.',
+                    'port' => '(string, optional) New port.',
+                    'useip' => '(int, optional) 1 = connect by IP, 0 = connect by DNS.'
+                ],
+                'rw' => 'write',
+                'category' => 'interfaces'
+            ],
+            'create_web_scenario' => [
+                'description' => 'Create a single-step web monitoring (HTTP) check on a host from a simple request, optionally with a failure trigger. Example: "monitor https://intranet/healthz every 60s, expect 200, on host APP-PROD-01, and alert if it fails" -> set add_failure_trigger=true.',
+                'params' => [
+                    'hostname' => '(string, required) The technical hostname to attach the check to.',
+                    'name' => '(string, required) Scenario name.',
+                    'url' => '(string, required) URL to check.',
+                    'delay' => '(string, optional, default 60s) Check interval, e.g. 60s, 5m.',
+                    'status_codes' => '(string, optional, default 200) Expected HTTP status code(s), e.g. "200" or "200,301".',
+                    'step_name' => '(string, optional) Name of the single step.',
+                    'tags' => '(array, optional) Array of {"tag":"name","value":"val"} tags.',
+                    'add_failure_trigger' => '(bool, optional) When true, also create a trigger that fires when the scenario fails (last(/HOST/web.test.fail[Scenario])<>0).',
+                    'trigger_priority' => '(int, optional, default 3) Severity for the failure trigger, 0=Not classified..5=Disaster.'
+                ],
+                'rw' => 'write',
+                'category' => 'web'
+            ],
+            'create_web_scenario_trigger' => [
+                'description' => 'Create a trigger that fires when a web scenario (HTTP check) fails on a host. Builds the standard expression last(/HOST/web.test.fail[Scenario])<>0 automatically. Use this after create_web_scenario (on the SAME host the scenario was created on), or for any existing web scenario.',
+                'params' => [
+                    'hostname' => '(string, required) The host the web scenario is on.',
+                    'scenario_name' => '(string, required) The exact web scenario name.',
+                    'name' => '(string, optional) Trigger name. Defaults to: Web scenario "<scenario>" failed on <host>.',
+                    'priority' => '(int, optional, default 3) Severity 0=Not classified..5=Disaster.'
+                ],
+                'rw' => 'write',
+                'category' => 'web'
+            ],
+            'create_problem_dashboard' => [
+                'description' => 'Create a private dashboard with a Problems widget (all current problems). Personal dashboards only; refine its filters in the UI afterwards.',
+                'params' => [
+                    'name' => '(string, required) Dashboard name.'
+                ],
+                'rw' => 'write',
+                'category' => 'dashboards'
+            ],
+            'link_template_to_host' => [
+                'description' => 'Link a template to an EXPLICIT list of hosts to add monitoring coverage (existing templates are preserved). HIGH RISK: adds the template\'s items/triggers to every listed host. Resolve any group/filter to exact hostnames first; the list is capped by bulk_max_hosts. Show the full host list in the confirmation.',
+                'params' => [
+                    'template' => '(string, required) Template name (technical or visible).',
+                    'hostnames' => '(array of strings, required) Explicit list of hostnames to link the template to.'
+                ],
+                'rw' => 'write',
+                'category' => 'templates'
+            ],
+            'unlink_template_from_host' => [
+                'description' => 'Unlink a template from an EXPLICIT list of hosts. VERY HIGH RISK when clear=true (also deletes the template-created items/triggers/graphs and their history). Provide the exact host list (capped by bulk_max_hosts). Show the host list and whether clear=true in the confirmation.',
+                'params' => [
+                    'template' => '(string, required) Template name.',
+                    'hostnames' => '(array of strings, required) Explicit list of hostnames to unlink from.',
+                    'clear' => '(bool, optional, default false) When true, also delete the template-created items/triggers (and their history). Default false unlinks but keeps them.'
+                ],
+                'rw' => 'write',
+                'category' => 'templates'
+            ],
+            'enable_lld_rule' => [
+                'description' => 'Enable a low-level discovery (LLD) rule by its id. Use get_lld_rules to find the id.',
+                'params' => [
+                    'lld_rule_id' => '(string, required) The LLD rule id (from get_lld_rules).'
+                ],
+                'rw' => 'write',
+                'category' => 'discovery'
+            ],
+            'disable_lld_rule' => [
+                'description' => 'Disable a low-level discovery (LLD) rule by its id to stop it creating noisy discovered entities. Use get_lld_rules to find the id.',
+                'params' => [
+                    'lld_rule_id' => '(string, required) The LLD rule id (from get_lld_rules).'
+                ],
+                'rw' => 'write',
+                'category' => 'discovery'
+            ],
+            'create_host' => [
+                'description' => 'Create a new monitored host. Requires at least one host group, which must already exist unless create_missing_groups=true. Optionally link templates and add an agent interface. For web/URL monitoring or template-only hosts, omit the interface (agentless). After creating the host you can attach a web scenario, items, or triggers to it.',
+                'params' => [
+                    'hostname' => '(string, required) Technical host name, e.g. "iver.se".',
+                    'groups' => '(array of strings, required) Existing host group name(s). A missing group is an error unless create_missing_groups=true.',
+                    'create_missing_groups' => '(bool, optional, default false) When true, any group that does not exist is created. Default false to avoid creating a wrong group from a typo.',
+                    'visible_name' => '(string, optional) Visible name (defaults to the technical name).',
+                    'templates' => '(array of strings, optional) Template names to link (must already exist).',
+                    'description' => '(string, optional) Host description.',
+                    'interface_ip' => '(string, optional) Agent interface IP. Omit (with interface_dns) for an agentless host.',
+                    'interface_dns' => '(string, optional) Agent interface DNS name (alternative to IP).',
+                    'interface_port' => '(string, optional, default 10050) Agent interface port.'
+                ],
+                'rw' => 'write',
+                'category' => 'hosts'
+            ],
+            'create_trigger' => [
+                'description' => 'Create a trigger (alert definition) on a host from a Zabbix trigger expression. Use this to alert on item or web-scenario failures, e.g. a web check not returning HTTP 200. First confirm the exact item key (via get_items / get_web_scenarios) so the expression references a real item, e.g. last(/HOST/web.test.fail[Scenario name])<>0.',
+                'params' => [
+                    'description' => '(string, required) Trigger name, e.g. "HTTP 200 check failed for iver.se".',
+                    'expression' => '(string, required) Zabbix trigger expression, e.g. last(/KT4B-SRV-JUMP/web.test.fail[HTTP 200 check])<>0',
+                    'priority' => '(int, optional) Severity 0=Not classified, 1=Information, 2=Warning, 3=Average, 4=High, 5=Disaster. Default 0.',
+                    'comments' => '(string, optional) Operational notes shown with the problem.',
+                    'recovery_expression' => '(string, optional) Separate recovery expression; omit to let Zabbix auto-recover when the problem expression is false.'
+                ],
+                'rw' => 'write',
+                'category' => 'triggers'
+            ],
+            'get_proxy_assigned_hosts' => [
+                'description' => 'Show which hosts are assigned to each Zabbix proxy (or a single named proxy) — distributed-monitoring visibility, e.g. "what does proxy DC2 monitor?". Read-only.',
+                'params' => [
+                    'proxy' => '(string, optional) Proxy name to filter by; omit for all proxies.'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'preview_disable_triggers' => [
+                'description' => 'PREVIEW (read-only, no change) the enabled triggers whose name matches a pattern, e.g. to silence a noisy discovered trigger fleet-wide ("WpnService ... is not running"). Returns the exact list plus a preview_token. Then call apply_bulk_action with that token to actually disable them. Capped by bulk_max_items.',
+                'params' => [
+                    'name_pattern' => '(string, required) Text to match in the trigger name, e.g. "WpnService".',
+                    'host_group' => '(string, optional) Limit to a host group, e.g. "Windows servers".'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'preview_disable_items_by_error' => [
+                'description' => 'PREVIEW (read-only) the enabled-but-UNSUPPORTED items whose error message matches a pattern, to disable noisy broken items. Returns the exact list plus a preview_token for apply_bulk_action. Capped by bulk_max_items.',
+                'params' => [
+                    'error_pattern' => '(string, required) Text to match in the item error, e.g. "Cannot find instance".',
+                    'host_group' => '(string, optional) Limit to a host group.'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'preview_enable_items' => [
+                'description' => 'PREVIEW (read-only) the currently DISABLED items matching a name search (optionally within a host group), to re-enable them in bulk. Returns the exact list plus a preview_token for apply_bulk_action. Capped by bulk_max_items.',
+                'params' => [
+                    'item_search' => '(string, required) Text to match in the item name.',
+                    'host_group' => '(string, optional) Limit to a host group, e.g. "Windows servers".'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'preview_bulk_add_host_tag' => [
+                'description' => 'PREVIEW (read-only) the hosts in a host group that would receive a standard tag (ownership/site/environment). Returns the host list plus a preview_token for apply_bulk_action. Capped by bulk_max_hosts.',
+                'params' => [
+                    'host_group' => '(string, required) Host group whose hosts get the tag.',
+                    'tag' => '(string, required) Tag name to add.',
+                    'value' => '(string, optional) Tag value (may be empty).'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'preview_link_template' => [
+                'description' => 'PREVIEW (read-only) the hosts in a host group that a template would be linked to. Returns the host list plus a preview_token; apply_bulk_action then links the template to EXACTLY that frozen set. HIGH RISK on apply (adds the template items/triggers to every host). Capped by bulk_max_hosts.',
+                'params' => [
+                    'template' => '(string, required) Template name (technical or visible).',
+                    'host_group' => '(string, required) Host group whose hosts get the template.'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'preview_unlink_template' => [
+                'description' => 'PREVIEW (read-only) the hosts in a host group a template would be unlinked from. Returns the host list plus a preview_token for apply_bulk_action. VERY HIGH RISK on apply when clear=true (also deletes the template-created items/triggers and their history). Capped by bulk_max_hosts.',
+                'params' => [
+                    'template' => '(string, required) Template name.',
+                    'host_group' => '(string, required) Host group whose hosts lose the template.',
+                    'clear' => '(bool, optional, default false) When true, also delete the template-created items/triggers (and history).'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'apply_bulk_action' => [
+                'description' => 'Execute a bulk change that was previously computed by a preview_* tool. Pass the preview_token from the preview result; this applies the action to EXACTLY the frozen set the preview listed (it does not re-query). Requires operator confirmation — set confirm:true and a confirm_message that states the operation and the exact count from the preview.',
+                'params' => [
+                    'preview_token' => '(string, required) The token returned by a preview_* tool.'
+                ],
+                'rw' => 'write',
+                'category' => 'bulk'
             ]
         ];
     }
@@ -730,7 +1144,7 @@ class ZabbixActionExecutor {
         $lines[] = 'You have access to Zabbix tools. When you need to query or modify Zabbix, respond with ONLY a JSON tool call in this exact format (no other text):';
         $lines[] = '{"tool": "tool_name", "params": {"param1": "value1"}}';
         $lines[] = '';
-        $lines[] = 'For WRITE actions (create_maintenance, update_trigger, update_item, create_user, acknowledge_problem, add_hosts_to_group, create_host_group), you MUST first describe what you will do and ask for confirmation. Respond with:';
+        $lines[] = 'For every tool marked [WRITE], you MUST first describe exactly what will be changed and ask for confirmation. Respond with:';
         $lines[] = '{"tool": "tool_name", "params": {...}, "confirm": true, "confirm_message": "I will [describe exactly what will be changed, including which field]. Should I proceed?"}';
         $lines[] = '';
         $lines[] = 'For update_trigger, ALWAYS specify in the confirm_message which Zabbix field you will change (e.g. "comments", "expression", "priority") and what the new value will be.';
@@ -1019,6 +1433,75 @@ class ZabbixActionExecutor {
             case 'post_evidence_to_event':
                 return self::executePostEvidenceToEvent($params, $zabbix_api, $context);
 
+            case 'enable_host':
+                return self::executeSetHostStatus($params, $zabbix_api, true);
+
+            case 'disable_host':
+                return self::executeSetHostStatus($params, $zabbix_api, false);
+
+            case 'update_host_tags':
+                return self::executeUpdateHostTags($params, $zabbix_api);
+
+            case 'update_host_inventory':
+                return self::executeUpdateHostInventory($params, $zabbix_api);
+
+            case 'update_host_macros':
+                return self::executeUpdateHostMacros($params, $zabbix_api);
+
+            case 'update_host_interface':
+                return self::executeUpdateHostInterface($params, $zabbix_api);
+
+            case 'create_web_scenario':
+                return self::executeCreateWebScenario($params, $zabbix_api);
+
+            case 'create_web_scenario_trigger':
+                return self::executeCreateWebScenarioTrigger($params, $zabbix_api);
+
+            case 'create_problem_dashboard':
+                return self::executeCreateProblemDashboard($params, $zabbix_api);
+
+            case 'link_template_to_host':
+                return self::executeLinkTemplateToHost($params, $zabbix_api, $context);
+
+            case 'unlink_template_from_host':
+                return self::executeUnlinkTemplateFromHost($params, $zabbix_api, $context);
+
+            case 'enable_lld_rule':
+                return self::executeSetLldRuleStatus($params, $zabbix_api, true);
+
+            case 'disable_lld_rule':
+                return self::executeSetLldRuleStatus($params, $zabbix_api, false);
+
+            case 'create_host':
+                return self::executeCreateHost($params, $zabbix_api);
+
+            case 'create_trigger':
+                return self::executeCreateTrigger($params, $zabbix_api);
+
+            case 'get_proxy_assigned_hosts':
+                return self::executeGetProxyAssignedHosts($params, $zabbix_api);
+
+            case 'preview_disable_triggers':
+                return self::executePreviewDisableTriggers($params, $zabbix_api, $context);
+
+            case 'preview_disable_items_by_error':
+                return self::executePreviewDisableItemsByError($params, $zabbix_api, $context);
+
+            case 'preview_enable_items':
+                return self::executePreviewEnableItems($params, $zabbix_api, $context);
+
+            case 'preview_bulk_add_host_tag':
+                return self::executePreviewBulkAddHostTag($params, $zabbix_api, $context);
+
+            case 'preview_link_template':
+                return self::executePreviewLinkTemplate($params, $zabbix_api, $context, false);
+
+            case 'preview_unlink_template':
+                return self::executePreviewLinkTemplate($params, $zabbix_api, $context, true);
+
+            case 'apply_bulk_action':
+                return self::executeApplyBulkAction($params, $zabbix_api, $context);
+
             case 'get_event_timeline':
                 return self::executeGetEventTimeline($params, $zabbix_api);
 
@@ -1028,6 +1511,9 @@ class ZabbixActionExecutor {
             case 'get_recent_changes':
             case 'get_auditlog_for_object':
                 return self::executeGetAuditLogForObject($params, $zabbix_api);
+
+            case 'get_audit_log':
+                return self::executeGetAuditLog($params, $zabbix_api);
 
             case 'get_service_impact':
                 return self::executeGetServiceImpact($params, $zabbix_api);
@@ -1047,6 +1533,24 @@ class ZabbixActionExecutor {
             case 'get_action_config':
                 return self::executeGetActionConfig($params, $zabbix_api);
 
+            case 'get_host_interfaces':
+                return self::executeGetHostInterfaces($params, $zabbix_api);
+
+            case 'get_metric_summary':
+                return self::executeGetMetricSummary($params, $zabbix_api);
+
+            case 'get_trigger_dependencies':
+                return self::executeGetTriggerDependencies($params, $zabbix_api);
+
+            case 'get_noisy_triggers':
+                return self::executeGetNoisyTriggers($params, $zabbix_api);
+
+            case 'get_web_scenarios':
+                return self::executeGetWebScenarios($params, $zabbix_api);
+
+            case 'get_sla_overview':
+                return self::executeGetSlaOverview($params, $zabbix_api);
+
             case 'suppress_problem':
                 return self::executeSuppressProblem($params, $zabbix_api);
 
@@ -1058,6 +1562,15 @@ class ZabbixActionExecutor {
 
             case 'mark_problem_as_symptom':
                 return self::executeMarkProblemAsSymptom($params, $zabbix_api);
+
+            case 'change_problem_severity':
+                return self::executeChangeProblemSeverity($params, $zabbix_api);
+
+            case 'unacknowledge_problem':
+                return self::executeUnacknowledgeProblem($params, $zabbix_api);
+
+            case 'add_problem_message':
+                return self::executeAddProblemMessage($params, $zabbix_api);
 
             case 'update_trigger':
                 return self::executeUpdateTrigger($params, $zabbix_api);
@@ -2278,6 +2791,339 @@ class ZabbixActionExecutor {
         return implode("\n", $lines);
     }
 
+    private static function executeGetAuditLog(array $params, ZabbixApiClient $api): string {
+        $username = trim((string) ($params['username'] ?? ''));
+        $userid = trim((string) ($params['userid'] ?? ''));
+        $action_name = strtolower(trim((string) ($params['action'] ?? '')));
+        $resourcetype = (isset($params['resourcetype']) && $params['resourcetype'] !== '')
+            ? (int) $params['resourcetype']
+            : -1;
+        $since = (int) ($params['since_unix'] ?? 0);
+        $until = (int) ($params['until_unix'] ?? 0);
+        $count_only = Util::truthy($params['count_only'] ?? false);
+        $limit = (int) ($params['limit'] ?? 50);
+
+        // The audit log can only be filtered by userid, so map a username first.
+        if ($userid === '' && $username !== '') {
+            $resolved = $api->getUserIdByUsername($username);
+            if ($resolved === null) {
+                return 'No Zabbix user found with username "'.$username.'". Check the spelling or pass a numeric userid. (Listing users requires Super Admin in Zabbix.)';
+            }
+            $userid = $resolved;
+        }
+
+        // Translate the friendly action name into Zabbix audit action code(s).
+        $action_filter = null;
+        if ($action_name !== '') {
+            $map = self::auditActionMap();
+            if (!isset($map[$action_name])) {
+                return 'Unknown action "'.$action_name.'". Use one of: '.implode(', ', array_keys($map)).'.';
+            }
+            $action_filter = $map[$action_name];
+        }
+
+        $filter = [];
+        if ($userid !== '') {
+            $filter['userid'] = $userid;
+        }
+        if ($action_filter !== null) {
+            $filter['action'] = $action_filter;
+        }
+        if ($resourcetype >= 0) {
+            $filter['resourcetype'] = $resourcetype;
+        }
+
+        // Human-readable description of the query, for the reply header.
+        $scope = [];
+        if ($username !== '') {
+            $scope[] = 'user "'.$username.'"';
+        }
+        elseif ($userid !== '') {
+            $scope[] = 'userid '.$userid;
+        }
+        if ($action_name !== '') {
+            $scope[] = 'action "'.$action_name.'"';
+        }
+        if ($resourcetype >= 0) {
+            $scope[] = 'resourcetype '.$resourcetype;
+        }
+        if ($since > 0) {
+            $scope[] = 'since '.date('Y-m-d H:i', $since);
+        }
+        if ($until > 0) {
+            $scope[] = 'until '.date('Y-m-d H:i', $until);
+        }
+        $scope_str = $scope ? ' for '.implode(', ', $scope) : '';
+
+        if ($count_only) {
+            $count = $api->countAuditLog($filter, $since, $until);
+            if ($count === null) {
+                return 'Could not read the Zabbix audit log'.$scope_str.'. The audit log is readable by Super Admin users only — confirm the API user/token has Super Admin rights.';
+            }
+            return $count.' audit log entry/entries'.$scope_str.'.';
+        }
+
+        $entries = $api->getAuditLog($filter, $since, $until, $limit);
+        if (!$entries) {
+            return 'No audit log entries found'.$scope_str.'. (The Zabbix audit log is Super-Admin-only and limited by your audit housekeeping retention; older events may already be purged.)';
+        }
+
+        $lines = [count($entries).' audit log entry/entries'.$scope_str.' (most recent first):', ''];
+
+        foreach ($entries as $e) {
+            $when = date('Y-m-d H:i:s', (int) ($e['clock'] ?? 0));
+            $act = self::auditActionLabel((int) ($e['action'] ?? -1));
+            $user = (string) ($e['username'] ?? '');
+            $ip = (string) ($e['ip'] ?? '');
+            $resource = (string) ($e['resourcename'] ?? '');
+            $row = '- ['.$when.'] '.$act;
+            if ($user !== '') {
+                $row .= ' user='.$user;
+            }
+            if ($ip !== '') {
+                $row .= ' ip='.$ip;
+            }
+            if ($resource !== '') {
+                $row .= ' resource="'.self::truncateCell($resource, 120).'"';
+            }
+            $lines[] = $row;
+        }
+
+        return implode("\n", $lines);
+    }
+
+    /**
+     * Friendly audit action name -> Zabbix audit action code(s).
+     * Codes follow Zabbix 6.0+ (this module targets Zabbix 6.4+).
+     */
+    private static function auditActionMap(): array {
+        return [
+            'login' => [8],
+            'login_success' => [8],
+            'login_failed' => [9],
+            'logout' => [4],
+            'add' => [0],
+            'update' => [1],
+            'delete' => [2],
+            'execute' => [7],
+            'push' => [12]
+        ];
+    }
+
+    private static function auditActionLabel(int $action): string {
+        $labels = [
+            0 => 'add',
+            1 => 'update',
+            2 => 'delete',
+            4 => 'logout',
+            7 => 'execute',
+            8 => 'login',
+            9 => 'login_failed',
+            10 => 'history_clear',
+            11 => 'config_refresh',
+            12 => 'push'
+        ];
+
+        return 'action='.($labels[$action] ?? (string) $action);
+    }
+
+    private static function executeGetHostInterfaces(array $params, ZabbixApiClient $api): string {
+        $hostname = trim((string) ($params['hostname'] ?? ($params['host'] ?? '')));
+        if ($hostname === '') {
+            return 'Error: hostname is required.';
+        }
+
+        $interfaces = $api->getHostInterfaces($hostname);
+        if (!$interfaces) {
+            return 'No interfaces found for host "'.$hostname.'" (the host may not exist, or has no interfaces).';
+        }
+
+        $types = [1 => 'Agent', 2 => 'SNMP', 3 => 'IPMI', 4 => 'JMX'];
+        $avail = [0 => 'unknown', 1 => 'available', 2 => 'unavailable'];
+
+        $lines = [count($interfaces).' interface(s) on host "'.$hostname.'":', ''];
+        foreach ($interfaces as $i) {
+            $type = $types[(int) ($i['type'] ?? 0)] ?? ('type'.($i['type'] ?? '?'));
+            $useip = ((int) ($i['useip'] ?? 1) === 1);
+            $addr = $useip ? (string) ($i['ip'] ?? '') : (string) ($i['dns'] ?? '');
+            $port = (string) ($i['port'] ?? '');
+            $main = ((int) ($i['main'] ?? 0) === 1) ? ' [default]' : '';
+            $av = $avail[(int) ($i['available'] ?? 0)] ?? '?';
+            $row = '- '.$type.$main.': '.($useip ? 'IP ' : 'DNS ').$addr.':'.$port.' — '.$av;
+            $err = trim((string) ($i['error'] ?? ''));
+            if ($err !== '') {
+                $row .= ' — error: '.self::truncateCell($err, 160);
+            }
+            $lines[] = $row;
+        }
+        return implode("\n", $lines);
+    }
+
+    private static function executeGetMetricSummary(array $params, ZabbixApiClient $api): string {
+        $hostname = trim((string) ($params['host'] ?? ($params['hostname'] ?? '')));
+        $item_search = trim((string) ($params['item'] ?? ($params['item_search'] ?? '')));
+        $period_hours = (int) ($params['period_hours'] ?? 24);
+        if ($period_hours <= 0) {
+            $period_hours = 24;
+        }
+
+        if ($hostname === '' || $item_search === '') {
+            return 'Error: both host and item are required.';
+        }
+
+        $s = $api->getMetricSummary($hostname, $item_search, $period_hours);
+
+        if (isset($s['error'])) {
+            switch ($s['error']) {
+                case 'host_not_found':
+                    return 'Host "'.$hostname.'" was not found.';
+                case 'no_item':
+                    return 'No item on "'.$hostname.'" matched "'.$item_search.'".';
+                case 'not_numeric':
+                    $c = implode(', ', $s['candidates'] ?? []);
+                    return 'No NUMERIC item on "'.$hostname.'" matched "'.$item_search.'". Matching (non-numeric) items: '.($c !== '' ? $c : '(none)').'.';
+                case 'no_data':
+                    return 'Item "'.($s['item']['name'] ?? $item_search).'" on "'.$hostname.'" has no data in the last '.$period_hours.'h.';
+                default:
+                    return 'Could not summarise "'.$item_search.'" on "'.$hostname.'".';
+            }
+        }
+
+        $name = (string) ($s['item']['name'] ?? $item_search);
+        $units = trim((string) ($s['units'] ?? ''));
+        $fmt = static function($v) use ($units) {
+            if ($v === null) {
+                return 'n/a';
+            }
+            $v = (float) $v;
+            $str = (abs($v) >= 1000) ? number_format($v, 0) : rtrim(rtrim(number_format($v, 3, '.', ''), '0'), '.');
+            if ($str === '' || $str === '-') {
+                $str = '0';
+            }
+            return $str.($units !== '' ? ' '.$units : '');
+        };
+
+        $lines = [
+            'Metric summary for "'.$name.'" on "'.$hostname.'" over the last '.$s['period_hours'].'h ('.$s['source'].', '.$s['count'].' samples):',
+            '- last: '.$fmt($s['last'] ?? null),
+            '- min: '.$fmt($s['min'] ?? null),
+            '- max: '.$fmt($s['max'] ?? null),
+            '- avg: '.$fmt($s['avg'] ?? null)
+        ];
+        if (isset($s['p95'])) {
+            $lines[] = '- p95: '.$fmt($s['p95']);
+        }
+        if (isset($s['first'], $s['last'])) {
+            $delta = (float) $s['last'] - (float) $s['first'];
+            $lines[] = '- change (first->last): '.($delta >= 0 ? '+' : '').$fmt($delta);
+        }
+        if (($s['source'] ?? '') === 'trends') {
+            $lines[] = '(Long window — based on hourly trends; p95 not available.)';
+        }
+        return implode("\n", $lines);
+    }
+
+    private static function executeGetTriggerDependencies(array $params, ZabbixApiClient $api): string {
+        $hostname = trim((string) ($params['hostname'] ?? ($params['host'] ?? '')));
+        $search = trim((string) ($params['search'] ?? ''));
+
+        $triggers = $api->getTriggerDependencies($hostname, $search);
+        if (!$triggers) {
+            return 'No triggers found'.($hostname !== '' ? ' for host "'.$hostname.'"' : '').($search !== '' ? ' matching "'.$search.'"' : '').'.';
+        }
+
+        $with_deps = [];
+        foreach ($triggers as $t) {
+            if (!empty($t['dependencies'])) {
+                $with_deps[] = $t;
+            }
+        }
+        if (!$with_deps) {
+            return 'Checked '.count($triggers).' trigger(s)'.($hostname !== '' ? ' on "'.$hostname.'"' : '').'; none have dependencies configured.';
+        }
+
+        $lines = [count($with_deps).' trigger(s) with dependencies:', ''];
+        foreach ($with_deps as $t) {
+            $host = (string) ($t['hosts'][0]['host'] ?? '');
+            $name = (string) ($t['description'] ?? '');
+            $dep_names = [];
+            foreach ($t['dependencies'] as $d) {
+                $dep_names[] = (string) ($d['description'] ?? ($d['triggerid'] ?? ''));
+            }
+            $lines[] = '- '.($host !== '' ? '['.$host.'] ' : '').$name;
+            $lines[] = '    depends on: '.implode('; ', $dep_names);
+        }
+        return implode("\n", $lines);
+    }
+
+    private static function executeGetNoisyTriggers(array $params, ZabbixApiClient $api): string {
+        $period_hours = (int) ($params['period_hours'] ?? 24);
+        if ($period_hours <= 0) {
+            $period_hours = 24;
+        }
+        $limit = (int) ($params['limit'] ?? 15);
+        if ($limit <= 0) {
+            $limit = 15;
+        }
+
+        $rows = $api->getNoisyTriggers($period_hours, $limit);
+        if (!$rows) {
+            return 'No problem events were recorded in the last '.$period_hours.'h.';
+        }
+
+        $lines = ['Top '.count($rows).' noisiest trigger(s) by problem count over the last '.$period_hours.'h:', ''];
+        foreach ($rows as $r) {
+            $host = (string) ($r['host'] ?? '');
+            $lines[] = '- '.$r['count'].'x '.($host !== '' ? '['.$host.'] ' : '').(string) ($r['name'] ?? '');
+        }
+        return implode("\n", $lines);
+    }
+
+    private static function executeGetWebScenarios(array $params, ZabbixApiClient $api): string {
+        $hostname = trim((string) ($params['hostname'] ?? ($params['host'] ?? '')));
+
+        $scenarios = $api->getWebScenarios($hostname);
+        if (!$scenarios) {
+            return 'No web scenarios found'.($hostname !== '' ? ' for host "'.$hostname.'"' : '').'.';
+        }
+
+        $lines = [count($scenarios).' web scenario(s)'.($hostname !== '' ? ' on "'.$hostname.'"' : '').':', ''];
+        foreach ($scenarios as $w) {
+            $host = (string) ($w['hosts'][0]['host'] ?? '');
+            $status = ((int) ($w['status'] ?? 0) === 0) ? 'enabled' : 'disabled';
+            $steps = is_array($w['steps'] ?? null) ? $w['steps'] : [];
+            $lines[] = '- '.($host !== '' ? '['.$host.'] ' : '').(string) ($w['name'] ?? '').' — '.$status.', every '.(string) ($w['delay'] ?? '?').', '.count($steps).' step(s)';
+            foreach ($steps as $st) {
+                $codes = trim((string) ($st['status_codes'] ?? ''));
+                $lines[] = '    '.(string) ($st['no'] ?? '').'. '.(string) ($st['name'] ?? '').' -> '.(string) ($st['url'] ?? '').($codes !== '' ? ' (expect '.$codes.')' : '');
+            }
+        }
+        return implode("\n", $lines);
+    }
+
+    private static function executeGetSlaOverview(array $params, ZabbixApiClient $api): string {
+        $slas = $api->getSlaOverview((int) ($params['limit'] ?? 50));
+        if (!$slas) {
+            return 'No SLAs are configured (or the Services/SLA feature is not in use on this Zabbix instance).';
+        }
+
+        $periods = [0 => 'daily', 1 => 'weekly', 2 => 'monthly', 3 => 'quarterly', 4 => 'annually'];
+
+        $lines = [count($slas).' SLA(s):', ''];
+        foreach ($slas as $s) {
+            $status = ((int) ($s['status'] ?? 0) === 0) ? 'enabled' : 'disabled';
+            $period = $periods[(int) ($s['period'] ?? 0)] ?? '?';
+            $tags = [];
+            foreach (($s['service_tags'] ?? []) as $tg) {
+                $val = (string) ($tg['value'] ?? '');
+                $tags[] = (string) ($tg['tag'] ?? '').($val !== '' ? '='.$val : '');
+            }
+            $lines[] = '- '.(string) ($s['name'] ?? '').' — SLO '.(string) ($s['slo'] ?? '?').'%, '.$period.', '.$status
+                .($tags ? ' — services tagged: '.implode(', ', $tags) : '');
+        }
+        return implode("\n", $lines);
+    }
+
     private static function executeGetServiceImpact(array $params, ZabbixApiClient $api): string {
         $eventid = trim((string) ($params['eventid'] ?? ''));
 
@@ -2524,13 +3370,711 @@ class ZabbixActionExecutor {
 
     private static function executeMarkProblemAsSymptom(array $params, ZabbixApiClient $api): string {
         $eventid = trim((string) ($params['eventid'] ?? ''));
+        $cause_eventid = trim((string) ($params['cause_eventid'] ?? ''));
+        if ($eventid === '') {
+            return 'Error: eventid is required.';
+        }
+        if ($cause_eventid === '') {
+            return 'Error: cause_eventid is required — Zabbix needs the parent cause event to mark an event as a symptom.';
+        }
+
+        $api->markProblemAsSymptom($eventid, $cause_eventid);
+
+        return 'Event '.$eventid.' marked as a symptom of cause event '.$cause_eventid.'.';
+    }
+
+    private static function executeChangeProblemSeverity(array $params, ZabbixApiClient $api): string {
+        $eventid = trim((string) ($params['eventid'] ?? ''));
         if ($eventid === '') {
             return 'Error: eventid is required.';
         }
 
-        $api->markProblemAsSymptom($eventid);
+        if (!isset($params['severity']) || $params['severity'] === '') {
+            return 'Error: severity is required (0=Not classified .. 5=Disaster).';
+        }
+        $severity = (int) $params['severity'];
+        if ($severity < 0 || $severity > 5) {
+            return 'Error: severity must be between 0 (Not classified) and 5 (Disaster).';
+        }
 
-        return 'Event '.$eventid.' marked as a symptom.';
+        $api->changeProblemSeverity($eventid, $severity);
+
+        $label = self::SEVERITY_LABELS[(string) $severity] ?? (string) $severity;
+
+        return 'Event '.$eventid.' severity changed to '.$severity.' ('.$label.').';
+    }
+
+    private static function executeUnacknowledgeProblem(array $params, ZabbixApiClient $api): string {
+        $eventid = trim((string) ($params['eventid'] ?? ''));
+        if ($eventid === '') {
+            return 'Error: eventid is required.';
+        }
+
+        $api->unacknowledgeProblem($eventid);
+
+        return 'Event '.$eventid.' un-acknowledged.';
+    }
+
+    private static function executeAddProblemMessage(array $params, ZabbixApiClient $api): string {
+        $eventid = trim((string) ($params['eventid'] ?? ''));
+        $message = trim((string) ($params['message'] ?? ''));
+        if ($eventid === '') {
+            return 'Error: eventid is required.';
+        }
+        if ($message === '') {
+            return 'Error: message is required.';
+        }
+
+        // event.acknowledge action bit 4 = add message only (no ack/close).
+        $api->acknowledgeProblem($eventid, 4, $message);
+
+        return 'Comment added to event '.$eventid.'.';
+    }
+
+    private static function executeSetHostStatus(array $params, ZabbixApiClient $api, bool $enable): string {
+        $hostname = trim((string) ($params['hostname'] ?? ($params['host'] ?? '')));
+        if ($hostname === '') {
+            return 'Error: hostname is required.';
+        }
+
+        $api->setHostStatus($hostname, $enable ? 0 : 1);
+
+        return 'Host "'.$hostname.'" is now '.($enable ? 'ENABLED (monitored)' : 'DISABLED (not monitored)').'.';
+    }
+
+    private static function executeUpdateHostTags(array $params, ZabbixApiClient $api): string {
+        $hostname = trim((string) ($params['hostname'] ?? ''));
+        $operation = strtolower(trim((string) ($params['operation'] ?? 'add')));
+        $tags = $params['tags'] ?? [];
+
+        if ($hostname === '') {
+            return 'Error: hostname is required.';
+        }
+        if (!in_array($operation, ['add', 'remove', 'replace'], true)) {
+            return 'Error: operation must be one of add, remove, replace.';
+        }
+        if (!is_array($tags) || !$tags) {
+            return 'Error: tags must be a non-empty array of {tag, value} objects.';
+        }
+
+        $api->updateHostTags($hostname, $operation, $tags);
+
+        $labels = [];
+        foreach ($tags as $t) {
+            if (!is_array($t)) {
+                continue;
+            }
+            $name = trim((string) ($t['tag'] ?? ''));
+            if ($name === '') {
+                continue;
+            }
+            $val = (string) ($t['value'] ?? '');
+            $labels[] = $name.($val !== '' ? '='.$val : '');
+        }
+
+        return 'Host "'.$hostname.'" tags updated ('.$operation.'): '.implode(', ', $labels).'.';
+    }
+
+    private static function executeUpdateHostInventory(array $params, ZabbixApiClient $api): string {
+        $hostname = trim((string) ($params['hostname'] ?? ''));
+        $fields = $params['fields'] ?? [];
+
+        if ($hostname === '') {
+            return 'Error: hostname is required.';
+        }
+        if (!is_array($fields) || !$fields) {
+            return 'Error: fields must be a non-empty object of inventory field => value.';
+        }
+
+        $api->updateHostInventory($hostname, $fields);
+
+        return 'Host "'.$hostname.'" inventory updated (manual mode): '.implode(', ', array_keys($fields)).'.';
+    }
+
+    private static function executeUpdateHostMacros(array $params, ZabbixApiClient $api): string {
+        $hostname = trim((string) ($params['hostname'] ?? ''));
+        $macros = $params['macros'] ?? [];
+
+        if ($hostname === '') {
+            return 'Error: hostname is required.';
+        }
+        if (!is_array($macros) || !$macros) {
+            return 'Error: macros must be a non-empty array of {macro, value, type} objects.';
+        }
+
+        // Validate every macro before touching Zabbix, so a typo or bad type
+        // can't reach the API or blank a secret/vault macro.
+        foreach ($macros as $m) {
+            if (!is_array($m)) {
+                return 'Error: each macro must be an object like {"macro":"{$NAME}","value":"...","type":0}.';
+            }
+            $name = trim((string) ($m['macro'] ?? ''));
+            if (!preg_match('/^\{\$[A-Z0-9_\.]+(:.*)?\}$/i', $name)) {
+                return 'Error: "'.$name.'" is not a valid Zabbix user macro name (expected {$NAME}).';
+            }
+            $type = isset($m['type']) ? (int) $m['type'] : 0;
+            if (!in_array($type, [0, 1, 2], true)) {
+                return 'Error: macro "'.$name.'" has invalid type '.$type.' (0=text, 1=secret, 2=vault).';
+            }
+            if (!array_key_exists('value', $m)) {
+                return 'Error: macro "'.$name.'" is missing a value.';
+            }
+            if (($type === 1 || $type === 2) && trim((string) $m['value']) === '') {
+                return 'Error: refusing to set secret/vault macro "'.$name.'" to an empty value.';
+            }
+        }
+
+        $result = $api->updateHostMacros($hostname, $macros);
+
+        // Report macro NAMES and whether they were secret — never the values.
+        $describe = static function(array $list): array {
+            $out = [];
+            foreach ($list as $m) {
+                $secret = ((int) ($m['type'] ?? 0) !== 0) ? ' (secret)' : '';
+                $out[] = (string) ($m['macro'] ?? '').$secret;
+            }
+            return $out;
+        };
+
+        $created = $describe($result['created'] ?? []);
+        $updated = $describe($result['updated'] ?? []);
+
+        $parts = [];
+        if ($created) {
+            $parts[] = 'created: '.implode(', ', $created);
+        }
+        if ($updated) {
+            $parts[] = 'updated: '.implode(', ', $updated);
+        }
+
+        return 'Host "'.$hostname.'" macros — '.($parts ? implode('; ', $parts) : 'no changes').'. (Secret values are not displayed.)';
+    }
+
+    private static function executeUpdateHostInterface(array $params, ZabbixApiClient $api): string {
+        $interfaceid = trim((string) ($params['interfaceid'] ?? ''));
+        if ($interfaceid === '') {
+            return 'Error: interfaceid is required (use get_host_interfaces to find it).';
+        }
+
+        $changes = [];
+        foreach (['ip', 'dns', 'port'] as $f) {
+            if (isset($params[$f]) && trim((string) $params[$f]) !== '') {
+                $changes[$f] = trim((string) $params[$f]);
+            }
+        }
+        if (isset($params['useip']) && $params['useip'] !== '') {
+            $u = (int) $params['useip'];
+            if ($u !== 0 && $u !== 1) {
+                return 'Error: useip must be 0 (connect by DNS) or 1 (connect by IP).';
+            }
+            $changes['useip'] = $u;
+        }
+        if (isset($changes['port'])
+            && (!preg_match('/^\d+$/', (string) $changes['port']) || (int) $changes['port'] < 1 || (int) $changes['port'] > 65535)) {
+            return 'Error: port must be a number between 1 and 65535.';
+        }
+        if (!$changes) {
+            return 'Error: provide at least one of ip, dns, port, useip.';
+        }
+
+        $api->updateHostInterface($interfaceid, $changes);
+
+        $desc = [];
+        foreach ($changes as $k => $v) {
+            if ($k === 'useip') {
+                $desc[] = 'mode='.((int) $v === 1 ? 'IP' : 'DNS');
+            }
+            else {
+                $desc[] = $k.'='.$v;
+            }
+        }
+
+        return 'Interface '.$interfaceid.' updated: '.implode(', ', $desc).'.';
+    }
+
+    private static function executeCreateWebScenario(array $params, ZabbixApiClient $api): string {
+        $hostname = trim((string) ($params['hostname'] ?? ($params['host'] ?? '')));
+        $name = trim((string) ($params['name'] ?? ''));
+        $url = trim((string) ($params['url'] ?? ''));
+        if ($hostname === '' || $name === '' || $url === '') {
+            return 'Error: hostname, name and url are required.';
+        }
+
+        $opts = [
+            'delay' => (string) ($params['delay'] ?? '60s'),
+            'status_codes' => (string) ($params['status_codes'] ?? '200'),
+            'step_name' => (string) ($params['step_name'] ?? 'Check')
+        ];
+        if (isset($params['tags']) && is_array($params['tags'])) {
+            $opts['tags'] = $params['tags'];
+        }
+
+        $api->createWebScenario($hostname, $name, $url, $opts);
+
+        $msg = 'Web scenario "'.$name.'" created on "'.$hostname.'" — '.$url.' every '.$opts['delay'].', expecting HTTP '.$opts['status_codes'].'.';
+
+        if (Util::truthy($params['add_failure_trigger'] ?? false)) {
+            $priority = 3;
+            if (isset($params['trigger_priority']) && $params['trigger_priority'] !== '') {
+                $tp = (int) $params['trigger_priority'];
+                if ($tp >= 0 && $tp <= 5) {
+                    $priority = $tp;
+                }
+            }
+            // The scenario already exists; if the trigger fails, keep the
+            // scenario-created message and just note the trigger problem.
+            try {
+                $tname = self::webScenarioTriggerName($hostname, $name);
+                $api->createTrigger($tname, self::webScenarioFailExpression($hostname, $name), [
+                    'priority' => $priority,
+                    'comments' => 'Web scenario "'.$name.'" failed. See web.test.error['.$name.'] for the error.'
+                ]);
+                $msg .= ' A failure trigger "'.$tname.'" was also created (severity '.$priority.').';
+            }
+            catch (\Throwable $e) {
+                $msg .= ' (The scenario was created, but the failure trigger could not be: '.$e->getMessage().')';
+            }
+        }
+
+        return $msg;
+    }
+
+    private static function executeCreateWebScenarioTrigger(array $params, ZabbixApiClient $api): string {
+        $hostname = trim((string) ($params['hostname'] ?? ($params['host'] ?? '')));
+        $scenario = trim((string) ($params['scenario_name'] ?? ''));
+        if ($hostname === '' || $scenario === '') {
+            return 'Error: hostname and scenario_name are required.';
+        }
+
+        $name = trim((string) ($params['name'] ?? ''));
+        if ($name === '') {
+            $name = self::webScenarioTriggerName($hostname, $scenario);
+        }
+
+        $priority = 3;
+        if (isset($params['priority']) && $params['priority'] !== '') {
+            $p = (int) $params['priority'];
+            if ($p < 0 || $p > 5) {
+                return 'Error: priority must be between 0 and 5.';
+            }
+            $priority = $p;
+        }
+
+        $result = $api->createTrigger($name, self::webScenarioFailExpression($hostname, $scenario), [
+            'priority' => $priority,
+            'comments' => 'Web scenario "'.$scenario.'" failed. See web.test.error['.$scenario.'] for the error.'
+        ]);
+        $id = is_array($result) ? (string) ($result['triggerids'][0] ?? '') : '';
+
+        return 'Trigger "'.$name.'" created'.($id !== '' ? ' (triggerid '.$id.')' : '').' on "'.$hostname.'" — fires when web scenario "'.$scenario.'" fails.';
+    }
+
+    private static function webScenarioFailExpression(string $hostname, string $scenario): string {
+        return 'last(/'.$hostname.'/web.test.fail['.self::quoteKeyParam($scenario).'])<>0';
+    }
+
+    private static function webScenarioTriggerName(string $hostname, string $scenario): string {
+        return 'Web scenario "'.$scenario.'" failed on '.$hostname;
+    }
+
+    /** Quote a value for use as a Zabbix item-key parameter (handles spaces/commas/brackets). */
+    private static function quoteKeyParam(string $p): string {
+        return '"'.str_replace(['\\', '"'], ['\\\\', '\\"'], $p).'"';
+    }
+
+    private static function executeCreateProblemDashboard(array $params, ZabbixApiClient $api): string {
+        $name = trim((string) ($params['name'] ?? ''));
+        if ($name === '') {
+            return 'Error: name is required.';
+        }
+
+        $result = $api->createProblemDashboard($name);
+        $id = is_array($result) ? (string) ($result['dashboardids'][0] ?? '') : '';
+
+        return 'Private dashboard "'.$name.'" created'.($id !== '' ? ' (id '.$id.')' : '').' with a Problems widget. Refine its filters in Monitoring > Dashboards.';
+    }
+
+    private static function executeLinkTemplateToHost(array $params, ZabbixApiClient $api, array $context): string {
+        $template = trim((string) ($params['template'] ?? ''));
+        $hostnames = $params['hostnames'] ?? [];
+        if ($template === '') {
+            return 'Error: template is required.';
+        }
+        if (!is_array($hostnames) || !$hostnames) {
+            return 'Error: hostnames must be a non-empty array of hostnames.';
+        }
+
+        $max = (int) ($context['config']['zabbix_actions']['bulk_max_hosts'] ?? 25);
+        if ($max < 1) {
+            $max = 25;
+        }
+
+        $result = $api->linkTemplateToHosts($template, $hostnames, $max);
+
+        return 'Linked template "'.$result['template'].'" to '.count($result['hosts']).' host(s): '.implode(', ', $result['hosts']).'.';
+    }
+
+    private static function executeUnlinkTemplateFromHost(array $params, ZabbixApiClient $api, array $context): string {
+        $template = trim((string) ($params['template'] ?? ''));
+        $hostnames = $params['hostnames'] ?? [];
+        $clear = Util::truthy($params['clear'] ?? false);
+        if ($template === '') {
+            return 'Error: template is required.';
+        }
+        if (!is_array($hostnames) || !$hostnames) {
+            return 'Error: hostnames must be a non-empty array of hostnames.';
+        }
+
+        $max = (int) ($context['config']['zabbix_actions']['bulk_max_hosts'] ?? 25);
+        if ($max < 1) {
+            $max = 25;
+        }
+
+        $result = $api->unlinkTemplateFromHosts($template, $hostnames, $clear, $max);
+
+        return 'Unlinked template "'.$result['template'].'"'.($clear ? ' (and cleared its items/triggers)' : '').' from '.count($result['hosts']).' host(s): '.implode(', ', $result['hosts']).'.';
+    }
+
+    private static function executeSetLldRuleStatus(array $params, ZabbixApiClient $api, bool $enable): string {
+        $id = trim((string) ($params['lld_rule_id'] ?? ($params['itemid'] ?? '')));
+        if ($id === '') {
+            return 'Error: lld_rule_id is required (use get_lld_rules to find it).';
+        }
+
+        $api->setLldRuleStatus($id, $enable ? 0 : 1);
+
+        return 'LLD rule '.$id.' is now '.($enable ? 'ENABLED' : 'DISABLED').'.';
+    }
+
+    private static function executeCreateHost(array $params, ZabbixApiClient $api): string {
+        $hostname = trim((string) ($params['hostname'] ?? ''));
+        $groups = $params['groups'] ?? [];
+        if ($hostname === '') {
+            return 'Error: hostname is required.';
+        }
+        if (!is_array($groups) || !$groups) {
+            return 'Error: at least one host group is required (the "groups" parameter).';
+        }
+
+        $opts = [
+            'visible_name' => (string) ($params['visible_name'] ?? ''),
+            'description' => (string) ($params['description'] ?? ''),
+            'templates' => (isset($params['templates']) && is_array($params['templates'])) ? $params['templates'] : [],
+            'interface_ip' => (string) ($params['interface_ip'] ?? ''),
+            'interface_dns' => (string) ($params['interface_dns'] ?? ''),
+            'interface_port' => (string) ($params['interface_port'] ?? '10050'),
+            'create_missing_groups' => Util::truthy($params['create_missing_groups'] ?? false)
+        ];
+
+        $result = $api->createHost($hostname, $groups, $opts);
+        $id = is_array($result) ? (string) ($result['hostids'][0] ?? '') : '';
+
+        $msg = 'Host "'.$hostname.'" created'.($id !== '' ? ' (hostid '.$id.')' : '').'. Groups: '.implode(', ', array_map('strval', $groups));
+        if ($opts['templates']) {
+            $msg .= '. Templates: '.implode(', ', array_map('strval', $opts['templates']));
+        }
+        return $msg.'.';
+    }
+
+    private static function executeCreateTrigger(array $params, ZabbixApiClient $api): string {
+        $desc = trim((string) ($params['description'] ?? ''));
+        $expr = trim((string) ($params['expression'] ?? ''));
+        if ($desc === '' || $expr === '') {
+            return 'Error: both description (trigger name) and expression are required.';
+        }
+
+        $opts = [];
+        if (isset($params['priority']) && $params['priority'] !== '') {
+            $p = (int) $params['priority'];
+            if ($p < 0 || $p > 5) {
+                return 'Error: priority must be between 0 (Not classified) and 5 (Disaster).';
+            }
+            $opts['priority'] = $p;
+        }
+        if (!empty($params['comments'])) {
+            $opts['comments'] = (string) $params['comments'];
+        }
+        if (!empty($params['recovery_expression'])) {
+            $opts['recovery_expression'] = (string) $params['recovery_expression'];
+        }
+
+        $result = $api->createTrigger($desc, $expr, $opts);
+        $id = is_array($result) ? (string) ($result['triggerids'][0] ?? '') : '';
+
+        return 'Trigger "'.$desc.'" created'.($id !== '' ? ' (triggerid '.$id.')' : '').'.';
+    }
+
+    private static function executeGetProxyAssignedHosts(array $params, ZabbixApiClient $api): string {
+        $proxy = trim((string) ($params['proxy'] ?? ''));
+
+        $proxies = $api->getProxyAssignedHosts($proxy);
+        if (!$proxies) {
+            return 'No proxies found'.($proxy !== '' ? ' matching "'.$proxy.'"' : '').' (or no Zabbix proxies are configured).';
+        }
+
+        $lines = [];
+        foreach ($proxies as $p) {
+            $pname = (string) ($p['name'] ?? ($p['host'] ?? ''));
+            $hosts = is_array($p['hosts'] ?? null) ? $p['hosts'] : [];
+            $lines[] = 'Proxy "'.$pname.'" — '.count($hosts).' host(s):';
+            if ($hosts) {
+                $names = [];
+                foreach ($hosts as $h) {
+                    $names[] = (string) ($h['host'] ?? ($h['name'] ?? ($h['hostid'] ?? '')));
+                }
+                sort($names);
+                $lines[] = '  '.implode(', ', $names);
+            }
+        }
+        return implode("\n", $lines);
+    }
+
+    private static function bulkCap(array $context, string $key, int $default): int {
+        $v = (int) ($context['config']['zabbix_actions'][$key] ?? $default);
+        return $v > 0 ? $v : $default;
+    }
+
+    /**
+     * Freeze a resolved target set under a single-use, session-bound token
+     * (reusing PendingActionStore) and return a human-readable preview plus the
+     * token. apply_bulk_action consumes the token and acts on EXACTLY this set.
+     */
+    private static function storeBulkPreview(array $context, string $operation, array $ids, array $extra, string $human_list, bool $capped, int $cap): string {
+        $config = is_array($context['config'] ?? null) ? $context['config'] : null;
+        $session = (string) ($context['server_session'] ?? '');
+        if ($config === null || $session === '') {
+            return 'Error: bulk previews are not available in this context.';
+        }
+        if (!$ids) {
+            return 'Nothing matched — there is nothing to do.';
+        }
+
+        try {
+            $token = PendingActionStore::create($config, $session, [
+                'kind' => 'bulk_preview',
+                'operation' => $operation,
+                'ids' => array_values($ids),
+                'params' => $extra,
+                'count' => count($ids)
+            ]);
+        }
+        catch (\Throwable $e) {
+            return 'Error: could not store the preview ('.$e->getMessage().').';
+        }
+
+        $note = $capped ? "\n(NOTE: capped at ".$cap." — narrow the filter to include more.)" : '';
+
+        return 'PREVIEW — '.count($ids).' target(s):'."\n".$human_list.$note
+            ."\n\nTo apply, call apply_bulk_action with preview_token=\"".$token."\". "
+            .'This needs operator confirmation and affects EXACTLY these '.count($ids).' target(s).';
+    }
+
+    private static function executePreviewDisableTriggers(array $params, ZabbixApiClient $api, array $context): string {
+        $name = trim((string) ($params['name_pattern'] ?? ''));
+        $group = trim((string) ($params['host_group'] ?? ''));
+        if ($name === '') {
+            return 'Error: name_pattern is required.';
+        }
+
+        $cap = self::bulkCap($context, 'bulk_max_items', 100);
+        $rows = $api->findEnabledTriggersByName($name, $group, $cap + 1);
+        if (!$rows) {
+            return 'No enabled triggers match "'.$name.'"'.($group !== '' ? ' in group "'.$group.'"' : '').'.';
+        }
+        $capped = count($rows) > $cap;
+        if ($capped) {
+            $rows = array_slice($rows, 0, $cap);
+        }
+
+        $lines = [];
+        foreach ($rows as $r) {
+            $lines[] = '- ['.$r['host'].'] '.$r['description'];
+        }
+
+        return self::storeBulkPreview($context, 'disable_triggers', array_column($rows, 'triggerid'), [], implode("\n", $lines), $capped, $cap);
+    }
+
+    private static function executePreviewDisableItemsByError(array $params, ZabbixApiClient $api, array $context): string {
+        $error = trim((string) ($params['error_pattern'] ?? ''));
+        $group = trim((string) ($params['host_group'] ?? ''));
+        if ($error === '') {
+            return 'Error: error_pattern is required.';
+        }
+
+        $cap = self::bulkCap($context, 'bulk_max_items', 100);
+        $rows = $api->findUnsupportedItemsByError($error, $group, $cap + 1);
+        if (!$rows) {
+            return 'No unsupported items have an error matching "'.$error.'"'.($group !== '' ? ' in group "'.$group.'"' : '').'.';
+        }
+        $capped = count($rows) > $cap;
+        if ($capped) {
+            $rows = array_slice($rows, 0, $cap);
+        }
+
+        $lines = [];
+        foreach ($rows as $r) {
+            $lines[] = '- ['.$r['host'].'] '.$r['name'].' — '.self::truncateCell((string) ($r['error'] ?? ''), 100);
+        }
+
+        return self::storeBulkPreview($context, 'disable_items', array_column($rows, 'itemid'), [], implode("\n", $lines), $capped, $cap);
+    }
+
+    private static function executePreviewEnableItems(array $params, ZabbixApiClient $api, array $context): string {
+        $search = trim((string) ($params['item_search'] ?? ''));
+        $group = trim((string) ($params['host_group'] ?? ''));
+        if ($search === '') {
+            return 'Error: item_search is required.';
+        }
+
+        $cap = self::bulkCap($context, 'bulk_max_items', 100);
+        $rows = $api->findDisabledItems($search, $group, $cap + 1);
+        if (!$rows) {
+            return 'No disabled items match "'.$search.'"'.($group !== '' ? ' in group "'.$group.'"' : '').'.';
+        }
+        $capped = count($rows) > $cap;
+        if ($capped) {
+            $rows = array_slice($rows, 0, $cap);
+        }
+
+        $lines = [];
+        foreach ($rows as $r) {
+            $lines[] = '- ['.$r['host'].'] '.$r['name'];
+        }
+
+        return self::storeBulkPreview($context, 'enable_items', array_column($rows, 'itemid'), [], implode("\n", $lines), $capped, $cap);
+    }
+
+    private static function executePreviewBulkAddHostTag(array $params, ZabbixApiClient $api, array $context): string {
+        $group = trim((string) ($params['host_group'] ?? ''));
+        $tag = trim((string) ($params['tag'] ?? ''));
+        $value = (string) ($params['value'] ?? '');
+        if ($group === '' || $tag === '') {
+            return 'Error: host_group and tag are required.';
+        }
+
+        $cap = self::bulkCap($context, 'bulk_max_hosts', 25);
+        $rows = $api->findHostsInGroup($group, $cap + 1);
+        if (!$rows) {
+            return 'No hosts found in group "'.$group.'".';
+        }
+        $capped = count($rows) > $cap;
+        if ($capped) {
+            $rows = array_slice($rows, 0, $cap);
+        }
+
+        $lines = [];
+        foreach ($rows as $r) {
+            $lines[] = '- '.$r['host'];
+        }
+
+        $summary = 'tag '.$tag.($value !== '' ? '='.$value : '');
+        return self::storeBulkPreview($context, 'add_host_tag', array_column($rows, 'hostid'), ['tag' => $tag, 'value' => $value], 'Will add '.$summary.' to:'."\n".implode("\n", $lines), $capped, $cap);
+    }
+
+    private static function executePreviewLinkTemplate(array $params, ZabbixApiClient $api, array $context, bool $is_unlink): string {
+        $template = trim((string) ($params['template'] ?? ''));
+        $group = trim((string) ($params['host_group'] ?? ''));
+        $clear = $is_unlink && Util::truthy($params['clear'] ?? false);
+        if ($template === '' || $group === '') {
+            return 'Error: template and host_group are required.';
+        }
+
+        $tid = $api->getTemplateIdByName($template);
+        if ($tid === null) {
+            return 'Error: template "'.$template.'" not found.';
+        }
+
+        $cap = self::bulkCap($context, 'bulk_max_hosts', 25);
+        $rows = $api->findHostsInGroup($group, $cap + 1);
+        if (!$rows) {
+            return 'No hosts found in group "'.$group.'".';
+        }
+        $capped = count($rows) > $cap;
+        if ($capped) {
+            $rows = array_slice($rows, 0, $cap);
+        }
+
+        $lines = [];
+        foreach ($rows as $r) {
+            $lines[] = '- '.$r['host'];
+        }
+
+        $op = $is_unlink ? 'unlink_template' : 'link_template';
+        $verb = $is_unlink
+            ? 'Will UNLINK template "'.$template.'"'.($clear ? ' AND CLEAR its items/triggers' : '').' from:'
+            : 'Will LINK template "'.$template.'" to:';
+
+        return self::storeBulkPreview(
+            $context,
+            $op,
+            array_column($rows, 'hostid'),
+            ['template' => $template, 'templateid' => (string) $tid, 'clear' => $clear],
+            $verb."\n".implode("\n", $lines),
+            $capped,
+            $cap
+        );
+    }
+
+    private static function executeApplyBulkAction(array $params, ZabbixApiClient $api, array $context): string {
+        $token = trim((string) ($params['preview_token'] ?? ''));
+        if ($token === '') {
+            return 'Error: preview_token is required — run a preview_* tool first.';
+        }
+
+        $config = is_array($context['config'] ?? null) ? $context['config'] : null;
+        $session = (string) ($context['server_session'] ?? '');
+        if ($config === null || $session === '') {
+            return 'Error: bulk apply is not available in this context.';
+        }
+
+        try {
+            $action = PendingActionStore::consume($config, $session, $token);
+        }
+        catch (\Throwable $e) {
+            return 'Error: '.$e->getMessage();
+        }
+
+        if (($action['kind'] ?? '') !== 'bulk_preview') {
+            return 'Error: that token is not a bulk preview.';
+        }
+
+        $op = (string) ($action['operation'] ?? '');
+        $ids = is_array($action['ids'] ?? null) ? $action['ids'] : [];
+        if (!$ids) {
+            return 'Nothing to do — the preview had no targets.';
+        }
+
+        switch ($op) {
+            case 'disable_triggers':
+                $api->bulkSetTriggerStatus($ids, 1);
+                return 'Disabled '.count($ids).' trigger(s).';
+
+            case 'disable_items':
+                $api->bulkSetItemStatus($ids, 1);
+                return 'Disabled '.count($ids).' item(s).';
+
+            case 'enable_items':
+                $api->bulkSetItemStatus($ids, 0);
+                return 'Enabled '.count($ids).' item(s).';
+
+            case 'add_host_tag':
+                $tag = (string) ($action['params']['tag'] ?? '');
+                $value = (string) ($action['params']['value'] ?? '');
+                $api->bulkAddTagToHosts($ids, $tag, $value);
+                return 'Added tag '.$tag.($value !== '' ? '='.$value : '').' to '.count($ids).' host(s).';
+
+            case 'link_template':
+                $api->bulkLinkTemplateByHostIds($ids, (string) ($action['params']['templateid'] ?? ''));
+                return 'Linked template "'.($action['params']['template'] ?? '').'" to '.count($ids).' host(s).';
+
+            case 'unlink_template':
+                $clear = !empty($action['params']['clear']);
+                $api->bulkUnlinkTemplateByHostIds($ids, (string) ($action['params']['templateid'] ?? ''), $clear);
+                return 'Unlinked template "'.($action['params']['template'] ?? '').'"'.($clear ? ' (and cleared its items/triggers)' : '').' from '.count($ids).' host(s).';
+
+            default:
+                return 'Error: unknown bulk operation "'.$op.'".';
+        }
     }
 
     private static function executeGenerateEvidenceBundle(array $params, ZabbixApiClient $api, array $context): string {
@@ -3183,8 +4727,19 @@ class ZabbixActionExecutor {
             return 'Error: eventid parameter is required.';
         }
 
-        $action = (int) ($params['action'] ?? 4);
-        $message = (string) ($params['message'] ?? '');
+        $action = (int) ($params['action'] ?? 2);
+        $message = trim((string) ($params['message'] ?? ''));
+
+        // Only close (1), acknowledge (2) and add-message (4) are safe here.
+        // Severity, suppression, symptom/cause and un-acknowledge each require
+        // extra parameters and have dedicated tools.
+        $allowed = 1 | 2 | 4;
+        if ($action <= 0 || ($action & ~$allowed) !== 0) {
+            return 'Error: acknowledge_problem only supports close (1), acknowledge (2) and add-message (4). Use change_problem_severity for severity, suppress_problem for suppression, unacknowledge_problem to un-acknowledge, add_problem_message for a plain comment, and mark_problem_as_cause / mark_problem_as_symptom for ranking.';
+        }
+        if (($action & 4) !== 0 && $message === '') {
+            return 'Error: a message is required when the action includes add-message (bit 4).';
+        }
 
         $api->acknowledgeProblem($eventid, $action, $message);
 
@@ -3192,7 +4747,6 @@ class ZabbixActionExecutor {
         if ($action & 1) $actions_taken[] = 'closed';
         if ($action & 2) $actions_taken[] = 'acknowledged';
         if ($action & 4) $actions_taken[] = 'message added';
-        if ($action & 8) $actions_taken[] = 'severity changed';
 
         return 'Event '.$eventid.' updated: '.implode(', ', $actions_taken ?: ['action '.$action]).'.';
     }

@@ -605,7 +605,14 @@ class ChatSend extends CController {
                 'triggers' => false,
                 'users' => false,
                 'problems' => false,
-                'hostgroups' => false
+                'hostgroups' => false,
+                'hosts' => false,
+                'interfaces' => false,
+                'web' => false,
+                'dashboards' => false,
+                'templates' => false,
+                'discovery' => false,
+                'bulk' => false
             ],
             'require_confirmation' => true,
             'current_user_type' => $this->getUserType()
