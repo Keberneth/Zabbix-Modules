@@ -315,6 +315,8 @@ class ChatSend extends CController {
                         // human-in-the-loop "yes" for an injection-crafted call.
                         $param_errors = ZabbixActionExecutor::validateWriteParams($tool_name, $tool_params);
                         if ($param_errors) {
+                            $reject_reply = 'I refused to set up the "'.$tool_name.'" action because its parameters did not pass validation ('.implode('; ', $param_errors).'). If you meant to run this, please rephrase the request.';
+
                             AuditLogger::log($config, 'errors', [
                                 'event' => 'zabbix.write.rejected_invalid_params',
                                 'source' => 'ai.chat.send',
@@ -325,9 +327,20 @@ class ChatSend extends CController {
                                     'errors' => $param_errors
                                 ]
                             ]);
+
+                            // Also record the chat turn itself, so the refusal
+                            // shows under 'chat' alongside the 'errors' detail.
+                            $this->logChatEvent($config, $active_provider, $redactor, 'denied', $started_at, [
+                                'reply' => $redactor !== null ? $redactor->redactText($reject_reply, 'action_writes') : $reject_reply,
+                                'action_executed' => false,
+                                'action_tool' => $tool_name,
+                                'reason' => 'invalid_write_params',
+                                'category' => $write_category
+                            ]);
+
                             $this->respond([
                                 'ok' => true,
-                                'reply' => 'I refused to set up the "'.$tool_name.'" action because its parameters did not pass validation ('.implode('; ', $param_errors).'). If you meant to run this, please rephrase the request.',
+                                'reply' => $reject_reply,
                                 'provider_name' => $active_provider['name'] ?? 'AI'
                             ]);
                             return;
@@ -341,6 +354,10 @@ class ChatSend extends CController {
                             'created_at' => time()
                         ]);
 
+                        $confirm_msg_masked = $redactor !== null
+                            ? $redactor->redactText($confirm_msg, 'action_writes')
+                            : $confirm_msg;
+
                         AuditLogger::log($config, 'writes', [
                             'event' => 'zabbix.write.pending',
                             'source' => 'ai.chat.send',
@@ -349,13 +366,24 @@ class ChatSend extends CController {
                             'provider' => $this->providerInfo($active_provider),
                             'security' => $this->securityInfo($redactor),
                             'payload' => [
-                                'confirm_message' => $redactor !== null ? $redactor->redactText($confirm_msg, 'action_writes') : $confirm_msg
+                                'confirm_message' => $confirm_msg_masked
                             ],
                             'meta' => [
                                 'action_id' => $action_id,
                                 'category' => $write_category,
                                 'iteration' => $iter
                             ]
+                        ]);
+
+                        // Record the chat turn that produced this confirmation
+                        // prompt, so it appears under 'chat' as well as 'writes'.
+                        $this->logChatEvent($config, $active_provider, $redactor, 'pending', $started_at, [
+                            'reply' => $confirm_msg_masked,
+                            'action_executed' => false,
+                            'action_pending' => true,
+                            'action_tool' => $tool_name,
+                            'category' => $write_category,
+                            'action_id' => $action_id
                         ]);
 
                         $this->respond([
@@ -500,6 +528,23 @@ class ChatSend extends CController {
                             : trim($formatted_reply).$note;
                     }
                 }
+
+                // Every chat turn must produce a 'chat' audit entry, including
+                // answers that came out of the agentic tool-call loop. Without
+                // this, tool-driven chats (e.g. "are all NetBox VMs in Zabbix?")
+                // would only ever be logged under 'reads', never under 'chat'.
+                // Log the masked reply, matching the redaction-in-logs policy.
+                $final_reply_masked = $raw_output_final !== null
+                    ? $last_formatted_masked
+                    : ZabbixActionExecutor::stripToolCalls($current_reply_masked);
+
+                $this->logChatEvent($config, $active_provider, $redactor, 'ok', $started_at, [
+                    'reply' => $final_reply_masked,
+                    'message_count' => count($tool_messages),
+                    'action_executed' => $last_tool_name !== '',
+                    'action_tool' => $last_tool_name,
+                    'iterations' => $iterations_used
+                ]);
 
                 $this->respond([
                     'ok' => true,
