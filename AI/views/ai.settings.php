@@ -248,10 +248,26 @@ ob_start();
         </div>
     </div>
 
-    <form id="ai-settings-form" method="post" action="<?= $h($settings_save_url) ?>">
+    <form id="ai-settings-form" method="post" action="<?= $h($settings_save_url) ?>" data-active-tab="providers">
         <input type="hidden" name="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>" value="<?= $h(CCsrfTokenHelper::get('ai.settings.save')) ?>">
 
-        <section class="ai-card">
+        <nav class="ai-settings-tabs" role="tablist" aria-label="<?= $h(_('Settings sections')) ?>">
+            <button type="button" role="tab" class="ai-settings-tab is-active" data-tab="providers" aria-selected="true" tabindex="0"><?= $h(_('Providers')) ?></button>
+            <button type="button" role="tab" class="ai-settings-tab" data-tab="enrichment" aria-selected="false" tabindex="-1"><?= $h(_('Enrichment')) ?></button>
+            <button type="button" role="tab" class="ai-settings-tab" data-tab="zabbix" aria-selected="false" tabindex="-1"><?= $h(_('Zabbix')) ?></button>
+            <button type="button" role="tab" class="ai-settings-tab" data-tab="chat" aria-selected="false" tabindex="-1"><?= $h(_('Chat')) ?></button>
+            <button type="button" role="tab" class="ai-settings-tab" data-tab="security" aria-selected="false" tabindex="-1"><?= $h(_('Security')) ?></button>
+        </nav>
+        <noscript>
+            <style>
+                /* Without JS the tab bar can't switch, so fall back to one
+                   long scrollable page with every section visible. */
+                .ai-settings-tabs { display: none !important; }
+                .ai-tab-section { display: block !important; }
+            </style>
+        </noscript>
+
+        <section class="ai-card ai-tab-section" data-tab="providers">
             <div class="ai-section-header">
                 <h2><?= $h(_('Providers')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-providers" title="<?= $h(_('Help')) ?>">?</button>
@@ -311,7 +327,7 @@ ob_start();
             </div>
         </section>
 
-        <section class="ai-card">
+        <section class="ai-card ai-tab-section" data-tab="enrichment">
             <div class="ai-section-header">
                 <h2><?= $h(_('Global instructions')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-instructions" title="<?= $h(_('Help')) ?>">?</button>
@@ -331,7 +347,7 @@ ob_start();
             </div>
         </section>
 
-        <section class="ai-card">
+        <section class="ai-card ai-tab-section" data-tab="enrichment">
             <div class="ai-section-header">
                 <h2><?= $h(_('Reference links')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-links" title="<?= $h(_('Help')) ?>">?</button>
@@ -350,7 +366,7 @@ ob_start();
             </div>
         </section>
 
-        <section class="ai-card">
+        <section class="ai-card ai-tab-section" data-tab="zabbix">
             <div class="ai-section-header">
                 <h2><?= $h(_('Zabbix API')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-zabbix-api" title="<?= $h(_('Help')) ?>">?</button>
@@ -404,7 +420,7 @@ ob_start();
             </div>
         </section>
 
-        <section class="ai-card" id="ai-netbox-section" data-test-scope="netbox">
+        <section class="ai-card ai-tab-section" id="ai-netbox-section" data-test-scope="netbox" data-tab="enrichment">
             <div class="ai-section-header">
                 <h2><?= $h(_('NetBox')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-netbox" title="<?= $h(_('Help')) ?>">?</button>
@@ -459,7 +475,7 @@ ob_start();
             </div>
         </section>
 
-        <section class="ai-card">
+        <section class="ai-card ai-tab-section" data-tab="zabbix">
             <div class="ai-section-header">
                 <h2><?= $h(_('Webhook')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-webhook" title="<?= $h(_('Help')) ?>">?</button>
@@ -522,7 +538,7 @@ ob_start();
             </div>
         </section>
 
-        <section class="ai-card">
+        <section class="ai-card ai-tab-section" data-tab="chat">
             <div class="ai-section-header">
                 <h2><?= $h(_('Chat')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-chat" title="<?= $h(_('Help')) ?>">?</button>
@@ -559,7 +575,7 @@ ob_start();
             </div>
         </section>
 
-        <section class="ai-card">
+        <section class="ai-card ai-tab-section" data-tab="chat">
             <div class="ai-section-header">
                 <h2><?= $h(_('Problem page integration')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-problem-inline" title="<?= $h(_('Help')) ?>">?</button>
@@ -578,7 +594,7 @@ ob_start();
             </div>
         </section>
 
-        <section class="ai-card">
+        <section class="ai-card ai-tab-section" data-tab="security">
             <div class="ai-section-header">
                 <h2><?= $h(_('Security / redaction')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-security" title="<?= $h(_('Help')) ?>">?</button>
@@ -682,7 +698,7 @@ sudo -u $WEB_GROUP sh -c 'echo t &gt; /var/lib/zabbix-ai/state/.t \
             </div>
         </section>
 
-        <section class="ai-card">
+        <section class="ai-card ai-tab-section" data-tab="security">
             <div class="ai-section-header">
                 <h2><?= $h(_('Logging')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-logging" title="<?= $h(_('Help')) ?>">?</button>
@@ -795,7 +811,7 @@ sudo -u $WEB_GROUP sh -c 'echo t &gt; /var/log/zabbix-ai/.t \
             </div>
         </section>
 
-        <section class="ai-card">
+        <section class="ai-card ai-tab-section" data-tab="zabbix">
             <div class="ai-section-header">
                 <h2><?= $h(_('Zabbix actions')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-actions" title="<?= $h(_('Help')) ?>">?</button>
@@ -852,7 +868,7 @@ sudo -u $WEB_GROUP sh -c 'echo t &gt; /var/log/zabbix-ai/.t \
             </div>
         </section>
 
-        <section class="ai-card">
+        <section class="ai-card ai-tab-section" data-tab="chat">
             <div class="ai-section-header">
                 <h2><?= $h(_('Reports')) ?></h2>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-reports" title="<?= $h(_('Help')) ?>">?</button>

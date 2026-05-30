@@ -1469,3 +1469,67 @@ html[theme="hc-dark"] .ai-md .ai-link-btn:focus,
     color: #0f1c30;
     box-shadow: 0 2px 6px rgba(96, 165, 250, 0.35);
 }
+
+/* ── Settings tabs ── */
+.ai-settings-tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--ai-border);
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.ai-settings-tab {
+    /* Flex-centre the label so it sits dead-centre regardless of font metrics.
+       Every tab uses the selected "box" look; inactive tabs are simply dimmed,
+       so they all read as tabs while the active one still stands out. */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    min-height: 44px;
+    background: var(--ai-bg-accent);
+    border: 1px solid var(--ai-border);
+    border-bottom: none;
+    padding: 6px 18px;
+    cursor: pointer;
+    color: var(--ai-fg-muted);
+    font: inherit;
+    font-weight: 600;
+    line-height: 1.2;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    opacity: 0.65;
+    transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.ai-settings-tab:hover {
+    color: var(--ai-fg);
+    opacity: 0.85;
+}
+
+.ai-settings-tab.is-active {
+    background: var(--ai-bg);
+    color: var(--ai-fg);
+    opacity: 1;
+    margin-bottom: -1px;
+}
+
+.ai-settings-tab:focus-visible {
+    outline: 2px solid #2e7dd1;
+    outline-offset: -2px;
+}
+
+/* Only the active tab's sections are shown. Each section carries its tab
+   key in data-tab; the active key lives on the form's data-active-tab. */
+.ai-tab-section {
+    display: none;
+}
+
+#ai-settings-form[data-active-tab="providers"] .ai-tab-section[data-tab="providers"],
+#ai-settings-form[data-active-tab="enrichment"] .ai-tab-section[data-tab="enrichment"],
+#ai-settings-form[data-active-tab="zabbix"] .ai-tab-section[data-tab="zabbix"],
+#ai-settings-form[data-active-tab="chat"] .ai-tab-section[data-tab="chat"],
+#ai-settings-form[data-active-tab="security"] .ai-tab-section[data-tab="security"] {
+    display: block;
+}

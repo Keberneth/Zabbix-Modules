@@ -32,6 +32,8 @@
             return;
         }
 
+        setupSettingsTabs(root);
+
         var templates = {
             provider: document.getElementById('ai-provider-template'),
             instruction: document.getElementById('ai-instruction-template'),
@@ -211,6 +213,112 @@
         }
     }
 
+    // Turns the long settings form into a tabbed view. Sections stay in the
+    // DOM (and in the single form) so every field still submits regardless of
+    // which tab is showing; CSS hides all but the active tab's sections.
+    function setupSettingsTabs(root) {
+        var form = document.getElementById('ai-settings-form');
+        var tablist = root.querySelector('.ai-settings-tabs');
+
+        if (!form || !tablist) {
+            return;
+        }
+
+        var tabKeys = ['providers', 'enrichment', 'zabbix', 'chat', 'security'];
+        var storageKey = 'aiSettingsActiveTab';
+        var tabs = Array.prototype.slice.call(tablist.querySelectorAll('.ai-settings-tab'));
+
+        if (!tabs.length) {
+            return;
+        }
+
+        function activate(key, focusTab) {
+            if (tabKeys.indexOf(key) === -1) {
+                key = tabKeys[0];
+            }
+
+            form.setAttribute('data-active-tab', key);
+
+            for (var i = 0; i < tabs.length; i++) {
+                var isActive = tabs[i].getAttribute('data-tab') === key;
+                tabs[i].classList.toggle('is-active', isActive);
+                tabs[i].setAttribute('aria-selected', isActive ? 'true' : 'false');
+                tabs[i].setAttribute('tabindex', isActive ? '0' : '-1');
+
+                if (isActive && focusTab) {
+                    tabs[i].focus();
+                }
+            }
+
+            try {
+                window.sessionStorage.setItem(storageKey, key);
+            }
+            catch (e) {}
+        }
+
+        tablist.addEventListener('click', function (event) {
+            var tab = event.target.closest('.ai-settings-tab');
+            if (tab) {
+                event.preventDefault();
+                activate(tab.getAttribute('data-tab'), false);
+            }
+        });
+
+        // Left/Right arrow keys move between tabs (standard tablist behaviour).
+        tablist.addEventListener('keydown', function (event) {
+            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+                return;
+            }
+
+            var current = tabs.indexOf(document.activeElement);
+            if (current === -1) {
+                return;
+            }
+
+            event.preventDefault();
+            var next = (event.key === 'ArrowRight')
+                ? (current + 1) % tabs.length
+                : (current - 1 + tabs.length) % tabs.length;
+            activate(tabs[next].getAttribute('data-tab'), true);
+        });
+
+        // If the browser blocks submit because a field fails HTML5 validation
+        // (e.g. an out-of-range number), that field may be on a hidden tab and
+        // so not focusable — which looks like a silent "Save does nothing".
+        // Reveal the tab holding the first invalid field so the browser can
+        // focus it and show its message. 'invalid' doesn't bubble, so capture.
+        form.addEventListener('invalid', function () {
+            var firstInvalid = form.querySelector(':invalid');
+            var section = (firstInvalid && firstInvalid.closest)
+                ? firstInvalid.closest('.ai-tab-section')
+                : null;
+
+            if (section) {
+                activate(section.getAttribute('data-tab'), false);
+            }
+        }, true);
+
+        // Restore the last-used tab after the save→reload. A URL hash such as
+        // "#zabbix" wins, so a specific tab can be deep-linked.
+        var initial = tabKeys[0];
+        var hash = (window.location.hash || '').replace(/^#/, '');
+
+        if (tabKeys.indexOf(hash) !== -1) {
+            initial = hash;
+        }
+        else {
+            try {
+                var stored = window.sessionStorage.getItem(storageKey);
+                if (stored && tabKeys.indexOf(stored) !== -1) {
+                    initial = stored;
+                }
+            }
+            catch (e) {}
+        }
+
+        activate(initial, false);
+    }
+
     function parseJsonSafe(text) {
         try {
             return JSON.parse(text);
@@ -236,6 +344,12 @@
 
         if (form) {
             form.parentNode.insertBefore(el, form);
+        }
+
+        // The banner sits above the form, so make sure it is in view even when
+        // the user has scrolled down inside a long tab.
+        if (el.scrollIntoView) {
+            el.scrollIntoView({block: 'nearest'});
         }
     }
 
