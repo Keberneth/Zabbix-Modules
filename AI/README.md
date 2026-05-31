@@ -285,35 +285,6 @@ The module accepts either:
 - AI-powered Zabbix actions depend on the AI model correctly interpreting your request and generating valid tool calls. More capable models (GPT-5, Claude Sonnet/Opus) produce better results than smaller models.
 - Item history fetching uses the Zabbix `history.get` API and auto-detects the correct history type (numeric float, unsigned, string, text).
 
-## Files of interest
-
-```text
-manifest.json                     Module registration and default config
-Module.php                        Menu wiring + conditional asset injection for problem page
-actions/ChatView.php              Chat page controller
-actions/ChatSend.php              Chat AJAX endpoint (with tool-calling loop + problem enrichment)
-actions/ChatExecute.php           Confirmed write action executor
-actions/EventComment.php          Post AI response back to a Zabbix event
-actions/ProblemContext.php        Problem context + CSRF tokens + item history endpoint
-actions/SettingsView.php          Settings page controller
-actions/SettingsSave.php          Settings save action
-actions/Webhook.php               Internal webhook endpoint
-lib/ProviderClient.php            LLM provider abstraction (OpenAI, Ollama, Anthropic)
-lib/ZabbixApiClient.php           Zabbix API wrapper (problems, triggers, items, history, host groups)
-lib/ZabbixActionExecutor.php      Tool definitions, parsing, execution, and JSON stripping
-lib/NetBoxClient.php              NetBox enrichment wrapper
-lib/PromptBuilder.php             System/user prompt assembly (with problem context + tool prompts)
-views/ai.chat.php                 Chat page view (with action confirm UI + history button)
-views/ai.settings.php             Settings page view (providers, actions, problem inline settings)
-assets/js/ai.chat.js              Session-only chat logic (with action handling + state import)
-assets/js/ai.problem.inline.js    Problem page AI button injection + drawer chat
-assets/js/ai.settings.js          Dynamic settings rows
-assets/css/ai.css                 Module styling
-assets/css/ai.problem.inline.css  Problem page drawer styling
-mediatype/media_type_ai_webhook.js  Example Zabbix webhook media type script
-mediatype/media_type_setup.md       Media type setup guide and parameters
-```
-
 ## Quick webhook smoke test
 
 ```bash
