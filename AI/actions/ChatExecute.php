@@ -36,20 +36,24 @@ class ChatExecute extends CController {
             $chat_session_id = Util::cleanId($post['chat_session_id'] ?? '', 'chat');
             $action_id = Util::cleanId($post['action_id'] ?? '', 'action');
 
-            if ($action_id !== '') {
-                $pending = PendingActionStore::consume($config, $this->serverSessionKey(), $action_id);
-                $tool_name = Util::cleanString($pending['tool'] ?? '', 64);
-                $tool_params = is_array($pending['params'] ?? null) ? $pending['params'] : [];
-                $provider_id = Util::cleanString($pending['provider_id'] ?? '', 128);
-                if ($chat_session_id === '') {
-                    $chat_session_id = Util::cleanId($pending['chat_session_id'] ?? '', 'chat');
-                }
+            // A confirmed, single-use pending action is the ONLY accepted way to
+            // execute a tool here. The AI stages a write via ChatSend, which
+            // returns an action_id; the operator confirms, and that id is consumed
+            // exactly once below. There is intentionally no tool/params_json
+            // fallback — that would let a caller execute an enabled write tool the
+            // AI never proposed and no operator confirmed, bypassing the
+            // human-in-the-loop contract the pending-action store exists to
+            // enforce.
+            if ($action_id === '') {
+                throw new \RuntimeException('A confirmed action reference is required. Re-run the request so the action can be staged and confirmed.');
             }
-            else {
-                // Legacy fallback. Prefer action_id from server-side pending storage.
-                $tool_name = Util::cleanString($post['tool'] ?? '', 64);
-                $tool_params = Util::decodeJsonArray($post['params_json'] ?? '{}');
-                $provider_id = Util::cleanString($post['provider_id'] ?? '', 128);
+
+            $pending = PendingActionStore::consume($config, $this->serverSessionKey(), $action_id);
+            $tool_name = Util::cleanString($pending['tool'] ?? '', 64);
+            $tool_params = is_array($pending['params'] ?? null) ? $pending['params'] : [];
+            $provider_id = Util::cleanString($pending['provider_id'] ?? '', 128);
+            if ($chat_session_id === '') {
+                $chat_session_id = Util::cleanId($pending['chat_session_id'] ?? '', 'chat');
             }
 
             if ($tool_name === '') {
@@ -66,12 +70,9 @@ class ChatExecute extends CController {
                 throw new \RuntimeException('Zabbix actions are not enabled.');
             }
 
-            $zabbix_api = ZabbixApiClient::fromFrontendOrConfig($config);
-            if ($zabbix_api === null) {
-                throw new \RuntimeException('Zabbix API is not available. Configure the Zabbix API token or run this from a valid Zabbix frontend session.');
-            }
-
             $write_category = ZabbixActionExecutor::getWriteCategory($tool_name);
+            $is_super_admin = $this->getUserType() >= USER_TYPE_SUPER_ADMIN;
+
             if ($write_category !== '') {
                 if (($actions_config['mode'] ?? 'read') !== 'readwrite') {
                     throw new \RuntimeException('Write access is not enabled.');
@@ -83,9 +84,27 @@ class ChatExecute extends CController {
                 }
 
                 if (Util::truthy($actions_config['require_super_admin_for_write'] ?? true)
-                    && $this->getUserType() < USER_TYPE_SUPER_ADMIN) {
+                    && !$is_super_admin) {
                     throw new \RuntimeException('Write actions require Super Admin privileges.');
                 }
+            }
+
+            // For write tools, never silently fall back to the configured service
+            // token (typically a Super Admin token) for a non-Super-Admin operator:
+            // that would execute the change with privileges the user does not
+            // actually hold. Run writes under the caller's own RBAC via the
+            // frontend API, allowing the token fallback only for Super Admins.
+            // Read tools keep the normal fallback so context still loads in
+            // token-only / split deployments.
+            $zabbix_api = $write_category !== ''
+                ? ZabbixApiClient::fromFrontendForWrite($config, $is_super_admin)
+                : ZabbixApiClient::fromFrontendOrConfig($config);
+
+            if ($zabbix_api === null) {
+                if ($write_category !== '' && !$is_super_admin) {
+                    throw new \RuntimeException('This write action must run under your own Zabbix permissions, but the Zabbix frontend API is not available in this session. Ask a Super Admin to run it, or run it from a valid Zabbix frontend session.');
+                }
+                throw new \RuntimeException('Zabbix API is not available. Configure the Zabbix API token or run this from a valid Zabbix frontend session.');
             }
 
             // Server-side schema validation for write tools. The AI is allowed
@@ -120,7 +139,11 @@ class ChatExecute extends CController {
             $tool_result = ZabbixActionExecutor::execute($tool_name, $tool_params, $zabbix_api, [
                 'config' => $config,
                 'server_session' => $this->serverSessionKey(),
-                'netbox_client' => NetBoxClient::fromConfig($config)
+                'netbox_client' => NetBoxClient::fromConfig($config),
+                // Carried so bulk apply can re-authorize the underlying operation's
+                // real category (a coarse 'bulk' grant must not bypass per-category
+                // and Super-Admin gates). See executeApplyBulkAction().
+                'is_super_admin' => $is_super_admin
             ]);
 
             // Default so the writes-audit entry below has a defined provider even

@@ -24,6 +24,15 @@ class TestProvider extends CController {
     protected function doAction(): void {
         try {
             $provider = $this->buildProviderFromPost();
+
+            // Block server-side requests to cloud-metadata/link-local targets.
+            // Only a custom endpoint is validated; an empty endpoint falls back to
+            // the vendor's public API URL inside the list* helpers.
+            $endpoint = trim((string) ($provider['endpoint'] ?? ''));
+            if ($endpoint !== '') {
+                Util::assertSafeProbeUrl($endpoint);
+            }
+
             $type = strtolower(trim((string) ($provider['type'] ?? 'openai_compatible')));
 
             switch ($type) {

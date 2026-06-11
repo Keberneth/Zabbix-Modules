@@ -29,6 +29,15 @@ class Redactor {
     /** [lowercase_service_name => original_case_name] — preserves case for restoration. */
     private array $zbx_service_canonical = [];
 
+    /**
+     * Set when an admin-supplied custom regex rule fails to compile or aborts at
+     * runtime (e.g. PCRE backtrack limit on a pathological pattern). In strict
+     * mode this forces the request to fail closed instead of silently forwarding
+     * text the broken rule was meant to mask. Reset at the start of each
+     * applyCustomRules() pass.
+     */
+    private bool $custom_rule_failed = false;
+
     private array $stats = [
         'hostnames' => 0,
         'ipv4' => 0,
@@ -153,8 +162,21 @@ class Redactor {
         $text = $this->applyHostnameRedaction($text);
 
         $this->assertNoKnownLeaks($text);
+        $this->assertCustomRulesApplied();
 
         return $text;
+    }
+
+    /**
+     * Fail closed in strict mode if any custom redaction rule failed to apply.
+     * assertNoKnownLeaks() only catches values already registered in the forward
+     * map; a rule that never ran (bad pattern / PCRE abort) leaves no mapping to
+     * detect, so its intended secret could otherwise pass through unmasked.
+     */
+    private function assertCustomRulesApplied(): void {
+        if ($this->custom_rule_failed && Util::truthy($this->config['security']['strict_mode'] ?? true)) {
+            throw new RuntimeException('Security redaction blocked a request because a custom redaction rule failed to apply (invalid pattern or PCRE limit). Fix the rule or disable strict mode if you need best-effort behavior.');
+        }
     }
 
     /**
@@ -651,6 +673,8 @@ class Redactor {
     }
 
     private function applyCustomRules(string $text): string {
+        $this->custom_rule_failed = false;
+
         $rules = is_array($this->config['security']['custom_rules'] ?? null)
             ? $this->config['security']['custom_rules']
             : [];
@@ -719,6 +743,9 @@ class Redactor {
                 $pattern = '~'.$safe_match.'~u';
                 $test = @preg_match($pattern, 'test');
                 if ($test === false) {
+                    // Pattern does not compile — it can never mask its target, so
+                    // record the failure for the strict-mode fail-closed check.
+                    $this->custom_rule_failed = true;
                     continue;
                 }
 
@@ -740,8 +767,13 @@ class Redactor {
 
                 // preg_* returns null on a PCRE failure (e.g. backtrack limit on a
                 // pathological pattern); never let that wipe the text being masked.
+                // Record the failure so strict mode can fail closed rather than
+                // forward text this rule was supposed to redact.
                 if (is_string($replaced)) {
                     $text = $replaced;
+                }
+                else {
+                    $this->custom_rule_failed = true;
                 }
             }
         }

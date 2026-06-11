@@ -41,18 +41,110 @@ class Util {
     }
 
     public static function cleanUrl($value): string {
-        return trim((string) $value);
+        $value = trim((string) $value);
+
+        if ($value === '') {
+            return '';
+        }
+
+        // Only http(s) URLs are accepted. This blocks dangerous schemes such as
+        // javascript:, data:, file: and gopher: from being stored as provider
+        // endpoints, Zabbix/NetBox URLs or reference links (reference links are
+        // rendered as clickable anchors in the chat UI). Docker/loopback/private
+        // hosts all use http(s), so this never breaks local or split deployments.
+        if (!preg_match('#^https?://#i', $value)) {
+            return '';
+        }
+
+        return $value;
     }
 
     public static function cleanPath($value, int $max_length = 1024): string {
-        $value = str_replace(["\0"], '', trim((string) $value));
+        $value = str_replace(["\0", '\\'], ['', '/'], trim((string) $value));
         $value = preg_replace('#/+#', '/', $value);
+
+        // Strip parent-directory traversal and '.' segments so a configured base
+        // path can never escape upward (e.g. "/var/lib/zabbix-ai/../../etc/..").
+        // Legitimate data directories never need "..". Absolute paths are still
+        // allowed because Docker volume mounts and multi-server installs
+        // legitimately point at arbitrary mount points.
+        $is_absolute = isset($value[0]) && $value[0] === '/';
+        $segments = array_filter(explode('/', $value), static function($segment) {
+            return $segment !== '' && $segment !== '.' && $segment !== '..';
+        });
+        $value = ($is_absolute ? '/' : '').implode('/', $segments);
 
         if ($max_length > 0 && self::strLen($value) > $max_length) {
             $value = self::subStr($value, 0, $max_length);
         }
 
         return $value;
+    }
+
+    /**
+     * Guard an operator-supplied URL that the server is about to fetch directly
+     * (the "Test connection" buttons). Enforces an http(s) scheme and blocks
+     * link-local / cloud-metadata targets (169.254.0.0/16, IPv6 fe80::/10 and
+     * the well-known metadata hostnames) — never a legitimate provider/NetBox
+     * endpoint, but the classic SSRF pivot to steal cloud credentials.
+     *
+     * Loopback and private ranges are deliberately allowed: single-server,
+     * multi-server and Docker deployments rely on them (localhost, 10.x,
+     * 172.16-31.x, 192.168.x and container DNS names), so blocking them would
+     * break the module's normal topologies.
+     */
+    public static function assertSafeProbeUrl(string $url): void {
+        $url = trim($url);
+
+        if ($url === '' || !preg_match('#^https?://#i', $url)) {
+            throw new \RuntimeException('Only http(s) URLs are allowed.');
+        }
+
+        $host = (string) parse_url($url, PHP_URL_HOST);
+        if ($host === '') {
+            throw new \RuntimeException('The URL does not contain a valid host.');
+        }
+
+        $host = trim($host, '[]');
+        $lower_host = strtolower($host);
+
+        if ($lower_host === 'metadata.google.internal' || $lower_host === 'metadata') {
+            throw new \RuntimeException('This host is a cloud metadata endpoint and is not an allowed target.');
+        }
+
+        $candidates = [];
+        if (filter_var($host, FILTER_VALIDATE_IP)) {
+            $candidates[] = $host;
+        }
+        else {
+            $resolved = @gethostbynamel($host);
+            if (is_array($resolved)) {
+                $candidates = $resolved;
+            }
+        }
+
+        foreach ($candidates as $ip) {
+            if (self::isLinkLocalIp((string) $ip)) {
+                throw new \RuntimeException('This host resolves to a link-local/metadata address, which is not an allowed target.');
+            }
+        }
+    }
+
+    private static function isLinkLocalIp(string $ip): bool {
+        // IPv4 link-local / cloud metadata range: 169.254.0.0/16.
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            return strpos($ip, '169.254.') === 0;
+        }
+
+        // IPv6 link-local fe80::/10 (fe80–febf) and IPv4-mapped 169.254.x.
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            $lower = strtolower($ip);
+
+            return (bool) preg_match('/^fe[89ab][0-9a-f]:/', $lower)
+                || strpos($lower, '::ffff:169.254.') !== false;
+        }
+
+        return false;
     }
 
     public static function cleanInt($value, int $default = 0, ?int $min = null, ?int $max = null): int {

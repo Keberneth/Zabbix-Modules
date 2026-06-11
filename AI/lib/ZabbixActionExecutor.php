@@ -4015,6 +4015,58 @@ class ZabbixActionExecutor {
         );
     }
 
+    /**
+     * Map a bulk operation to the concrete write category it really exercises,
+     * so apply_bulk_action can be re-checked against the same per-category gates
+     * the equivalent single-host tools enforce. Returns '' for an unknown op.
+     */
+    private static function bulkOperationCategory(string $op): string {
+        static $map = [
+            'disable_triggers' => 'triggers',
+            'disable_items' => 'items',
+            'enable_items' => 'items',
+            'add_host_tag' => 'hosts',
+            'link_template' => 'templates',
+            'unlink_template' => 'templates'
+        ];
+
+        return $map[$op] ?? '';
+    }
+
+    /**
+     * Enforce the underlying operation's real write category + Super-Admin gate
+     * before a bulk apply executes. Returns an error string to abort, or '' when
+     * authorized. Mirrors the checks in ChatExecute so the coarse 'bulk'
+     * permission cannot be used to bypass them.
+     */
+    private static function authorizeBulkOperation(string $op, array $context): string {
+        $category = self::bulkOperationCategory($op);
+        if ($category === '') {
+            return 'Error: unknown bulk operation "'.$op.'".';
+        }
+
+        $config = is_array($context['config'] ?? null) ? $context['config'] : [];
+        $actions_config = is_array($config['zabbix_actions'] ?? null) ? $config['zabbix_actions'] : [];
+
+        if (($actions_config['mode'] ?? 'read') !== 'readwrite') {
+            return 'Error: write access is not enabled, so the "'.$category.'" bulk operation cannot run.';
+        }
+
+        $write_permissions = is_array($actions_config['write_permissions'] ?? null)
+            ? $actions_config['write_permissions']
+            : [];
+        if (empty($write_permissions[$category])) {
+            return 'Error: this bulk operation requires the "'.$category.'" write permission, which is not enabled.';
+        }
+
+        if (Util::truthy($actions_config['require_super_admin_for_write'] ?? true)
+            && empty($context['is_super_admin'])) {
+            return 'Error: this bulk operation requires Super Admin privileges.';
+        }
+
+        return '';
+    }
+
     private static function executeApplyBulkAction(array $params, ZabbixApiClient $api, array $context): string {
         $token = trim((string) ($params['preview_token'] ?? ''));
         if ($token === '') {
@@ -4042,6 +4094,18 @@ class ZabbixActionExecutor {
         $ids = is_array($action['ids'] ?? null) ? $action['ids'] : [];
         if (!$ids) {
             return 'Nothing to do — the preview had no targets.';
+        }
+
+        // Re-authorize against the REAL category of the underlying operation.
+        // apply_bulk_action itself only carries the coarse 'bulk' permission, but
+        // each operation maps to a concrete (often destructive) category — e.g.
+        // unlink_template -> templates, disable_triggers -> triggers. Without this
+        // a 'bulk' grant alone would silently authorize fleet-wide template,
+        // trigger, item and host writes that otherwise each require their own
+        // per-category permission (and Super-Admin gate).
+        $authz_error = self::authorizeBulkOperation($op, $context);
+        if ($authz_error !== '') {
+            return $authz_error;
         }
 
         switch ($op) {

@@ -60,7 +60,12 @@ class Config {
                 'enabled' => true,
                 'shared_secret' => '',
                 'shared_secret_env' => '',
-                'require_secret' => false,
+                // Secure by default: the webhook rejects calls unless a valid
+                // shared secret is presented. An operator can deliberately opt out
+                // by unticking "Require a valid shared secret" in the settings UI
+                // (e.g. when the endpoint is already locked down at the network
+                // layer). See WebhookHandler::validateSecret().
+                'require_secret' => true,
                 'add_problem_update' => true,
                 'problem_update_action' => 4,
                 'comment_chunk_size' => 1900,
@@ -188,6 +193,11 @@ class Config {
 
         $config = self::mergeWithDefaults($config);
 
+        // Encrypt secrets at rest if an encryption key is configured. Values that
+        // are already encrypted or are "env:" references are left untouched, and
+        // with no key configured this is a no-op (plaintext storage preserved).
+        $config = self::encryptSecrets($config);
+
         try {
             API::Module()->update([[
                 'moduleid' => $record['moduleid'],
@@ -228,6 +238,10 @@ class Config {
             $rule['id'] = Util::cleanId($rule['id'] ?? '', 'rule');
         }
         unset($rule);
+
+        // Transient, view-only: lets the settings UI show whether secrets are
+        // encrypted at rest. Not persisted (the form rebuilds config from POST).
+        $config['secret_storage'] = Crypto::status();
 
         return $config;
     }
@@ -552,7 +566,50 @@ class Config {
             }
         }
 
-        return $plain_value;
+        // The stored value may be encrypted at rest (enc:v1:...). Crypto::decrypt
+        // returns plain values unchanged, so this is a no-op for plaintext or
+        // installs without an encryption key configured.
+        return Crypto::decrypt($plain_value);
+    }
+
+    /**
+     * The exact config fields treated as secrets for encryption-at-rest. Each
+     * entry resolves to a string that Crypto::encrypt()/decrypt() acts on.
+     */
+    private static function applyToSecretFields(array $config, callable $fn): array {
+        if (isset($config['providers']) && is_array($config['providers'])) {
+            foreach ($config['providers'] as &$provider) {
+                if (is_array($provider) && isset($provider['api_key'])) {
+                    $provider['api_key'] = $fn((string) $provider['api_key']);
+                }
+            }
+            unset($provider);
+        }
+
+        if (isset($config['zabbix_api']['token'])) {
+            $config['zabbix_api']['token'] = $fn((string) $config['zabbix_api']['token']);
+        }
+
+        if (isset($config['netbox']['token'])) {
+            $config['netbox']['token'] = $fn((string) $config['netbox']['token']);
+        }
+
+        if (isset($config['webhook']['shared_secret'])) {
+            $config['webhook']['shared_secret'] = $fn((string) $config['webhook']['shared_secret']);
+        }
+
+        return $config;
+    }
+
+    /**
+     * Encrypt every stored secret in-place before persistence. A no-op when no
+     * encryption key is configured (Crypto::encrypt returns the value unchanged),
+     * so plaintext storage remains the unchanged default behavior.
+     */
+    public static function encryptSecrets(array $config): array {
+        return self::applyToSecretFields($config, static function(string $value): string {
+            return Crypto::encrypt($value);
+        });
     }
 
     public static function mergeWithDefaults(array $config): array {

@@ -33,6 +33,10 @@ class TestNetBox extends CController {
                 throw new RuntimeException('NetBox token is required (enter one in the form, set the env variable, or keep the stored token).');
             }
 
+            // Block server-side requests to cloud-metadata/link-local targets
+            // before attaching the (possibly stored) NetBox token to the request.
+            Util::assertSafeProbeUrl($cfg['url']);
+
             $url = rtrim($cfg['url'], '/').'/api/status/';
 
             $response = HttpClient::expectSuccess('GET', $url, [

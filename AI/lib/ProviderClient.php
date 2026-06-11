@@ -74,7 +74,11 @@ class ProviderClient {
             'headers' => $headers,
             'json' => $payload,
             'timeout' => (int) ($provider['timeout'] ?? 120),
-            'verify_peer' => (bool) ($provider['verify_peer'] ?? false)
+            // Default to verifying TLS like the OpenAI/Anthropic paths. A remote
+            // HTTPS Ollama must not silently skip certificate verification. For a
+            // plain-HTTP loopback endpoint (the common local install) this flag
+            // has no effect, so the secure default costs nothing there.
+            'verify_peer' => self::resolveVerifyPeer($provider, $endpoint)
         ]);
 
         if (!is_array($response['json'])) {
@@ -249,6 +253,21 @@ class ProviderClient {
         }
 
         return $content;
+    }
+
+    /**
+     * Resolve the TLS verification flag for a provider. An explicit per-provider
+     * setting is always honored; otherwise we default to verifying. The endpoint
+     * is accepted for clarity at the call site — verification is irrelevant for a
+     * plain-HTTP endpoint, so a secure default never breaks a local loopback
+     * Ollama while still protecting any remote HTTPS endpoint.
+     */
+    private static function resolveVerifyPeer(array $provider, string $endpoint): bool {
+        if (array_key_exists('verify_peer', $provider) && $provider['verify_peer'] !== '' && $provider['verify_peer'] !== null) {
+            return (bool) $provider['verify_peer'];
+        }
+
+        return true;
     }
 
     private static function buildHeaders(array $provider, bool $default_json_accept = false): array {

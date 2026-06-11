@@ -29,6 +29,16 @@ class HttpClient {
         $header_lines = [];
 
         foreach ($headers as $name => $value) {
+            // Strip CR/LF so an operator-supplied header (e.g. from a provider's
+            // custom headers_json) cannot inject additional headers or split the
+            // request.
+            $name = str_replace(["\r", "\n"], '', (string) $name);
+            $value = str_replace(["\r", "\n"], '', (string) $value);
+
+            if ($name === '') {
+                continue;
+            }
+
             $header_lines[] = $name.': '.$value;
         }
 

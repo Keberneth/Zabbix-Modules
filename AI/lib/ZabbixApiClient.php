@@ -65,6 +65,34 @@ class ZabbixApiClient {
     }
 
     /**
+     * Client factory for write actions triggered from an interactive frontend
+     * session. Writes must run under the calling user's own Zabbix RBAC, so we
+     * prefer the in-process frontend API. The configured service token is
+     * typically a Super Admin token, so falling back to it for a lower-privileged
+     * operator would execute the change with privileges the user does not hold.
+     * The fallback is therefore allowed ONLY for Super Admins (whose rights
+     * already match such a token). When neither transport is available this
+     * returns null and the caller MUST fail closed rather than execute the write.
+     *
+     * The webhook/standalone automation path is unaffected: it keeps using
+     * fromConfig() directly, because it is token-based by design and has no
+     * interactive user session to enforce RBAC against.
+     */
+    public static function fromFrontendForWrite(array $config, bool $allow_service_token_fallback): ?self {
+        $frontend = self::fromFrontend($config);
+
+        if ($frontend !== null) {
+            return $frontend;
+        }
+
+        if ($allow_service_token_fallback) {
+            return self::fromConfig($config);
+        }
+
+        return null;
+    }
+
+    /**
      * Create a client that uses Zabbix's PHP API facade (API::Host()->get(),
      * API::Problem()->get(), etc.) under the current frontend user's session.
      */

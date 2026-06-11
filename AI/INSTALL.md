@@ -103,6 +103,55 @@ Then:
 
 That is all. No database migrations, no external services, no additional packages.
 
+## 5b. (Recommended) Encrypt stored secrets at rest
+
+By default the API keys, Zabbix/NetBox tokens and the webhook shared secret you
+enter in **AI settings** are stored **unencrypted** in the Zabbix `module`
+configuration row, so anyone with database, backup or configuration-export
+access can read them.
+
+To encrypt them at rest, set the `ZABBIX_AI_ENCRYPTION_KEY` environment variable
+for the **PHP/web process** to a long random passphrase, then open AI settings
+and click **Save** once (existing plaintext secrets are migrated to ciphertext
+on save). The key is hashed to a 256-bit key and never stored in the database, so
+a DB dump no longer exposes the secrets. AES-256-GCM (libsodium, OpenSSL
+fallback) is used automatically.
+
+```bash
+# Generate a strong key value
+openssl rand -base64 48
+```
+
+Make it visible to the PHP worker. Examples:
+
+```ini
+; php-fpm pool (e.g. /etc/php-fpm.d/www.conf) — note env[] entries
+env[ZABBIX_AI_ENCRYPTION_KEY] = "PASTE_GENERATED_VALUE"
+```
+
+```yaml
+# Docker / docker-compose — set on every frontend container
+services:
+  zabbix-web:
+    environment:
+      ZABBIX_AI_ENCRYPTION_KEY: "PASTE_GENERATED_VALUE"
+```
+
+Important for multi-server and Docker deployments: set the **same** value on
+**every** frontend node/container. A node with a different (or missing) key
+cannot decrypt secrets saved elsewhere — it fails safe (the affected feature
+reports the secret as unavailable) rather than corrupting anything, but the
+secret will not work there until the matching key is present. If you ever lose
+the key, simply re-enter the secrets after setting a new one.
+
+Alternative (no encryption needed): leave a secret field blank and set its
+**Secret environment variable** name instead. The value is then resolved from
+the environment at request time (e.g. a Vault-populated variable) and never
+touches the database at all.
+
+For full step-by-step instructions (php-fpm, Apache mod_php, Docker, multi-server,
+verification, key rotation and troubleshooting), see [ENCRYPTION.md](ENCRYPTION.md).
+
 ## 6. Create writable directories for security state and logging
 
 The module needs writable directories for two features: **redaction alias state** (when security/redaction is enabled) and **audit logging** (when logging is enabled). Both features fail silently if the directories are not writable.

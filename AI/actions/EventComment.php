@@ -43,12 +43,21 @@ class EventComment extends CController {
                 : null;
             $message_to_post = $redactor !== null ? $redactor->restoreText($message) : $message;
 
-            $client = ZabbixApiClient::fromFrontendOrConfig($config);
+            $this->assertProblemWriteAllowed($config);
+
+            // Posting a problem update is a write, so it must run under the
+            // operator's own Zabbix RBAC. Only Super Admins may fall back to the
+            // configured service token; for anyone else, fail closed rather than
+            // post a comment with escalated privileges. See
+            // ZabbixApiClient::fromFrontendForWrite().
+            $is_super_admin = $this->getUserType() >= USER_TYPE_SUPER_ADMIN;
+            $client = ZabbixApiClient::fromFrontendForWrite($config, $is_super_admin);
             if ($client === null) {
+                if (!$is_super_admin) {
+                    throw new \RuntimeException('Posting a problem update must run under your own Zabbix permissions, but the Zabbix frontend API is not available in this session. Ask a Super Admin, or run it from a valid Zabbix frontend session.');
+                }
                 throw new \RuntimeException('Zabbix API is not available. Configure the Zabbix API token or run this from a valid Zabbix frontend session.');
             }
-
-            $this->assertProblemWriteAllowed($config);
 
             $chunks = $client->addProblemComment(
                 $eventid,

@@ -845,8 +845,24 @@
             }
         }
 
-        // Allow links to the same origin and standard web URLs only. Returns the
-        // safe href or null if the URL is rejected.
+        // Same-origin navigation links are restricted to a small allowlist of
+        // read-only Zabbix view actions — the ones the assistant is instructed to
+        // link to. This stops the model (or injected content) from rendering a
+        // clickable link to an arbitrary Zabbix action. Keep this in sync with the
+        // navigation links advertised in PromptBuilder.
+        var SAFE_ZABBIX_ACTIONS = {
+            'latest.view': 1, 'problem.view': 1, 'problem.list': 1,
+            'host.view': 1, 'host.edit': 1, 'host.list': 1,
+            'hostgroup.list': 1, 'maintenance.list': 1,
+            'dashboard.view': 1, 'dashboard.list': 1,
+            'service.list': 1, 'item.list': 1, 'trigger.list': 1,
+            'charts.view': 1, 'web.view': 1
+        };
+
+        // Allow standard web URLs and a curated set of same-origin view links
+        // only. Returns the safe href or null if the URL is rejected (the caller
+        // then renders the text without a link). javascript:/data:/file: and bare
+        // '#' anchors are all rejected.
         function safeLinkHref(url) {
             url = String(url || '').trim();
             if (url === '') {
@@ -856,10 +872,12 @@
                 return url;
             }
             if (/^zabbix\.php(\?|$)/i.test(url)) {
-                return url;
-            }
-            if (url.charAt(0) === '#') {
-                return url;
+                var m = /[?&]action=([a-z0-9._-]+)/i.exec(url);
+                var action = m ? m[1].toLowerCase() : '';
+                if (action !== '' && SAFE_ZABBIX_ACTIONS[action] === 1) {
+                    return url;
+                }
+                return null;
             }
             return null;
         }

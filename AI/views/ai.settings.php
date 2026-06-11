@@ -285,6 +285,20 @@ ob_start();
                 <p><strong>API keys:</strong> Prefer environment variables over storing secrets directly. Set the env var name in "Secret environment variable" and ensure it is visible to your PHP/web process.</p>
             </div>
             <p class="ai-muted">Supported provider types: openai_compatible, ollama, anthropic.</p>
+            <?php $secret_storage = $config['secret_storage'] ?? ['available' => false, 'backend' => 'none']; ?>
+            <?php if (!empty($secret_storage['available'])): ?>
+                <div class="ai-status ai-status-ok">
+                    <strong><?= $h(_('Secret storage: encrypted at rest')) ?></strong>
+                    <?= $h(sprintf(_('API keys, tokens and the webhook shared secret are encrypted in the Zabbix database using the ZABBIX_AI_ENCRYPTION_KEY environment key (%s). A database dump, backup or configuration export no longer exposes them. Keep the same key value on every frontend node, or stored secrets cannot be decrypted there.'), (string) $secret_storage['backend'])) ?>
+                </div>
+            <?php else: ?>
+                <div class="ai-warning">
+                    <strong><?= $h(_('Secret storage: not encrypted')) ?></strong>
+                    <?= $h(_('API keys, tokens and the webhook shared secret you type here are stored unencrypted in the Zabbix database (the module configuration). Anyone with database, backup or configuration-export access can read them.')) ?>
+                    <br><br>
+                    <?= $h(_('To encrypt them at rest, set the ZABBIX_AI_ENCRYPTION_KEY environment variable for the PHP/web process to a long random passphrase, then re-save this page (existing secrets are migrated to ciphertext on save). On multi-server or Docker deployments, set the SAME value on every frontend node/container so each can decrypt. Alternatively, leave a secret field blank and set its "Secret environment variable" name instead, so the value is resolved from the environment (e.g. a Vault-populated variable) and never stored in the database at all.')) ?>
+                </div>
+            <?php endif; ?>
             <div class="ai-defaults-block">
                 <h3 class="ai-defaults-heading"><?= $h(_('Default providers')) ?></h3>
                 <p class="ai-muted ai-defaults-subhead"><?= $h(_('Pick which configured provider is used for each context. "Auto" falls back to the first enabled provider.')) ?></p>
@@ -532,7 +546,7 @@ ob_start();
                     <div id="faq-webhook-require-secret" class="ai-faq-box">
                         <p><strong><?= $h(_('Why this matters:')) ?></strong> <?= $h(_('The webhook endpoint intentionally has CSRF disabled and open permission checks so Zabbix (a machine, not a logged-in user) can call it. Authentication therefore relies entirely on the shared secret.')) ?></p>
                         <p><?= $h(_('If the webhook is enabled but no shared secret is configured, the endpoint is UNAUTHENTICATED: any host that can reach the URL could trigger AI calls and — if "Post update back to event" is on — post AI-generated comments onto your Zabbix events.')) ?></p>
-                        <p><?= $h(_('When enabled, requests with a missing or invalid secret (including the case where no secret is configured at all) are rejected and each rejection is logged with the source IP. Leave it off only if you deliberately allow unauthenticated access (e.g. the endpoint is already protected by an upstream proxy or network ACL).')) ?></p>
+                        <p><?= $h(_('This is enabled by default. Requests with a missing or invalid secret (including the case where no secret is configured at all) are rejected and each rejection is logged with the source IP. Untick it only if you deliberately allow unauthenticated access (e.g. the endpoint is already protected by an upstream proxy or network ACL).')) ?></p>
                     </div>
                 </div>
                 <div class="ai-span-2">
