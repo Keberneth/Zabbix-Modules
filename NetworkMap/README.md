@@ -13,6 +13,44 @@ This package is the **Zabbix-only** variant:
 - Host labels come from Zabbix hosts
 - Cytoscape-based graph rendering is kept
 
+## What it shows
+
+The map renders the **established TCP connections** between hosts monitored by
+Zabbix. Every monitored host is a node, and every observed connection is a
+**directional edge labelled with the service port**. Endpoints that resolve to a
+Zabbix host (by interface IP) are drawn as monitored nodes; anything else is
+shown as a private or external endpoint. Node size scales with the number of
+connections, so busy hubs stand out at a glance.
+
+![Network map overview](docs/images/01-network-map-overview.jpg)
+
+### Node colors
+
+| Color | Meaning |
+|---|---|
+| 🔵 Blue | Monitored Zabbix host (resolved by interface IP) |
+| ⚪ Gray | Private IP that is not resolved to a monitored host |
+| 🔴 Red | External / public IP endpoint |
+
+### Filtering
+
+The toolbar lets you focus the graph without rebuilding it:
+
+- **Host scope** — leave empty for the full graph, or pick a host to show only
+  the traffic where it is the source or destination.
+- **Source / Destination filters** — match by hostname or IP. Multiple
+  comma-separated values are supported and matching is a case-insensitive
+  substring, so `web` matches `web-server-01`.
+- **Port filter** — single ports, ranges, and exclusions, comma-separated:
+  `443`, `80-443`, `443,8080,3306`, `!135`.
+- **Hide RPC / high ports** and **Exclude public IPs** toggles to declutter the
+  view, plus **History (days)**, **Minimum separation**, and horizontal/vertical
+  scale controls for layout.
+
+The view follows the active Zabbix theme, including dark mode:
+
+![Network map in dark theme](docs/images/02-network-map-dark.jpg)
+
 ## Requirements
 
 - Zabbix frontend with frontend module support
