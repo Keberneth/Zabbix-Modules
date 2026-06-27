@@ -241,6 +241,28 @@ class ZabbixActionExecutor {
             ],
             'apply_bulk_action' => [
                 'preview_token' => ['string', true]
+            ],
+            'create_sla_service' => [
+                'name'         => ['string', true],
+                'problem_tags' => ['array',  true],
+                'service_tags' => ['array',  false]
+            ],
+            'create_sla' => [
+                'name'         => ['string', true],
+                'slo'          => ['number', true],
+                'service_tags' => ['array',  true],
+                'timezone'     => ['string', false],
+                'description'  => ['string', false]
+            ],
+            'add_template_tag' => [
+                'template' => ['string', true],
+                'tag'      => ['string', true],
+                'value'    => ['string', false]
+            ],
+            'add_trigger_tag' => [
+                'trigger_id' => ['string', true],
+                'tag'        => ['string', true],
+                'value'      => ['string', false]
             ]
         ];
     }
@@ -1097,6 +1119,63 @@ class ZabbixActionExecutor {
                 ],
                 'rw' => 'write',
                 'category' => 'bulk'
+            ],
+            'analyze_sla_scope' => [
+                'description' => 'Inspect the tags available for scoping an SLA on a target. Returns the host tags, linked-template tags, and trigger tags for the given hosts/group (optionally filtered by a keyword such as the service name), plus a tag-frequency tally and uniqueness guidance. ALWAYS call this before create_sla_service so you can pick a tag (or AND-combination) that uniquely identifies the target and does NOT blend other environments/instances.',
+                'params' => [
+                    'hostnames' => '(array of strings, optional) Hosts to analyze.',
+                    'group_name' => '(string, optional) Host group to analyze (its hosts are inspected).',
+                    'keyword' => '(string, optional) Filter triggers by name, e.g. the service name "filezilla" or "ftp".'
+                ],
+                'rw' => 'read',
+                'category' => ''
+            ],
+            'create_sla_service' => [
+                'description' => 'Create a leaf Zabbix IT service that maps problems to itself via problem_tags. problem_tags use AND logic: a problem must carry ALL listed tags to map to this service — this is how you scope it uniquely (e.g. service=filezilla AND env=prod). The service also gets service_tags (plain key/value) which is the unique handle an SLA selects on. Create the service FIRST, then create_sla referencing its service_tags. Verify the scope with analyze_sla_scope first.',
+                'params' => [
+                    'name' => '(string, required) Service name, e.g. "FileZilla FTP (prod)".',
+                    'problem_tags' => '(array, required) AND-combined problem matchers. Each entry: {"tag":"service","operator":0,"value":"filezilla"}. operator 0=equals, 2=contains. Include EVERY tag needed to make the match unique to this target (e.g. also {"tag":"env","value":"prod"}).',
+                    'service_tags' => '(array, optional) Plain service tags the SLA selects on, each {"tag":"sla_scope","value":"filezilla-prod"}. If omitted, a unique sla_service tag is derived from the name. Keep the value globally unique unless one SLA should deliberately cover several services.',
+                    'algorithm' => '(int, optional, default 1) Status rule: 0=set to OK (do NOT use for an SLA target — it ignores problems), 1=most critical if all children have problems, 2=most critical of child services.',
+                    'sortorder' => '(int, optional, default 0) Display order 0-999.'
+                ],
+                'rw' => 'write',
+                'category' => 'sla'
+            ],
+            'create_sla' => [
+                'description' => 'Create a Zabbix SLA. service_tags select WHICH services this SLA measures, matched against each service\'s service tags with OR logic (any match). To measure exactly one service, use that service\'s UNIQUE service tag. Create the SLA service first with create_sla_service.',
+                'params' => [
+                    'name' => '(string, required) SLA name.',
+                    'slo' => '(number, required) Target availability %, 0-100 (e.g. 99.9).',
+                    'period' => '(string, required) Reporting period: daily, weekly, monthly, quarterly, or annually.',
+                    'service_tags' => '(array, required) Selects services to measure. Each {"tag":"sla_scope","operator":0,"value":"filezilla-prod"}. operator 0=equals, 2=contains. Use the unique service tag of the service you created.',
+                    'timezone' => '(string, optional) PHP timezone, e.g. "Europe/Stockholm". Defaults to the server timezone.',
+                    'effective_date' => '(string, optional) Date the SLA starts calculating, YYYY-MM-DD. Defaults to today.',
+                    'status' => '(int, optional, default 1) 1=enabled, 0=disabled.',
+                    'description' => '(string, optional) Free text.'
+                ],
+                'rw' => 'write',
+                'category' => 'sla'
+            ],
+            'add_template_tag' => [
+                'description' => 'Add a tag to a template (preserving existing tags). Use when no existing tag uniquely identifies an SLA target: add a unique tag (e.g. sla_scope=filezilla-prod) to the template so every NEW problem on hosts linked to that template carries it. Then reference it in create_sla_service problem_tags.',
+                'params' => [
+                    'template' => '(string, required) Template name.',
+                    'tag' => '(string, required) Tag name to add.',
+                    'value' => '(string, optional) Tag value.'
+                ],
+                'rw' => 'write',
+                'category' => 'templates'
+            ],
+            'add_trigger_tag' => [
+                'description' => 'Add a tag to a specific trigger (preserving existing tags). Use to mark individual triggers as part of an SLA scope when a template-wide tag would be too broad. Get the trigger_id from get_triggers or analyze_sla_scope. Only NEW problems from the trigger carry the tag.',
+                'params' => [
+                    'trigger_id' => '(string, required) Numeric trigger ID.',
+                    'tag' => '(string, required) Tag name to add.',
+                    'value' => '(string, optional) Tag value.'
+                ],
+                'rw' => 'write',
+                'category' => 'triggers'
             ]
         ];
     }
@@ -1589,6 +1668,21 @@ class ZabbixActionExecutor {
 
             case 'create_host_group':
                 return self::executeCreateHostGroup($params, $zabbix_api);
+
+            case 'analyze_sla_scope':
+                return self::executeAnalyzeSlaScope($params, $zabbix_api);
+
+            case 'create_sla_service':
+                return self::executeCreateSlaService($params, $zabbix_api);
+
+            case 'create_sla':
+                return self::executeCreateSla($params, $zabbix_api);
+
+            case 'add_template_tag':
+                return self::executeAddTemplateTag($params, $zabbix_api);
+
+            case 'add_trigger_tag':
+                return self::executeAddTriggerTag($params, $zabbix_api);
 
             default:
                 throw new RuntimeException('Unknown tool: '.$tool_name);
@@ -2360,93 +2454,157 @@ class ZabbixActionExecutor {
         $data = $buckets['data'] ?? [];
         $bucket_count = max(1, count($data));
 
-        $width = max(640, min(1200, 80 + $bucket_count * 40));
-        $height = 360;
-        $margin_top = 50;
-        $margin_bottom = 90;
-        $margin_left = 60;
-        $margin_right = 180; // room for legend
-        $plot_w = $width - $margin_left - $margin_right;
-        $plot_h = $height - $margin_top - $margin_bottom;
+        $h = static function ($value): string {
+            return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        };
+        $f = static function ($n): string {
+            return number_format((float) $n, 2, '.', '');
+        };
+
+        // ── Layout (clean card matching the Incident Timeline charts) ──
+        $pad = 16;
+        $plot_x = 46;
+        $width = (int) max(560, min(1100, $plot_x + 18 + $bucket_count * 46));
+
+        // Legend chips: severities present in the data (fallback to all six).
+        $sev_order = [5, 4, 3, 2, 1, 0];
+        $present = [];
+        foreach ($sev_order as $sev) {
+            if ((int) ($by_severity_total[$sev] ?? 0) > 0) {
+                $present[] = $sev;
+            }
+        }
+        if (!$present) {
+            $present = $sev_order;
+        }
+        $legend_items = [];
+        foreach ($present as $sev) {
+            $label = self::SEVERITY_LABELS[(string) $sev].' '.(int) ($by_severity_total[$sev] ?? 0);
+            $legend_items[] = [
+                'sev' => $sev,
+                'label' => $label,
+                'w' => 17 + (int) round(mb_strlen($label) * 6.3) + 16
+            ];
+        }
+        $legend_avail = $width - $pad * 2;
+        $rows = 1;
+        $cursor = 0;
+        foreach ($legend_items as $li) {
+            if ($cursor > 0 && $cursor + $li['w'] > $legend_avail) {
+                $rows++;
+                $cursor = 0;
+            }
+            $cursor += $li['w'];
+        }
+
+        $title_y = $pad + 13;
+        $legend_y0 = $title_y + 19;
+        $plot_top = $legend_y0 + ($rows * 18) + 8;
+        $x_label_space = $bucket_count > 14 ? 54 : 26;
+        $plot_h = 200;
+        $height = (int) ($plot_top + $plot_h + $x_label_space + $pad);
+        $plot_w = $width - $plot_x - 18;
+        $base_y = $plot_top + $plot_h;
 
         $max_count = 0;
         foreach ($data as $bucket) {
-            $sum = array_sum($bucket['counts']);
+            $sum = (int) array_sum($bucket['counts']);
             if ($sum > $max_count) {
                 $max_count = $sum;
             }
         }
-
         $y_max = self::niceCeil(max($max_count, 1));
         $bar_slot = $plot_w / max($bucket_count, 1);
-        $bar_w = max(4, $bar_slot * 0.75);
+        $bar_w = max(6.0, min(46.0, $bar_slot * 0.66));
 
-        $h = static function ($value): string {
-            return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-        };
-
+        $clip_defs = [];
         $parts = [];
         $parts[] = '<?xml version="1.0" encoding="UTF-8"?>';
-        $parts[] = '<svg xmlns="http://www.w3.org/2000/svg" width="'.$width.'" height="'.$height.'" viewBox="0 0 '.$width.' '.$height.'" font-family="-apple-system, Segoe UI, Roboto, sans-serif">';
+        $parts[] = '<svg xmlns="http://www.w3.org/2000/svg" width="'.$width.'" height="'.$height.'" viewBox="0 0 '.$width.' '.$height.'" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif">';
 
-        // Background.
-        $parts[] = '<rect width="100%" height="100%" fill="#ffffff"/>';
+        // Card background + subtle border.
+        $parts[] = '<rect x="0.5" y="0.5" width="'.($width - 1).'" height="'.($height - 1).'" rx="6" fill="#ffffff" stroke="#dfe4ec"/>';
 
         // Title.
-        $parts[] = '<text x="'.($width / 2).'" y="26" font-size="16" font-weight="600" text-anchor="middle" fill="#222">'.$h($title).'</text>';
+        $parts[] = '<text x="'.$pad.'" y="'.$title_y.'" font-size="14" font-weight="600" fill="#1f2b3a">'.$h($title).'</text>';
 
-        // Plot area frame.
-        $parts[] = '<rect x="'.$margin_left.'" y="'.$margin_top.'" width="'.$plot_w.'" height="'.$plot_h.'" fill="#fafafa" stroke="#e0e0e0"/>';
-
-        // Y axis gridlines + labels.
-        $gridlines = 5;
-        for ($i = 0; $i <= $gridlines; $i++) {
-            $value = (int) round($y_max * $i / $gridlines);
-            $y = $margin_top + $plot_h - ($plot_h * $i / $gridlines);
-            $parts[] = '<line x1="'.$margin_left.'" y1="'.$y.'" x2="'.($margin_left + $plot_w).'" y2="'.$y.'" stroke="#e8e8e8" stroke-width="1"/>';
-            $parts[] = '<text x="'.($margin_left - 8).'" y="'.($y + 4).'" font-size="11" text-anchor="end" fill="#555">'.$h($value).'</text>';
+        // Legend chips.
+        $lx = $pad;
+        $ly = $legend_y0;
+        $cursor = 0;
+        foreach ($legend_items as $li) {
+            if ($cursor > 0 && $cursor + $li['w'] > $legend_avail) {
+                $ly += 18;
+                $lx = $pad;
+                $cursor = 0;
+            }
+            $parts[] = '<rect x="'.$lx.'" y="'.($ly - 9).'" width="11" height="11" rx="2" fill="'.self::SEVERITY_COLORS[$li['sev']].'"/>';
+            $parts[] = '<text x="'.($lx + 16).'" y="'.$ly.'" font-size="11" fill="#5c6b7a">'.$h($li['label']).'</text>';
+            $lx += $li['w'];
+            $cursor += $li['w'];
         }
 
-        // Bars (stacked by severity, low to high so disasters end on top).
-        $x = $margin_left + ($bar_slot - $bar_w) / 2;
-        foreach ($data as $bucket) {
-            $stack_y = $margin_top + $plot_h;
+        // Horizontal gridlines + y-axis value labels (no boxed frame).
+        $gridlines = 4;
+        for ($i = 0; $i <= $gridlines; $i++) {
+            $value = (int) round($y_max * $i / $gridlines);
+            $y = $base_y - ($plot_h * $i / $gridlines);
+            $parts[] = '<line x1="'.$plot_x.'" y1="'.$f($y).'" x2="'.$f($plot_x + $plot_w).'" y2="'.$f($y).'" stroke="'.($i === 0 ? '#dfe4ec' : '#eef2f6').'" stroke-width="1"/>';
+            $parts[] = '<text x="'.($plot_x - 8).'" y="'.$f($y + 3.5).'" font-size="11" text-anchor="end" fill="#94a3b8">'.$h($value).'</text>';
+        }
 
-            foreach ([0, 1, 2, 3, 4, 5] as $sev) {
-                $count = (int) ($bucket['counts'][$sev] ?? 0);
-                if ($count <= 0) {
-                    continue;
+        // Stacked bars with rounded tops (clipped) + thin white separators.
+        $x = $plot_x + ($bar_slot - $bar_w) / 2;
+        $bi = 0;
+        foreach ($data as $bucket) {
+            $bi++;
+            $bucket_total = (int) array_sum($bucket['counts']);
+
+            if ($bucket_total > 0) {
+                $stack_h = $plot_h * ($bucket_total / $y_max);
+                $top_y = $base_y - $stack_h;
+                $r = min(3.0, $bar_w / 2, $stack_h / 2);
+                $cid = 'bc'.$bi;
+                $clip_defs[] = '<clipPath id="'.$cid.'"><path d="M '.$f($x).' '.$f($top_y + $r)
+                    .' Q '.$f($x).' '.$f($top_y).' '.$f($x + $r).' '.$f($top_y)
+                    .' H '.$f($x + $bar_w - $r)
+                    .' Q '.$f($x + $bar_w).' '.$f($top_y).' '.$f($x + $bar_w).' '.$f($top_y + $r)
+                    .' V '.$f($base_y).' H '.$f($x).' Z"/></clipPath>';
+
+                $parts[] = '<g clip-path="url(#'.$cid.')">';
+                $stack_y = $base_y;
+                $seps = [];
+                foreach ([0, 1, 2, 3, 4, 5] as $sev) {
+                    $count = (int) ($bucket['counts'][$sev] ?? 0);
+                    if ($count <= 0) {
+                        continue;
+                    }
+                    $seg_h = $plot_h * ($count / $y_max);
+                    $stack_y -= $seg_h;
+                    $parts[] = '<rect x="'.$f($x).'" y="'.$f($stack_y).'" width="'.$f($bar_w).'" height="'.$f($seg_h).'" fill="'.self::SEVERITY_COLORS[$sev].'"><title>'.$h(self::SEVERITY_LABELS[(string) $sev].': '.$count).'</title></rect>';
+                    if ($stack_y > $top_y + 0.5) {
+                        $seps[] = $stack_y;
+                    }
                 }
-                $seg_h = $plot_h * ($count / $y_max);
-                $stack_y -= $seg_h;
-                $color = self::SEVERITY_COLORS[$sev];
-                $parts[] = '<rect x="'.$h(number_format($x, 2, '.', '')).'" y="'.$h(number_format($stack_y, 2, '.', '')).'" width="'.$h(number_format($bar_w, 2, '.', '')).'" height="'.$h(number_format($seg_h, 2, '.', '')).'" fill="'.$color.'"><title>'.$h(self::SEVERITY_LABELS[(string) $sev].': '.$count).'</title></rect>';
+                foreach ($seps as $sy) {
+                    $parts[] = '<line x1="'.$f($x).'" y1="'.$f($sy).'" x2="'.$f($x + $bar_w).'" y2="'.$f($sy).'" stroke="#ffffff" stroke-width="1"/>';
+                }
+                $parts[] = '</g>';
             }
 
-            // X label.
+            // X-axis bucket label.
             $label_x = $x + $bar_w / 2;
-            $label_y = $margin_top + $plot_h + 18;
+            $label_y = $base_y + 15;
             $rotation = $bucket_count > 14 ? -45 : 0;
             $anchor = $rotation === 0 ? 'middle' : 'end';
-            $parts[] = '<text x="'.$h(number_format($label_x, 2, '.', '')).'" y="'.$h($label_y).'" font-size="11" text-anchor="'.$anchor.'" fill="#555" transform="rotate('.$rotation.' '.$h(number_format($label_x, 2, '.', '')).' '.$h($label_y).')">'.$h($bucket['label']).'</text>';
+            $parts[] = '<text x="'.$f($label_x).'" y="'.$f($label_y).'" font-size="10.5" text-anchor="'.$anchor.'" fill="#64748b" transform="rotate('.$rotation.' '.$f($label_x).' '.$f($label_y).')">'.$h($bucket['label']).'</text>';
 
             $x += $bar_slot;
         }
 
-        // Legend.
-        $legend_x = $margin_left + $plot_w + 20;
-        $legend_y = $margin_top + 4;
-        $parts[] = '<text x="'.$legend_x.'" y="'.$legend_y.'" font-size="12" font-weight="600" fill="#222">Severity</text>';
-        $line_y = $legend_y + 18;
-        foreach ([5, 4, 3, 2, 1, 0] as $sev) {
-            $color = self::SEVERITY_COLORS[$sev];
-            $label = self::SEVERITY_LABELS[(string) $sev].' ('.(int) ($by_severity_total[$sev] ?? 0).')';
-            $parts[] = '<rect x="'.$legend_x.'" y="'.($line_y - 10).'" width="14" height="12" fill="'.$color.'"/>';
-            $parts[] = '<text x="'.($legend_x + 20).'" y="'.$line_y.'" font-size="11" fill="#333">'.$h($label).'</text>';
-            $line_y += 18;
+        if ($clip_defs) {
+            array_splice($parts, 2, 0, ['<defs>'.implode('', $clip_defs).'</defs>']);
         }
-
-        $parts[] = '<text x="'.$legend_x.'" y="'.($line_y + 12).'" font-size="11" font-style="italic" fill="#666">Total: '.$h($total).'</text>';
 
         $parts[] = '</svg>';
 
@@ -4671,6 +4829,296 @@ class ZabbixActionExecutor {
         $lines[] = 'Duration: '.($result['duration_hours'] ?? 0).' hours';
 
         return implode("\n", $lines);
+    }
+
+    // ── SLA tooling executors ──────────────────────────────────────
+
+    private static function executeAnalyzeSlaScope(array $params, ZabbixApiClient $api): string {
+        $hostnames = (array) ($params['hostnames'] ?? []);
+        $group_name = (string) ($params['group_name'] ?? '');
+        $keyword = (string) ($params['keyword'] ?? '');
+
+        if (!$hostnames && trim($group_name) === '') {
+            return 'Error: provide hostnames or group_name to analyze.';
+        }
+
+        $data = $api->analyzeSlaScope($hostnames, $group_name, $keyword);
+        $hosts = $data['hosts'] ?? [];
+
+        if (!$hosts) {
+            return 'No hosts resolved for SLA scope analysis. Check the host/group names.';
+        }
+
+        $tally = [];
+        $record = static function (array $tags) use (&$tally): void {
+            foreach ($tags as $t) {
+                $name = (string) ($t['tag'] ?? '');
+                if ($name === '') {
+                    continue;
+                }
+                $k = $name.'='.(string) ($t['value'] ?? '');
+                $tally[$k] = ($tally[$k] ?? 0) + 1;
+            }
+        };
+        $fmt = static function (array $tags): string {
+            $s = [];
+            foreach ($tags as $t) {
+                $s[] = ($t['tag'] ?? '').'='.($t['value'] ?? '');
+            }
+            return implode(', ', $s);
+        };
+
+        $lines = ['SLA scope analysis'.($keyword !== '' ? ' for "'.$keyword.'"' : '').':', ''];
+        $lines[] = 'Hosts in scope: '.count($hosts);
+        foreach ($hosts as $h) {
+            $lines[] = '- '.$h['name'].' ('.$h['host'].')';
+            $record($h['host_tags'] ?? []);
+            if (!empty($h['host_tags'])) {
+                $lines[] = '    host tags: '.$fmt($h['host_tags']);
+            }
+            foreach (($h['templates'] ?? []) as $tpl) {
+                $record($tpl['tags'] ?? []);
+                if (!empty($tpl['tags'])) {
+                    $lines[] = '    template "'.$tpl['name'].'" tags: '.$fmt($tpl['tags']);
+                }
+            }
+        }
+
+        $triggers = $data['triggers'] ?? [];
+        $availability = [];   // triggers meaning "the service/host is DOWN/unavailable"
+        $down_kw = ['unavailable', 'is down', ' down', 'not running', 'not available', 'is not available', 'stopped', 'failed to', 'cannot connect', 'connection failed', 'no data', 'unreachable', 'offline'];
+        if ($triggers) {
+            $lines[] = '';
+            $lines[] = 'Triggers'.($keyword !== '' ? ' matching "'.$keyword.'"' : '').' ('.count($triggers).'):';
+            foreach (array_slice($triggers, 0, 60) as $t) {
+                $record($t['tags'] ?? []);
+                $scope = '';
+                foreach (($t['tags'] ?? []) as $tt) {
+                    if (strtolower((string) ($tt['tag'] ?? '')) === 'scope') {
+                        $scope = strtolower((string) ($tt['value'] ?? ''));
+                    }
+                }
+                $name_l = strtolower((string) $t['description']);
+                $is_avail = ($scope === 'availability');
+                if (!$is_avail) {
+                    foreach ($down_kw as $kw) {
+                        if (strpos($name_l, $kw) !== false) {
+                            $is_avail = true;
+                            break;
+                        }
+                    }
+                }
+                if ($is_avail) {
+                    $availability[] = $t;
+                }
+                $tagstr = !empty($t['tags']) ? '  tags: '.$fmt($t['tags']) : '  (no tags)';
+                $lines[] = '- [ID '.$t['triggerid'].'] '.($is_avail ? '[AVAILABILITY] ' : '').$t['host'].': '.$t['description'].$tagstr;
+            }
+            if (count($triggers) > 60) {
+                $lines[] = '… and '.(count($triggers) - 60).' more.';
+            }
+
+            if ($availability) {
+                $lines[] = '';
+                $lines[] = 'Availability signals (these mean the service/host is DOWN — an AVAILABILITY SLA should be scoped to THESE, never to performance/notice triggers):';
+                foreach ($availability as $t) {
+                    $tagstr = !empty($t['tags']) ? '  tags: '.$fmt($t['tags']) : '  (no tags)';
+                    $lines[] = '- [ID '.$t['triggerid'].'] '.$t['host'].': '.$t['description'].$tagstr;
+                }
+            }
+        }
+
+        $lines[] = '';
+        $lines[] = 'Distinct tags observed (tag=value : occurrences):';
+        arsort($tally);
+        foreach ($tally as $k => $c) {
+            $lines[] = '  '.$k.' : '.$c;
+        }
+
+        $lines[] = '';
+        $lines[] = 'Scope guidance:';
+        $lines[] = '- FIRST decide what is being measured: (A) HOST availability = the server itself is up/reachable (ICMP ping, Zabbix agent availability); or (B) a SPECIFIC SERVICE/application on the host (e.g. the MSSQL database engine) = only that service being down should count.';
+        $lines[] = '- A host-level tag is inherited by EVERY problem on the host (CPU, disk, network, every app), so it measures "any problem on the host", not one service. Using it for a service SLA makes the SLA lie (a CPU spike would count as the service being down, and the service being down may be diluted). Use a host-level tag ONLY for a genuine host-availability SLA.';
+        $lines[] = '- For a SERVICE SLA, scope to that service\'s AVAILABILITY trigger(s) listed above — the "service is unavailable / down / not running" ones (usually tagged scope=availability) — and EXCLUDE performance/notice triggers (you do not want "buffer cache efficiency low" to count as downtime). Add a unique tag to those specific trigger(s) with add_trigger_tag (e.g. sla_target=mssql-db01-prod), then set the service problem_tags to that unique tag, so ONLY the service-down condition affects the SLA.';
+        $lines[] = '- Make the matcher unique to this target. A tag like scope=availability is shared across hosts/services, so combine it with a service+host identifier or add a dedicated unique tag. Prefer existing tags; add a new one only when none isolates the target.';
+
+        return implode("\n", $lines);
+    }
+
+    private static function executeCreateSlaService(array $params, ZabbixApiClient $api): string {
+        $name = trim((string) ($params['name'] ?? ''));
+        if ($name === '') {
+            return 'Error: name is required.';
+        }
+
+        $problem_tags = (array) ($params['problem_tags'] ?? []);
+        if (!$problem_tags) {
+            return 'Error: problem_tags is required (the tags that map problems to this service, AND-combined).';
+        }
+
+        $service_tags = (array) ($params['service_tags'] ?? []);
+        if (!$service_tags) {
+            $slug = strtolower((string) preg_replace('/[^a-z0-9]+/i', '-', $name));
+            $slug = trim($slug, '-');
+            $service_tags = [['tag' => 'sla_service', 'value' => $slug !== '' ? $slug : 'service']];
+        }
+
+        $algorithm = isset($params['algorithm']) ? (int) $params['algorithm'] : 1;
+        $sortorder = isset($params['sortorder']) ? (int) $params['sortorder'] : 0;
+
+        $result = $api->createSlaService($name, $problem_tags, $service_tags, $algorithm, $sortorder);
+
+        return self::formatSlaServiceResult($result);
+    }
+
+    private static function formatSlaServiceResult(array $r): string {
+        $algo = (int) ($r['algorithm'] ?? 1);
+        $algo_label = $algo === 0
+            ? 'Set status to OK'
+            : ($algo === 2 ? 'Most critical of child services' : 'Most critical if all children have problems');
+
+        $lines = ['SLA service created.'];
+        $lines[] = 'Service ID: '.($r['serviceid'] ?? '?');
+        $lines[] = 'Name: '.($r['name'] ?? '');
+        $lines[] = 'Status rule: '.$algo_label;
+
+        $pt = [];
+        foreach (($r['problem_tags'] ?? []) as $t) {
+            $op = (int) ($t['operator'] ?? 0) === 2 ? 'contains' : '=';
+            $pt[] = ($t['tag'] ?? '').' '.$op.' '.($t['value'] ?? '');
+        }
+        $lines[] = 'Problem tags (ALL must match → AND): '.($pt ? implode('  AND  ', $pt) : '(none)');
+
+        $st = [];
+        foreach (($r['service_tags'] ?? []) as $t) {
+            $st[] = ($t['tag'] ?? '').'='.($t['value'] ?? '');
+        }
+        $lines[] = 'Service tags (an SLA selects on these): '.($st ? implode(', ', $st) : '(none)');
+
+        return implode("\n", $lines);
+    }
+
+    private static function executeCreateSla(array $params, ZabbixApiClient $api): string {
+        $name = trim((string) ($params['name'] ?? ''));
+        if ($name === '') {
+            return 'Error: name is required.';
+        }
+
+        if (!array_key_exists('slo', $params) || !is_numeric($params['slo'])) {
+            return 'Error: slo (target % 0-100) is required.';
+        }
+        $slo = (float) $params['slo'];
+        if ($slo < 0 || $slo > 100) {
+            return 'Error: slo must be between 0 and 100.';
+        }
+
+        $period = self::parseSlaPeriod($params['period'] ?? null);
+        if ($period === null) {
+            return 'Error: period must be one of daily, weekly, monthly, quarterly, annually (or 0-4).';
+        }
+
+        $service_tags = (array) ($params['service_tags'] ?? []);
+        if (!$service_tags) {
+            return 'Error: service_tags is required — the SLA selects services by these tags. Use the unique service tag of the service you created.';
+        }
+
+        $timezone = trim((string) ($params['timezone'] ?? ''));
+        $status = isset($params['status']) ? (int) $params['status'] : 1;
+        $description = (string) ($params['description'] ?? '');
+        $effective_date = self::parseSlaDate($params['effective_date'] ?? null);
+
+        $result = $api->createSla($name, $slo, $period, $service_tags, $timezone, $effective_date, $status, $description);
+
+        return self::formatSlaResult($result);
+    }
+
+    private static function parseSlaPeriod($val): ?int {
+        if (is_int($val) || (is_string($val) && preg_match('/^\d+$/', $val))) {
+            $n = (int) $val;
+            return in_array($n, [0, 1, 2, 3, 4], true) ? $n : null;
+        }
+        $map = [
+            'daily' => 0, 'day' => 0,
+            'weekly' => 1, 'week' => 1,
+            'monthly' => 2, 'month' => 2,
+            'quarterly' => 3, 'quarter' => 3,
+            'annually' => 4, 'annual' => 4, 'yearly' => 4, 'year' => 4
+        ];
+        $s = strtolower(trim((string) $val));
+        return $map[$s] ?? null;
+    }
+
+    private static function parseSlaDate($val): ?int {
+        if ($val === null || $val === '' || $val === []) {
+            return strtotime('today') ?: time();
+        }
+        if (is_int($val) || (is_string($val) && preg_match('/^\d{9,}$/', (string) $val))) {
+            return (int) $val;
+        }
+        $ts = strtotime((string) $val);
+        return $ts !== false ? $ts : (strtotime('today') ?: time());
+    }
+
+    private static function formatSlaResult(array $r): string {
+        $period_labels = [0 => 'daily', 1 => 'weekly', 2 => 'monthly', 3 => 'quarterly', 4 => 'annually'];
+
+        $lines = ['SLA created.'];
+        $lines[] = 'SLA ID: '.($r['slaid'] ?? '?');
+        $lines[] = 'Name: '.($r['name'] ?? '');
+        $lines[] = 'Objective (SLO): '.($r['slo'] ?? '?').'%';
+        $lines[] = 'Reporting period: '.($period_labels[(int) ($r['period'] ?? 2)] ?? '?');
+        $lines[] = 'Timezone: '.($r['timezone'] ?? 'UTC');
+        $lines[] = 'Status: '.(((int) ($r['status'] ?? 1)) === 1 ? 'enabled' : 'disabled');
+        if (!empty($r['effective_date'])) {
+            $lines[] = 'Effective from: '.date('Y-m-d', (int) $r['effective_date']);
+        }
+
+        $st = [];
+        foreach (($r['service_tags'] ?? []) as $t) {
+            $op = (int) ($t['operator'] ?? 0) === 2 ? 'contains' : '=';
+            $st[] = ($t['tag'] ?? '').' '.$op.' '.($t['value'] ?? '');
+        }
+        $lines[] = 'Selects services where ANY matches (OR): '.($st ? implode('  OR  ', $st) : '(none)');
+
+        return implode("\n", $lines);
+    }
+
+    private static function executeAddTemplateTag(array $params, ZabbixApiClient $api): string {
+        $template = trim((string) ($params['template'] ?? ''));
+        $tag = trim((string) ($params['tag'] ?? ''));
+        $value = (string) ($params['value'] ?? '');
+
+        if ($template === '') {
+            return 'Error: template (name) is required.';
+        }
+        if ($tag === '') {
+            return 'Error: tag (name) is required.';
+        }
+
+        $r = $api->addTemplateTag($template, $tag, $value);
+        $verb = !empty($r['added']) ? 'added to' : 'already present on';
+
+        return 'Tag '.($r['tag'] ?? '').'='.($r['value'] ?? '').' '.$verb.' template "'.($r['template'] ?? '').'" (ID '.($r['templateid'] ?? '?').'). '
+            .'Template now has '.($r['total_tags'] ?? '?').' tag(s). New problems on hosts linked to this template will carry this tag.';
+    }
+
+    private static function executeAddTriggerTag(array $params, ZabbixApiClient $api): string {
+        $trigger_id = trim((string) ($params['trigger_id'] ?? ''));
+        $tag = trim((string) ($params['tag'] ?? ''));
+        $value = (string) ($params['value'] ?? '');
+
+        if ($trigger_id === '') {
+            return 'Error: trigger_id is required.';
+        }
+        if ($tag === '') {
+            return 'Error: tag (name) is required.';
+        }
+
+        $r = $api->addTriggerTag($trigger_id, $tag, $value);
+        $verb = !empty($r['added']) ? 'added to' : 'already present on';
+
+        return 'Tag '.($r['tag'] ?? '').'='.($r['value'] ?? '').' '.$verb.' trigger '.($r['triggerid'] ?? '?').' ("'.($r['trigger'] ?? '').'"). '
+            .'Trigger now has '.($r['total_tags'] ?? '?').' tag(s). New problems from this trigger will carry this tag.';
     }
 
     private static function executeUpdateTrigger(array $params, ZabbixApiClient $api): string {

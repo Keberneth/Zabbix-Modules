@@ -3236,6 +3236,351 @@ class ZabbixApiClient {
         }
     }
 
+    // ── SLA & IT service tooling (tag-scoped SLA creation) ────────────────
+
+    /**
+     * Normalise a match-tag array into [{tag, operator, value}].
+     * Operator is clamped to {0 = equals, 2 = contains} (no other values exist).
+     * Used for service.problem_tags and sla.service_tags.
+     */
+    private function normalizeMatchTags(array $tags): array {
+        $out = [];
+        foreach ($tags as $t) {
+            if (!is_array($t)) {
+                continue;
+            }
+            $name = trim((string) ($t['tag'] ?? ''));
+            if ($name === '') {
+                continue;
+            }
+            $op = (int) ($t['operator'] ?? 0);
+            if (!in_array($op, [0, 2], true)) {
+                $op = 0;
+            }
+            $out[] = ['tag' => $name, 'operator' => $op, 'value' => (string) ($t['value'] ?? '')];
+        }
+        return $out;
+    }
+
+    /**
+     * Normalise plain key/value tags into [{tag, value}] (service.tags, host/
+     * template/trigger tags).
+     */
+    private function normalizePlainTags(array $tags): array {
+        $out = [];
+        foreach ($tags as $t) {
+            if (!is_array($t)) {
+                continue;
+            }
+            $name = trim((string) ($t['tag'] ?? ''));
+            if ($name === '') {
+                continue;
+            }
+            $out[] = ['tag' => $name, 'value' => (string) ($t['value'] ?? '')];
+        }
+        return $out;
+    }
+
+    /**
+     * Create a leaf IT service that maps problems via problem_tags (AND logic:
+     * a problem must carry ALL listed tags) and carries plain service tags that
+     * an SLA selects on (OR logic). Returns the created service summary.
+     *
+     * @param array $problem_tags [{tag, operator, value}] — AND-combined matchers.
+     * @param array $service_tags [{tag, value}] — the SLA selection handle.
+     */
+    public function createSlaService(string $name, array $problem_tags, array $service_tags, int $algorithm = 1, int $sortorder = 0): array {
+        $name = trim($name);
+        if ($name === '') {
+            throw new RuntimeException('Service name is required.');
+        }
+
+        $problems = $this->normalizeMatchTags($problem_tags);
+        if (!$problems) {
+            throw new RuntimeException('At least one problem_tag is required so the service can map problems.');
+        }
+
+        $plain = $this->normalizePlainTags($service_tags);
+
+        if (!in_array($algorithm, [0, 1, 2], true)) {
+            $algorithm = 1;
+        }
+
+        $payload = [
+            'name' => Util::truncate($name, 128),
+            'algorithm' => $algorithm,
+            'sortorder' => max(0, min(999, $sortorder)),
+            'problem_tags' => $problems
+        ];
+        if ($plain) {
+            $payload['tags'] = $plain;
+        }
+
+        $result = $this->call('service.create', $payload);
+
+        return [
+            'serviceid' => $result['serviceids'][0] ?? null,
+            'name' => $name,
+            'algorithm' => $algorithm,
+            'problem_tags' => $problems,
+            'service_tags' => $plain
+        ];
+    }
+
+    /**
+     * Create an SLA. service_tags select which services (by their service tags,
+     * OR-combined) this SLA measures.
+     */
+    public function createSla(string $name, float $slo, int $period, array $service_tags, string $timezone, ?int $effective_date, int $status, string $description): array {
+        $name = trim($name);
+        if ($name === '') {
+            throw new RuntimeException('SLA name is required.');
+        }
+        if ($slo < 0 || $slo > 100) {
+            throw new RuntimeException('slo must be between 0 and 100.');
+        }
+        if (!in_array($period, [0, 1, 2, 3, 4], true)) {
+            throw new RuntimeException('period must be 0=daily, 1=weekly, 2=monthly, 3=quarterly or 4=annually.');
+        }
+
+        $tags = $this->normalizeMatchTags($service_tags);
+        if (!$tags) {
+            throw new RuntimeException('At least one service_tag is required — the SLA must select services by tag.');
+        }
+
+        $timezone = trim($timezone) !== '' ? trim($timezone) : (date_default_timezone_get() ?: 'UTC');
+
+        $payload = [
+            'name' => Util::truncate($name, 255),
+            'slo' => $slo,
+            'period' => $period,
+            'timezone' => $timezone,
+            'status' => ($status === 0) ? 0 : 1,
+            'service_tags' => $tags
+        ];
+        if ($effective_date !== null && $effective_date > 0) {
+            $payload['effective_date'] = $effective_date;
+        }
+        if ($description !== '') {
+            $payload['description'] = Util::truncate($description, 65535);
+        }
+
+        $result = $this->call('sla.create', $payload);
+
+        return [
+            'slaid' => $result['slaids'][0] ?? null,
+            'name' => $name,
+            'slo' => $slo,
+            'period' => $period,
+            'timezone' => $timezone,
+            'status' => ($status === 0) ? 0 : 1,
+            'service_tags' => $tags,
+            'effective_date' => $effective_date
+        ];
+    }
+
+    /**
+     * Add one tag to a template, preserving existing tags. template.update
+     * REPLACES the whole tags array, so we read-merge-write.
+     */
+    public function addTemplateTag(string $template_name, string $tag, string $value): array {
+        $tag = trim($tag);
+        if ($tag === '') {
+            throw new RuntimeException('Tag name is required.');
+        }
+        $tid = $this->getTemplateIdByName($template_name);
+        if ($tid === null) {
+            throw new RuntimeException('Template "'.$template_name.'" not found.');
+        }
+
+        $current = $this->call('template.get', [
+            'templateids' => [$tid],
+            'output' => ['templateid'],
+            'selectTags' => ['tag', 'value']
+        ]);
+        $existing = $current[0]['tags'] ?? [];
+
+        $key = static fn(array $t): string => ($t['tag'] ?? '').'='.($t['value'] ?? '');
+        $final = [];
+        $seen = [];
+        foreach ($existing as $t) {
+            $norm = ['tag' => (string) ($t['tag'] ?? ''), 'value' => (string) ($t['value'] ?? '')];
+            $final[] = $norm;
+            $seen[$key($norm)] = true;
+        }
+        $new = ['tag' => $tag, 'value' => $value];
+        $added = !isset($seen[$key($new)]);
+        if ($added) {
+            $final[] = $new;
+        }
+
+        $this->call('template.update', ['templateid' => $tid, 'tags' => $final]);
+
+        return [
+            'templateid' => $tid,
+            'template' => $template_name,
+            'tag' => $tag,
+            'value' => $value,
+            'added' => $added,
+            'total_tags' => count($final)
+        ];
+    }
+
+    /**
+     * Add one tag to a trigger, preserving existing tags (read-merge-write).
+     */
+    public function addTriggerTag(string $trigger_id, string $tag, string $value): array {
+        $tag = trim($tag);
+        if ($tag === '') {
+            throw new RuntimeException('Tag name is required.');
+        }
+        $trigger_id = trim($trigger_id);
+        if ($trigger_id === '' || !ctype_digit($trigger_id)) {
+            throw new RuntimeException('A numeric trigger_id is required.');
+        }
+
+        $current = $this->call('trigger.get', [
+            'triggerids' => [$trigger_id],
+            'output' => ['triggerid', 'description'],
+            'selectTags' => ['tag', 'value']
+        ]);
+        if (!$current) {
+            throw new RuntimeException('Trigger '.$trigger_id.' not found.');
+        }
+        $existing = $current[0]['tags'] ?? [];
+        $desc = (string) ($current[0]['description'] ?? '');
+
+        $key = static fn(array $t): string => ($t['tag'] ?? '').'='.($t['value'] ?? '');
+        $final = [];
+        $seen = [];
+        foreach ($existing as $t) {
+            $norm = ['tag' => (string) ($t['tag'] ?? ''), 'value' => (string) ($t['value'] ?? '')];
+            $final[] = $norm;
+            $seen[$key($norm)] = true;
+        }
+        $new = ['tag' => $tag, 'value' => $value];
+        $added = !isset($seen[$key($new)]);
+        if ($added) {
+            $final[] = $new;
+        }
+
+        $this->call('trigger.update', ['triggerid' => $trigger_id, 'tags' => $final]);
+
+        return [
+            'triggerid' => $trigger_id,
+            'trigger' => $desc,
+            'tag' => $tag,
+            'value' => $value,
+            'added' => $added,
+            'total_tags' => count($final)
+        ];
+    }
+
+    /**
+     * Gather the tags relevant to an SLA-scope decision for a set of hosts:
+     * host-level tags, linked-template tags, and trigger tags (optionally
+     * filtered by a name keyword). Lets the AI judge whether a unique tag or
+     * tag combination exists to scope an SLA precisely.
+     */
+    public function analyzeSlaScope(array $hostnames, string $group_name, string $keyword, int $max_hosts = 25): array {
+        $hostids = [];
+
+        $group_name = trim($group_name);
+        if ($group_name !== '') {
+            $g = $this->getHostGroupByName($group_name);
+            if ($g !== null) {
+                $hosts = $this->call('host.get', [
+                    'groupids' => [$g['groupid']],
+                    'output' => ['hostid'],
+                    'limit' => $max_hosts
+                ]);
+                foreach ($hosts as $h) {
+                    $hostids[(string) $h['hostid']] = true;
+                }
+            }
+        }
+        foreach ($hostnames as $hn) {
+            $hn = trim((string) $hn);
+            if ($hn === '') {
+                continue;
+            }
+            $hid = $this->getHostIdByName($hn);
+            if ($hid !== null) {
+                $hostids[(string) $hid] = true;
+            }
+        }
+        if (!$hostids) {
+            return ['hosts' => [], 'triggers' => [], 'keyword' => $keyword];
+        }
+        $ids = array_slice(array_keys($hostids), 0, $max_hosts);
+
+        $detail = $this->call('host.get', [
+            'hostids' => $ids,
+            'output' => ['hostid', 'host', 'name'],
+            'selectTags' => ['tag', 'value'],
+            'selectParentTemplates' => ['templateid', 'name']
+        ]);
+
+        $template_ids = [];
+        foreach ($detail as $h) {
+            foreach (($h['parentTemplates'] ?? []) as $t) {
+                $template_ids[(string) $t['templateid']] = true;
+            }
+        }
+        $template_tags = [];
+        if ($template_ids) {
+            $tpls = $this->call('template.get', [
+                'templateids' => array_keys($template_ids),
+                'output' => ['templateid', 'name'],
+                'selectTags' => ['tag', 'value']
+            ]);
+            foreach ($tpls as $t) {
+                $template_tags[(string) $t['templateid']] = $t['tags'] ?? [];
+            }
+        }
+
+        $trig_params = [
+            'hostids' => $ids,
+            'output' => ['triggerid', 'description'],
+            'selectTags' => ['tag', 'value'],
+            'selectHosts' => ['host'],
+            'expandDescription' => true,
+            'limit' => 200
+        ];
+        if (trim($keyword) !== '') {
+            $trig_params['search'] = ['description' => trim($keyword)];
+        }
+        $triggers = $this->call('trigger.get', $trig_params);
+
+        $hosts_out = [];
+        foreach ($detail as $h) {
+            $tpls = [];
+            foreach (($h['parentTemplates'] ?? []) as $t) {
+                $tid = (string) $t['templateid'];
+                $tpls[] = ['name' => (string) $t['name'], 'tags' => $template_tags[$tid] ?? []];
+            }
+            $hosts_out[] = [
+                'host' => (string) $h['host'],
+                'name' => (string) ($h['name'] ?? $h['host']),
+                'host_tags' => $h['tags'] ?? [],
+                'templates' => $tpls
+            ];
+        }
+
+        $trig_out = [];
+        foreach ($triggers as $t) {
+            $hn = !empty($t['hosts']) ? (string) ($t['hosts'][0]['host'] ?? '') : '';
+            $trig_out[] = [
+                'triggerid' => (string) $t['triggerid'],
+                'host' => $hn,
+                'description' => (string) $t['description'],
+                'tags' => $t['tags'] ?? []
+            ];
+        }
+
+        return ['hosts' => $hosts_out, 'triggers' => $trig_out, 'keyword' => $keyword];
+    }
+
     // ── Phase 3 controlled host administration (writes) ───────────────────
 
     /**

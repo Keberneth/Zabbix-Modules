@@ -893,6 +893,18 @@
             return null;
         }
 
+        // Download links are restricted to the AI module's own token-bound report
+        // download endpoint (same rule as safeImageSrc). Used by the download
+        // button so report/graph downloads are not blocked by the navigation
+        // allowlist in safeLinkHref.
+        function safeDownloadHref(url) {
+            url = String(url || '').trim();
+            if (/^zabbix\.php\?action=ai\.report\.download(&|$)/i.test(url)) {
+                return url;
+            }
+            return null;
+        }
+
         // Parse the attribute payload of an [[ai-... attr1="v1" attr2="v2"]]
         // marker into an object of key -> string. Values are quoted with " and
         // may escape \\ and \" via backslash. Used by both the download-button
@@ -913,7 +925,11 @@
         // plain text by the caller).
         function renderDownloadButton(target, attrsString) {
             var attrs = parseMarkerAttrs(attrsString);
-            var href = safeLinkHref(attrs.url || '');
+            // The download button targets the AI module's own token-bound report
+            // endpoint (ai.report.download), which is NOT one of the navigation
+            // view actions on the safeLinkHref allowlist. Validate against that
+            // exact endpoint (same rule as safeImageSrc) instead.
+            var href = safeDownloadHref(attrs.url || '');
             if (!href) {
                 return false;
             }

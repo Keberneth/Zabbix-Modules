@@ -918,8 +918,8 @@ sudo -u $WEB_GROUP sh -c 'echo t &gt; /var/log/zabbix-ai/.t \
             <div id="ai-write-permissions" style="<?= (($config['zabbix_actions']['mode'] ?? 'read') === 'readwrite') ? '' : 'display:none;' ?>">
                 <h3><?= $h(_('Write permissions')) ?></h3>
                 <div class="ai-check-grid">
-                    <?php foreach (['maintenance', 'items', 'triggers', 'users', 'problems', 'hostgroups', 'hosts', 'interfaces', 'web', 'dashboards', 'templates', 'discovery', 'bulk'] as $perm): ?>
-                        <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[write_permissions][<?= $h($perm) ?>]" value="1" <?= !empty($config['zabbix_actions']['write_permissions'][$perm]) ? 'checked' : '' ?>> <?= $h(ucfirst($perm)) ?></label>
+                    <?php foreach (['maintenance', 'items', 'triggers', 'users', 'problems', 'hostgroups', 'hosts', 'interfaces', 'web', 'dashboards', 'templates', 'discovery', 'bulk', 'sla'] as $perm): ?>
+                        <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[write_permissions][<?= $h($perm) ?>]" value="1" <?= !empty($config['zabbix_actions']['write_permissions'][$perm]) ? 'checked' : '' ?>> <?= $h($perm === 'sla' ? 'SLA' : ucfirst($perm)) ?></label>
                     <?php endforeach; ?>
                 </div>
                 <h3><?= $h(_('Bulk safety limits')) ?></h3>

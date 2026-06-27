@@ -145,7 +145,8 @@ class Config {
                     'dashboards' => false,
                     'templates' => false,
                     'discovery' => false,
-                    'bulk' => false
+                    'bulk' => false,
+                    'sla' => false
                 ],
                 'require_super_admin_for_write' => true,
                 'bulk_max_hosts' => 25,
@@ -497,7 +498,8 @@ class Config {
                 'dashboards' => Util::truthy($za['write_permissions']['dashboards'] ?? false),
                 'templates' => Util::truthy($za['write_permissions']['templates'] ?? false),
                 'discovery' => Util::truthy($za['write_permissions']['discovery'] ?? false),
-                'bulk' => Util::truthy($za['write_permissions']['bulk'] ?? false)
+                'bulk' => Util::truthy($za['write_permissions']['bulk'] ?? false),
+                'sla' => Util::truthy($za['write_permissions']['sla'] ?? false)
             ],
             'require_super_admin_for_write' => Util::truthy($za['require_super_admin_for_write'] ?? true),
             'bulk_max_hosts' => Util::cleanInt($za['bulk_max_hosts'] ?? 25, 25, 1, 1000),
