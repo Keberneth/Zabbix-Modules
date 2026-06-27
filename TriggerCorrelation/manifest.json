@@ -1,0 +1,80 @@
+{
+  "manifest_version": 2.0,
+  "id": "trigger_correlation",
+  "name": "Trigger Correlation",
+  "namespace": "TriggerCorrelation",
+  "version": "2.0.0",
+  "author": "Keberneth",
+  "description": "Correlates active Zabbix trigger problems across specific hosts/triggers and writes synthetic correlation states through history.push. Stores its configuration in the Zabbix database so it works on single-server, split and Docker installs.",
+  "actions": {
+    "triggercorrelation": {
+      "class": "CorrelationView",
+      "view": "triggercorrelation.view"
+    },
+    "triggercorrelation.rules.get": {
+      "class": "RulesGet",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.rule.save": {
+      "class": "RuleSave",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.rule.delete": {
+      "class": "RuleDelete",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.severity.rule.save": {
+      "class": "SeverityRuleSave",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.severity.rule.delete": {
+      "class": "SeverityRuleDelete",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.search.hostgroups": {
+      "class": "SearchHostGroups",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.settings.save": {
+      "class": "SettingsSave",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.search.hosts": {
+      "class": "SearchHosts",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.search.triggers": {
+      "class": "SearchTriggers",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.search.items": {
+      "class": "SearchItems",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.run": {
+      "class": "RunEval",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.eval": {
+      "class": "Evaluate",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.api.test": {
+      "class": "ApiTest",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.selfcheck": {
+      "class": "SelfCheck",
+      "layout": "layout.json"
+    }
+  },
+  "assets": {
+    "css": [
+      "trigger_correlation.css"
+    ],
+    "js": [
+      "trigger_correlation.js"
+    ]
+  },
+  "config": {}
+}

@@ -1,0 +1,127 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: a61e87d4799d44f29d89300f2475372a
+      name: 'Templates/Trigger Correlation'
+  templates:
+    - uuid: a391e0f6e3bc478599cb4284718a4c34
+      template: 'Template Trigger Correlation Manual Item'
+      name: 'Template Trigger Correlation Manual Item'
+      vendor:
+        name: Keberneth
+        version: '7.0.0.0'
+      groups:
+        - name: 'Templates/Trigger Correlation'
+      description: |
+        EXAMPLE for the Trigger Correlation module when you want your OWN item per
+        flow/integration/correlation instead of low-level discovery.
+
+        The item key here is correlation.escalation[example_flow]. Rename
+        "example_flow" to a short id for your correlation, e.g.
+        correlation.escalation[public_web_app_integration_flow]. Clone/link this
+        template to the host that represents the flow.
+
+        Use it one of two ways:
+
+        1. Existing trapper item mode (simplest): in the rule editor choose
+           Output mode = "Existing trapper item", then pick this host + item.
+           (The Correlation ID field is not used in this mode.)
+
+        2. Receiver-LLD mode by key (item found from the Correlation ID): set
+           Settings -> State key template to  correlation.escalation[%s] , then in
+           the rule use Output mode = "Receiver LLD template", Receiver host = this
+           host, Correlation ID = the same id you put in the key (e.g.
+           public_web_app_integration_flow). The module writes by host+key, so it
+           lands on this item with no discovery. Untick "Push LLD discovery every
+           evaluation" to avoid a harmless discovery error.
+
+        Do NOT also link "Template Trigger Correlation Receiver" to the same host
+        (use one or the other).
+
+        Severity values written by the module:
+        0 = OK / clear   1 = Information   2 = Warning
+        3 = Average      4 = High          5 = Disaster
+      items:
+        - uuid: de43f5e442274bf88068ebc54ee4aaa2
+          name: 'Correlation escalation (example flow)'
+          type: TRAP
+          key: 'correlation.escalation[example_flow]'
+          delay: '0'
+          history: 90d
+          trends: '365d'
+          value_type: UNSIGNED
+          description: 'The Trigger Correlation module writes the correlated severity (0–5) here. Rename example_flow to your correlation id and pick this item (or its key) in the rule editor.'
+          valuemap:
+            name: 'Correlation severity'
+          tags:
+            - tag: component
+              value: correlation
+            - tag: scope
+              value: trigger-correlation
+          triggers:
+            - uuid: ce2038b32d31460a8ff25aefdc5c850b
+              expression: 'last(/Template Trigger Correlation Manual Item/correlation.escalation[example_flow])=1'
+              name: 'Correlation INFORMATION: {HOST.NAME}'
+              priority: INFO
+              description: 'Raised by the Trigger Correlation module (existing-item output).'
+              tags:
+                - tag: component
+                  value: correlation
+                - tag: scope
+                  value: trigger-correlation
+            - uuid: ae6c296ab16b4f13bfb7e86df6ee363d
+              expression: 'last(/Template Trigger Correlation Manual Item/correlation.escalation[example_flow])=2'
+              name: 'Correlation WARNING: {HOST.NAME}'
+              priority: WARNING
+              description: 'Raised by the Trigger Correlation module (existing-item output).'
+              tags:
+                - tag: component
+                  value: correlation
+                - tag: scope
+                  value: trigger-correlation
+            - uuid: 75f772d0b1ab46f39c1cafa0d542391f
+              expression: 'last(/Template Trigger Correlation Manual Item/correlation.escalation[example_flow])=3'
+              name: 'Correlation AVERAGE: {HOST.NAME}'
+              priority: AVERAGE
+              description: 'Raised by the Trigger Correlation module (existing-item output).'
+              tags:
+                - tag: component
+                  value: correlation
+                - tag: scope
+                  value: trigger-correlation
+            - uuid: 231a6248b273430199b98c9862223fab
+              expression: 'last(/Template Trigger Correlation Manual Item/correlation.escalation[example_flow])=4'
+              name: 'Correlation HIGH: {HOST.NAME}'
+              priority: HIGH
+              description: 'Raised by the Trigger Correlation module (existing-item output).'
+              tags:
+                - tag: component
+                  value: correlation
+                - tag: scope
+                  value: trigger-correlation
+            - uuid: 311cb8c1744348ad8d77ab19e45f8b35
+              expression: 'last(/Template Trigger Correlation Manual Item/correlation.escalation[example_flow])=5'
+              name: 'Correlation DISASTER: {HOST.NAME}'
+              priority: DISASTER
+              description: 'Raised by the Trigger Correlation module (existing-item output).'
+              tags:
+                - tag: component
+                  value: correlation
+                - tag: scope
+                  value: trigger-correlation
+      valuemaps:
+        - uuid: b8ee409a13a24a3eab5be6595f7d6f7d
+          name: 'Correlation severity'
+          mappings:
+            - value: '0'
+              newvalue: OK
+            - value: '1'
+              newvalue: Information
+            - value: '2'
+              newvalue: Warning
+            - value: '3'
+              newvalue: Average
+            - value: '4'
+              newvalue: High
+            - value: '5'
+              newvalue: Disaster

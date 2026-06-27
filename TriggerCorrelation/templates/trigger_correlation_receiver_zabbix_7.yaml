@@ -1,0 +1,186 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: 84458918c2134930af402f117a019fe2
+      name: Templates/Trigger Correlation
+  templates:
+    - uuid: 56132d2c3c054faf85975bade380a233
+      template: 'Template Trigger Correlation Receiver'
+      name: 'Template Trigger Correlation Receiver'
+      vendor:
+        name: Keberneth
+        version: '7.0.0.0'
+      groups:
+        - name: Templates/Trigger Correlation
+      description: |
+        Receiver template for the Trigger Correlation frontend module.
+
+        The module pushes LLD discovery JSON to trigger.correlation.discovery and pushes state/context values with history.push.
+        State values:
+        0 = OK
+        1 = Information
+        2 = Warning
+        3 = Average
+        4 = High
+        5 = Critical/Disaster
+
+        Configure the host macros {$TRIGGER.CORRELATION.URL} and {$TRIGGER.CORRELATION.TOKEN} if you want Zabbix to run the evaluator from an HTTP agent item.
+      macros:
+        - macro: '{$TRIGGER.CORRELATION.URL}'
+          value: 'https://zabbix.example.com/modules/TriggerCorrelation/eval.php'
+          description: 'URL of the standalone module evaluation endpoint (modules/TriggerCorrelation/eval.php), reachable FROM the Zabbix server/proxy. Use this eval.php path — it works even when anonymous frontend access is disabled. (The older zabbix.php?action=triggercorrelation.eval works only if guest access is enabled.) Set to your real frontend URL.'
+        - macro: '{$TRIGGER.CORRELATION.TOKEN}'
+          value: 'set-the-evaluation-shared-secret-here'
+          type: SECRET_TEXT
+          description: 'Evaluation shared secret. Must equal the value set in Monitoring → Trigger Correlation → Settings → Evaluation shared secret. Sent only in the X-Trigger-Correlation-Token header.'
+      items:
+        - uuid: 364635228e054e0391e3bfd6953d36c4
+          name: 'Trigger correlation evaluator heartbeat'
+          type: HTTP_AGENT
+          key: trigger.correlation.eval
+          delay: 1m
+          history: 30d
+          trends: '0'
+          value_type: TEXT
+          description: |
+            Heartbeat / driver. Every minute this HTTP-agent item calls the Trigger Correlation module evaluation endpoint ({$TRIGGER.CORRELATION.URL}, authenticated with the {$TRIGGER.CORRELATION.TOKEN} header) so all rules are evaluated automatically. "No data" here means the module is not being reached (check the URL, token, API token and frontend availability) — see the dependent no-data trigger.
+          url: '{$TRIGGER.CORRELATION.URL}'
+          timeout: 30s
+          headers:
+            - name: X-Trigger-Correlation-Token
+              value: '{$TRIGGER.CORRELATION.TOKEN}'
+          tags:
+            - tag: component
+              value: correlation
+            - tag: scope
+              value: trigger-correlation
+          triggers:
+            - uuid: 6a712077c5514623a2476621d0f038bc
+              expression: 'nodata(/Template Trigger Correlation Receiver/trigger.correlation.eval,7m)=1'
+              name: 'Trigger correlation evaluator has no data'
+              priority: WARNING
+              description: 'The receiver host has not received evaluator heartbeat data. Check the module URL, token, API token and frontend availability. The 7m window tolerates one slow evaluation run.'
+              tags:
+                - tag: component
+                  value: correlation
+      discovery_rules:
+        - uuid: 9ffdd27aa57f49de9ca7c297daa86652
+          name: 'Trigger correlation discovery'
+          type: TRAP
+          key: trigger.correlation.discovery
+          delay: '0'
+          lifetime: 30d
+          description: 'LLD data is pushed by the Trigger Correlation module.'
+          item_prototypes:
+            - uuid: dcccde1085e74dbaa8f1a9a0a4596320
+              name: 'Correlation state: {#CORRELATION.NAME}'
+              type: TRAP
+              key: 'trigger.correlation.state[{#CORRELATION.ID}]'
+              delay: '0'
+              history: 90d
+              trends: '365d'
+              value_type: UNSIGNED
+              description: |
+                Correlated severity written by the Trigger Correlation module: 0 = OK/clear, 1 = Information, 2 = Warning, 3 = Average, 4 = High, 5 = Disaster. It is a trapper item, so it never becomes "unsupported"; the module pushes 0 to clear (and on rule delete), so "no data" simply means the rule has not been evaluated yet. {#CORRELATION.DESCRIPTION}
+              valuemap:
+                name: 'Correlation state'
+              tags:
+                - tag: component
+                  value: correlation
+                - tag: scope
+                  value: trigger-correlation
+                - tag: correlation.id
+                  value: '{#CORRELATION.ID}'
+            - uuid: a7bc0570c561417dac21f99510fd465f
+              name: 'Correlation context: {#CORRELATION.NAME}'
+              type: TRAP
+              key: 'trigger.correlation.context[{#CORRELATION.ID}]'
+              delay: '0'
+              history: 90d
+              trends: '0'
+              value_type: TEXT
+              description: 'JSON context pushed by the module. Contains matched source event IDs, host names and trigger names.'
+              tags:
+                - tag: component
+                  value: correlation
+                - tag: scope
+                  value: trigger-correlation
+                - tag: correlation.id
+                  value: '{#CORRELATION.ID}'
+          trigger_prototypes:
+            - uuid: d59c0e61e71346968eac7e62b20eeeb6
+              expression: 'last(/Template Trigger Correlation Receiver/trigger.correlation.state[{#CORRELATION.ID}])=1'
+              name: 'Correlation INFORMATION: {#CORRELATION.NAME}'
+              priority: INFO
+              description: '{#CORRELATION.DESCRIPTION}'
+              tags:
+                - tag: component
+                  value: correlation
+                - tag: scope
+                  value: trigger-correlation
+                - tag: correlation.id
+                  value: '{#CORRELATION.ID}'
+            - uuid: ad854ced129e42f2b045057becd9933c
+              expression: 'last(/Template Trigger Correlation Receiver/trigger.correlation.state[{#CORRELATION.ID}])=2'
+              name: 'Correlation WARNING: {#CORRELATION.NAME}'
+              priority: WARNING
+              description: '{#CORRELATION.DESCRIPTION}'
+              tags:
+                - tag: component
+                  value: correlation
+                - tag: scope
+                  value: trigger-correlation
+                - tag: correlation.id
+                  value: '{#CORRELATION.ID}'
+            - uuid: a7583190855341fe91120b810eda597f
+              expression: 'last(/Template Trigger Correlation Receiver/trigger.correlation.state[{#CORRELATION.ID}])=3'
+              name: 'Correlation AVERAGE: {#CORRELATION.NAME}'
+              priority: AVERAGE
+              description: '{#CORRELATION.DESCRIPTION}'
+              tags:
+                - tag: component
+                  value: correlation
+                - tag: scope
+                  value: trigger-correlation
+                - tag: correlation.id
+                  value: '{#CORRELATION.ID}'
+            - uuid: 90181df60fda4cac930a095abfa10dae
+              expression: 'last(/Template Trigger Correlation Receiver/trigger.correlation.state[{#CORRELATION.ID}])=4'
+              name: 'Correlation HIGH: {#CORRELATION.NAME}'
+              priority: HIGH
+              description: '{#CORRELATION.DESCRIPTION}'
+              tags:
+                - tag: component
+                  value: correlation
+                - tag: scope
+                  value: trigger-correlation
+                - tag: correlation.id
+                  value: '{#CORRELATION.ID}'
+            - uuid: 56b1d58b4edb4ba7b8a9fa42eef59a22
+              expression: 'last(/Template Trigger Correlation Receiver/trigger.correlation.state[{#CORRELATION.ID}])=5'
+              name: 'Correlation CRITICAL: {#CORRELATION.NAME}'
+              priority: DISASTER
+              description: '{#CORRELATION.DESCRIPTION}'
+              tags:
+                - tag: component
+                  value: correlation
+                - tag: scope
+                  value: trigger-correlation
+                - tag: correlation.id
+                  value: '{#CORRELATION.ID}'
+      valuemaps:
+        - uuid: a4ca5ad752d74874ad1a29adeb23b0b9
+          name: 'Correlation state'
+          mappings:
+            - value: '0'
+              newvalue: OK
+            - value: '1'
+              newvalue: Information
+            - value: '2'
+              newvalue: Warning
+            - value: '3'
+              newvalue: Average
+            - value: '4'
+              newvalue: High
+            - value: '5'
+              newvalue: Critical/Disaster
