@@ -38,14 +38,6 @@ setsebool -P httpd_can_network_connect on
 **AI webhook response**  
 ![AI webhook response example](./Example%20Pictures/ai_webhook_response.png)
 
-### Network maps
-
-**Zabbix Network Map**  
-![Zabbix Network Map example](./Example%20Pictures/Zabbix%20Network%20Map.png)
-
-**Zabbix Network Map with filter**  
-![Zabbix Network Map with filter example](./Example%20Pictures/Zabbix%20Network%20Map_with_filter.png)
-
 ### Branding and UI
 
 **Branding**  
