@@ -19,7 +19,7 @@ sccm01: SSMS service is down - AVARAGE
 +
 web01: Last month CU not installed - AVARAGE
 =
-Correlation CRITICAL: Windows server missing updates
+Correlation CRITICAL: Windows server update problem
 ```
 
 It has a **second feature**, on its own **Severity escalation** tab: instead of
