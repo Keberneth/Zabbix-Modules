@@ -145,7 +145,6 @@
 						<div class="incident-actions">
 							<button type="button" class="incident-btn incident-btn-primary" data-role="reset-zoom" hidden>Reset zoom</button>
 							<button type="button" class="incident-btn" data-role="export-png">Export PNG</button>
-							<button type="button" class="incident-btn" data-role="export-pdf">Export PDF</button>
 							<button type="button" class="incident-btn" data-role="export-html">Export HTML</button>
 							<button type="button" class="incident-btn" data-role="export-csv">Export CSV</button>
 						</div>
@@ -235,7 +234,7 @@
 				presets: q('[data-role="presets"]'), from: q('[data-role="from"]'), to: q('[data-role="to"]'),
 				prev: q('[data-role="prev"]'), next: q('[data-role="next"]'), granularity: q('[data-role="granularity"]'),
 				resetZoom: q('[data-role="reset-zoom"]'),
-				exportPng: q('[data-role="export-png"]'), exportPdf: q('[data-role="export-pdf"]'),
+				exportPng: q('[data-role="export-png"]'),
 				exportHtml: q('[data-role="export-html"]'), exportCsv: q('[data-role="export-csv"]'),
 				filterbar: q('.incident-filterbar'), filterSummary: q('[data-role="filter-summary"]'),
 				applyFilters: q('[data-role="apply-filters"]'), clearFilters: q('[data-role="clear-filters"]'),
@@ -296,7 +295,6 @@
 			this.elements.trendLegend.addEventListener('click', (e) => this.onLegendToggle(e));
 
 			this.elements.exportCsv.addEventListener('click', () => this.exportCsv());
-			this.elements.exportPdf.addEventListener('click', () => this.exportPdf());
 			this.elements.exportHtml.addEventListener('click', () => this.exportHtml());
 			this.elements.exportPng.addEventListener('click', () => {
 				this.exportPng().catch((err) => this.showError(err instanceof Error ? err.message : 'Failed to export PNG.'));
@@ -386,8 +384,8 @@
 
 		updateExportLabels() {
 			const top = this.activeTab === 'top';
+			// PNG export only applies to the timeline charts.
 			this.elements.exportPng.style.display = top ? 'none' : '';
-			this.elements.exportPdf.style.display = top ? 'none' : '';
 		}
 
 		loadActiveTab() {
@@ -1493,17 +1491,6 @@
 			}
 		}
 
-		exportPdf() {
-			if (this.activeTab === 'top') { return; }
-			const buckets = this.displayBuckets();
-			if (!buckets.length) { return; }
-			const html = this.buildReportHtml();
-			const w = window.open('', '_blank', 'noopener');
-			if (!w) { this.showError('Unable to open a print window for PDF export.'); return; }
-			w.document.open(); w.document.write(html); w.document.close(); w.focus();
-			setTimeout(() => w.print(), 250);
-		}
-
 		async exportPng() {
 			if (this.activeTab === 'top') { return; }
 			const buckets = this.displayBuckets();
@@ -1603,7 +1590,6 @@
 			const has = this.activeTab === 'top' ? topReady : tlReady;
 			this.elements.exportCsv.disabled = !has;
 			this.elements.exportHtml.disabled = !has;
-			this.elements.exportPdf.disabled = !tlReady;
 			this.elements.exportPng.disabled = !tlReady;
 		}
 

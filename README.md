@@ -70,4 +70,15 @@ setsebool -P httpd_can_network_connect on
 
 **Healthchecks history**
 ![Healthchecks history example](./Example%20Pictures/Healtchecks_history.png)
+
+### Incident Timeline
+
+Trigger problem events over time with severity charts, multi-month ranges, host/group/template/name
+filtering and a Top triggers report. See [`Incident_timeline_graph/README.md`](./Incident_timeline_graph/README.md).
+
+**Incident timeline**  
+![Incident timeline example](./Example%20Pictures/incident_timeline.png)
+
+**Top triggers (avg frequency, MTTR, share)**  
+![Incident timeline top triggers example](./Example%20Pictures/incident_timeline_top_triggers.png)
 </details>
