@@ -15,9 +15,9 @@ Correlation HIGH: Windows server update problem
 And later:
 
 ```text
-sccm01: SSMS service is down
+sccm01: SSMS service is down - AVARAGE
 +
-web01: Last month CU not installed
+web01: Last month CU not installed - AVARAGE
 =
 Correlation CRITICAL: Windows server missing updates
 ```
