@@ -87,7 +87,7 @@ $default_until = gmdate('Y-m-d');
             <div class="nbs-log-facet" data-facet="os">
                 <label class="nbs-label"><?= $h(_('Operating system')) ?></label>
                 <select class="nbs-input nbs-facet-select" multiple size="4" data-facet-field="os"></select>
-                <div class="nbs-mini-help"><?= $h(_('Ctrl/⌘-click to pick several. Partial matches work.')) ?></div>
+                <div class="nbs-mini-help"><?= $h(_('Ctrl/⌘-click to pick several. Facet values match exactly; use the per-column or text boxes for partial matches.')) ?></div>
             </div>
             <div class="nbs-log-facet" data-facet="target_type">
                 <label class="nbs-label"><?= $h(_('Target')) ?></label>

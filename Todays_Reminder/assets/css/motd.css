@@ -18,7 +18,7 @@
 	--motd-error-border: #f2c2bf;
 	--motd-btn-bg: #fff;
 	--motd-btn-border: #b9c3cf;
-	--motd-accent: #3b82f6;
+	--motd-accent: #2e7dd1;
 }
 
 /* ── Dark theme overrides (matching AI module) ── */
@@ -43,7 +43,7 @@ html[theme="hc-dark"] .motd-page {
 	--motd-error-border: #6b3030;
 	--motd-btn-bg: #323f52;
 	--motd-btn-border: #4a5568;
-	--motd-accent: #60a5fa;
+	--motd-accent: #93c5fd;
 }
 
 /* ── Top banner ── */
@@ -113,7 +113,6 @@ html[theme="hc-dark"] .motd-page {
 
 .motd-banner__actions a,
 .motd-card__link,
-.motd-update a,
 .motd-table a,
 .motd-page__header-actions a {
 	text-decoration: none;
@@ -122,14 +121,13 @@ html[theme="hc-dark"] .motd-page {
 
 .motd-banner__actions a:hover,
 .motd-card__link:hover,
-.motd-update a:hover,
 .motd-table a:hover,
 .motd-page__header-actions a:hover {
 	text-decoration: underline;
 }
 
 .motd-banner__actions button,
-.motd-page__header-actions .btn-alt {
+.motd-page__btn {
 	cursor: pointer;
 	border: 1px solid var(--motd-btn-border);
 	border-radius: 4px;
@@ -142,7 +140,7 @@ html[theme="hc-dark"] .motd-page {
 }
 
 .motd-banner__actions button:hover,
-.motd-page__header-actions .btn-alt:hover {
+.motd-page__btn:hover {
 	background: var(--motd-bg-accent);
 }
 
@@ -207,11 +205,6 @@ html[theme="hc-dark"] .motd-page {
 .motd-chip--maintenance {
 	border-color: var(--motd-border);
 	background: var(--motd-user-bg);
-}
-
-.motd-chip--update {
-	border-color: var(--motd-ok-border);
-	background: var(--motd-ok-bg);
 }
 
 .motd-chip--unacked {
@@ -321,9 +314,11 @@ html[theme="hc-dark"] .motd-page {
 
 .motd-table thead th {
 	border-top: none;
-	padding-top: 0;
-	color: var(--motd-fg-muted);
-	font-weight: 600;
+	background: var(--motd-bg-accent);
+	border-bottom: 1px solid var(--motd-border);
+	color: var(--motd-fg);
+	font-weight: 700;
+	white-space: nowrap;
 }
 
 /* ── Pills ── */

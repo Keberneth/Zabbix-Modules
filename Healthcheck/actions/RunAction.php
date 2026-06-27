@@ -15,7 +15,12 @@ use CController,
 class RunAction extends CController {
 
     protected function checkInput(): bool {
-        return true;
+        $fields = [
+            'checkid' => 'string',
+            'force' => 'in 0,1'
+        ];
+
+        return $this->validateInput($fields);
     }
 
     protected function checkPermissions(): bool {
@@ -23,22 +28,34 @@ class RunAction extends CController {
     }
 
     protected function doAction(): void {
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(300);
+        }
+
         try {
             $pdo = DbConnector::connect();
             Storage::ensureSchema($pdo);
 
             $config = Config::get($pdo);
-            $check_id = Util::cleanString($_REQUEST['checkid'] ?? '', 128);
-            $force = Util::truthy($_REQUEST['force'] ?? false);
+            $check_id = Util::cleanString($this->getInput('checkid', ''), 128);
+            $force = Util::truthy($this->getInput('force', '0'));
 
             $result = Runner::runDueChecks($config, $pdo, $check_id, $force);
 
-            $this->respond($result, $result['ok'] ? 200 : 200);
+            $this->respond($result, 200);
         }
-        catch (\Throwable $e) {
+        catch (\InvalidArgumentException $e) {
             $this->respond([
                 'ok' => false,
-                'message' => Util::truncate($e->getMessage(), 1000)
+                'message' => $e->getMessage()
+            ], 400);
+        }
+        catch (\Throwable $e) {
+            error_log('Healthcheck RunAction: '.$e->getMessage());
+
+            $this->respond([
+                'ok' => false,
+                'message' => _('An internal error occurred while running the health check.')
             ], 500);
         }
     }
@@ -47,9 +64,18 @@ class RunAction extends CController {
         http_response_code($http_status);
         header('Content-Type: application/json; charset=UTF-8');
 
+        $json = json_encode(
+            $payload,
+            JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+        );
+
+        if ($json === false) {
+            $json = '{"ok":false,"message":"Failed to encode response."}';
+        }
+
         $this->setResponse(
             (new CControllerResponseData([
-                'main_block' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                'main_block' => $json
             ]))->disableView()
         );
     }

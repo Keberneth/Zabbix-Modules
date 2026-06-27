@@ -35,6 +35,8 @@ class ReportView extends CController {
 	}
 
 	protected function doAction(): void {
+		set_time_limit(300);
+
 		$filter = ReportDataHelper::normalizeFilter([
 			'mode' => $this->getInput('filter_mode', ReportDataHelper::getDefaultFilter()['mode']),
 			'month' => $this->getInput('filter_month', ReportDataHelper::getDefaultFilter()['month']),
@@ -49,24 +51,36 @@ class ReportView extends CController {
 		[$time_from, $time_to] = ReportDataHelper::resolveDateRange($filter);
 
 		$helper = new ReportDataHelper();
+		$sla_heatmap = [];
+		$availability = [];
+		$error = null;
 
-		$sla_heatmap = $helper->fetchSlaHeatmap($filter['slaids'], $time_to);
-		$availability = $helper->fetchAvailability(
-			$filter['hostgroupids'],
-			$time_from,
-			$time_to,
-			(bool) $filter['exclude_disabled']
-		);
+		try {
+			$sla_heatmap = $helper->fetchSlaHeatmap($filter['slaids'], $time_to);
+			$availability = $helper->fetchAvailability(
+				$filter['hostgroupids'],
+				$time_from,
+				$time_to,
+				(bool) $filter['exclude_disabled']
+			);
+		}
+		catch (\InvalidArgumentException $e) {
+			$error = $e->getMessage();
+		}
+		catch (\Throwable $e) {
+			error_log('SLA Uptime Report: '.$e->getMessage());
+			$error = _('An internal error occurred while generating the report. See the server error log for details.');
+		}
 
 		$this->setResponse(new CControllerResponseData([
 			'title' => _('SLA & Uptime Report'),
 			'filter' => $filter,
 			'time_from' => $time_from,
 			'time_to' => $time_to,
-			'hostgroup_options' => $helper->getHostGroupOptions(),
-			'sla_options' => $helper->getSlaOptions(),
 			'sla_heatmap' => $sla_heatmap,
 			'availability' => $availability,
+			'notes' => $helper->getNotes(),
+			'error' => $error,
 			'helper' => $helper,
 			'active_tab' => 1
 		]));

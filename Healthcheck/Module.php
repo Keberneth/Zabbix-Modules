@@ -70,6 +70,12 @@ class Module extends CModule {
                     fastcgi_finish_request();
                 }
 
+                // Bound the deferred heavy path so it can never run unbounded in a
+                // page-load shutdown handler.
+                if (function_exists('set_time_limit')) {
+                    @set_time_limit(300);
+                }
+
                 require_once __DIR__.'/lib/bootstrap.php';
 
                 $pdo    = \Modules\Healthcheck\Lib\DbConnector::connect();

@@ -137,7 +137,7 @@ foreach ($sla_heatmap as $sla) {
 
 		$row[] = (new CSpan($latest_value))
 			->addClass($helper->sliCssClass($latest_pct, $slo_value))
-			->addClass('bold');
+			->addClass('slareport-bold');
 
 		$table->addRow($row);
 	}

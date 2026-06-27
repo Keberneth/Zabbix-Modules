@@ -10,6 +10,7 @@ $last_summary = is_array($data['last_summary'] ?? null) ? $data['last_summary'] 
 
 $settings_save_url = (string) ($data['settings_save_url'] ?? (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.settings.save')->getUrl());
 $run_url = (string) ($data['run_url'] ?? (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.run')->getUrl());
+$test_url = (string) ($data['test_url'] ?? (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.test')->getUrl());
 $runner_url = (string) ($data['runner_url'] ?? $run_url);
 $linux_plugin_url = (string) ($data['linux_plugin_url'] ?? '');
 $windows_plugin_url = (string) ($data['windows_plugin_url'] ?? '');
@@ -196,6 +197,8 @@ $runner_curl = "curl -fsS -X POST -H 'X-NetBox-Sync-Secret: ".$runner_secret_hin
         <input type="hidden" name="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>" value="<?= $h(CCsrfTokenHelper::get('netboxsync.settings.save')) ?>">
         <input type="hidden" id="nbs-run-csrf-token-name" value="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>">
         <input type="hidden" id="nbs-run-csrf-token-value" value="<?= $h(CCsrfTokenHelper::get('netboxsync.run')) ?>">
+        <input type="hidden" id="nbs-test-csrf-token-name" value="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>">
+        <input type="hidden" id="nbs-test-csrf-token-value" value="<?= $h(CCsrfTokenHelper::get('netboxsync.test')) ?>">
 
         <section class="nbs-card">
             <div class="nbs-section-header">
@@ -240,6 +243,10 @@ $runner_curl = "curl -fsS -X POST -H 'X-NetBox-Sync-Secret: ".$runner_secret_hin
                             <label class="nbs-label"><?= $h(_('Verify TLS')) ?></label>
                             <label class="nbs-checkbox"><input type="checkbox" name="netbox[verify_peer]" value="1" <?= !empty($config['netbox']['verify_peer']) ? 'checked' : '' ?>> <?= $h(_('Validate certificates')) ?></label>
                         </div>
+                    </div>
+                    <div class="nbs-section-actions">
+                        <button type="button" id="nbs-test-connection" class="btn-alt" data-test-url="<?= $h($test_url) ?>"><?= $h(_('Test connection')) ?></button>
+                        <span class="nbs-mini-help"><?= $h(_('Runs a single GET /status/ using the values above (blank fields fall back to the stored config).')) ?></span>
                     </div>
                 </div>
             </div>

@@ -36,8 +36,6 @@ class RebrandConfig extends CController {
 			'storage_writable' => false,
 			'conf_writable' => false,
 			'runtime_user' => $this->getProcessUser(),
-			'using_legacy_storage' => false,
-			'legacy_storage_dir' => '',
 			'runtime_error' => null
 		];
 
@@ -71,8 +69,6 @@ class RebrandConfig extends CController {
 				'storage_writable' => $this->canWritePath($logo_storage_dir),
 				'conf_writable' => ($this->canWritePath($local_conf_dir) && $this->canWritePath($config_storage_dir)),
 				'runtime_user' => $this->getProcessUser(),
-				'using_legacy_storage' => false,
-				'legacy_storage_dir' => '',
 				'runtime_error' => null
 			];
 		}

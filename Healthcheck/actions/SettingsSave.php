@@ -8,13 +8,17 @@ use CController,
     CControllerResponseData,
     Modules\Healthcheck\Lib\Config,
     Modules\Healthcheck\Lib\DbConnector,
-    Modules\Healthcheck\Lib\Storage,
-    Modules\Healthcheck\Lib\Util;
+    Modules\Healthcheck\Lib\Storage;
 
 class SettingsSave extends CController {
 
     protected function checkInput(): bool {
-        return true;
+        $fields = [
+            'checks' => 'array',
+            'history' => 'array'
+        ];
+
+        return $this->validateInput($fields);
     }
 
     protected function checkPermissions(): bool {
@@ -22,12 +26,20 @@ class SettingsSave extends CController {
     }
 
     protected function doAction(): void {
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(300);
+        }
+
         try {
             $pdo = DbConnector::connect();
             Storage::ensureSchema($pdo);
 
             $current = Config::get($pdo);
-            $new_config = Config::buildFromPost($_POST, $current);
+            $post = [
+                'checks' => $this->getInput('checks', []),
+                'history' => $this->getInput('history', [])
+            ];
+            $new_config = Config::buildFromPost($post, $current);
             Config::save($new_config, $pdo);
 
             $this->respond([
@@ -35,11 +47,19 @@ class SettingsSave extends CController {
                 'message' => _('Healthcheck settings updated.')
             ]);
         }
-        catch (\Throwable $e) {
+        catch (\InvalidArgumentException $e) {
             $this->respond([
                 'ok' => false,
-                'error' => Util::truncate($e->getMessage(), 1000)
+                'error' => $e->getMessage()
             ], 400);
+        }
+        catch (\Throwable $e) {
+            error_log('Healthcheck SettingsSave: '.$e->getMessage());
+
+            $this->respond([
+                'ok' => false,
+                'error' => _('An internal error occurred while saving settings.')
+            ], 500);
         }
     }
 
@@ -47,9 +67,18 @@ class SettingsSave extends CController {
         http_response_code($http_status);
         header('Content-Type: application/json; charset=UTF-8');
 
+        $json = json_encode(
+            $payload,
+            JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+        );
+
+        if ($json === false) {
+            $json = '{"ok":false,"error":"Failed to encode response."}';
+        }
+
         $this->setResponse(
             (new CControllerResponseData([
-                'main_block' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                'main_block' => $json
             ]))->disableView()
         );
     }

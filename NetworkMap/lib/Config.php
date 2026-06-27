@@ -72,7 +72,7 @@ final class Config {
             'cache_dir' => $cache_dir !== false ? $cache_dir : (sys_get_temp_dir() . '/network-map'),
             'cache_ttl_seconds' => (int) ($cache_ttl !== false ? $cache_ttl : 1800),
             'history_window_hours' => (int) ($history_window !== false ? $history_window : 24),
-            'history_limit_per_item' => (int) ($history_limit !== false ? $history_limit : 100000),
+            'history_limit_per_item' => (int) ($history_limit !== false ? $history_limit : 50000),
             'host_label_source' => $host_label_source !== false ? $host_label_source : 'visible',
             'append_primary_ip_to_host_labels' => self::envBool('NETWORK_MAP_APPEND_PRIMARY_IP_TO_HOST_LABELS', true),
             'zabbix_item_names' => [

@@ -17,5 +17,10 @@
   "rebrand.config.update": {
    "class": "RebrandConfigUpdate"
   }
+ },
+ "assets": {
+  "css": [
+   "rebrand.css"
+  ]
  }
 }

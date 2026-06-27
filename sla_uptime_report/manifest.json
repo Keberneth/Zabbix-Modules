@@ -3,7 +3,7 @@
   "id": "sla_uptime_report",
   "name": "SLA & Uptime Report",
   "description": "Rolling 12-month SLA heatmap and host availability report with HTML and CSV export.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "namespace": "SlaUptimeReport",
   "author": "Keberneth",
   "url": "",
@@ -21,6 +21,9 @@
   "assets": {
     "css": [
       "slareport.css"
+    ],
+    "js": [
+      "slareport.filter.js"
     ]
   }
 }

@@ -59,9 +59,16 @@ $render_check_row = static function(array $check = []) use ($h): string {
             </div>
             <div>
                 <label class="hc-label"><?= $h(_('API auth mode')) ?></label>
+                <?php
+                $auth_mode_labels = [
+                    'auto' => _('Automatic'),
+                    'bearer' => _('Bearer token'),
+                    'legacy_auth_field' => _('Legacy auth field')
+                ];
+                ?>
                 <select class="hc-input" name="checks[<?= $h($id) ?>][auth_mode]">
-                    <?php foreach (['auto', 'bearer', 'legacy_auth_field'] as $auth_mode): ?>
-                        <option value="<?= $h($auth_mode) ?>" <?= (($check['auth_mode'] ?? 'auto') === $auth_mode) ? 'selected' : '' ?>><?= $h($auth_mode) ?></option>
+                    <?php foreach ($auth_mode_labels as $auth_mode => $auth_label): ?>
+                        <option value="<?= $h($auth_mode) ?>" <?= (($check['auth_mode'] ?? 'auto') === $auth_mode) ? 'selected' : '' ?>><?= $h($auth_label) ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -107,7 +114,7 @@ $render_check_row = static function(array $check = []) use ($h): string {
             </div>
         </div>
         <div class="hc-repeat-row-actions">
-            <button type="button" class="btn-alt hc-remove-row"><?= $h(_('Remove check')) ?></button>
+            <button type="button" class="hc-btn-danger hc-remove-row"><?= $h(_('Remove check')) ?></button>
         </div>
     </div>
     <?php
@@ -116,7 +123,14 @@ $render_check_row = static function(array $check = []) use ($h): string {
 
 ob_start();
 ?>
-<div id="healthcheck-settings-root" class="hc-page hc-settings-page" data-healthcheck-theme="<?= $h($hc_theme) ?>">
+<div id="healthcheck-settings-root" class="hc-page hc-settings-page"
+     data-healthcheck-theme="<?= $h($hc_theme) ?>"
+     data-i18n-saving="<?= $h(_('Saving…')) ?>"
+     data-i18n-save="<?= $h(_('Save settings')) ?>"
+     data-i18n-save-failed="<?= $h(_('Save failed.')) ?>"
+     data-i18n-unexpected="<?= $h(_('Unexpected response from server.')) ?>"
+     data-i18n-copied="<?= $h(_('Copied!')) ?>"
+     data-i18n-copy-failed="<?= $h(_('Copy failed')) ?>">
     <div class="hc-header">
         <div>
             <h1><?= $h($data['title'] ?? _('Healthcheck settings')) ?></h1>
@@ -308,7 +322,7 @@ sudo chmod 640 /etc/zabbix/web/zabbix.conf.php</textarea>
         </section>
 
         <div class="hc-form-actions">
-            <button type="submit" class="btn-alt hc-primary-button"><?= $h(_('Save settings')) ?></button>
+            <button type="submit" class="hc-btn-primary"><?= $h(_('Save settings')) ?></button>
         </div>
     </form>
 

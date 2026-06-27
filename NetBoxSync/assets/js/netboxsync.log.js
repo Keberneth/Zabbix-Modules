@@ -107,9 +107,13 @@
     }
 
     function buildFilters() {
-        const filters = {};
-        filters.since = qs('#nbs-log-since').value;
-        filters.until = qs('#nbs-log-until').value;
+        const filters = {
+            since: qs('#nbs-log-since').value,
+            until: qs('#nbs-log-until').value,
+            facets: {},
+            cols: {}
+        };
+
         const q = qs('#nbs-log-q').value.trim();
         if (q) filters.q = q;
 
@@ -117,40 +121,36 @@
             const field = sel.getAttribute('data-facet-field');
             const values = selectedValues(sel);
             if (values.length > 0) {
-                filters[field] = values;
+                filters.facets[field] = values;
             }
         });
 
         Object.keys(state.columnFilters).forEach(function(key) {
             const value = (state.columnFilters[key] || '').trim();
-            if (!value) return;
-            if (filters[key]) {
-                if (Array.isArray(filters[key])) {
-                    filters[key].push(value);
-                } else {
-                    filters[key] = [filters[key], value];
-                }
-            } else {
-                filters[key] = value;
+            if (value) {
+                filters.cols[key] = value;
             }
         });
 
         return filters;
     }
 
-    function buildRequestUrl(filters, extra) {
+    function buildRequestUrl(filters, extra, typeOverride) {
         const params = new URLSearchParams();
-        params.set('type', TAB_TO_TYPE[state.tab] || 'added');
+        params.set('type', typeOverride || TAB_TO_TYPE[state.tab] || 'added');
 
-        Object.keys(filters).forEach(function(key) {
-            const value = filters[key];
-            if (Array.isArray(value)) {
-                value.forEach(function(v) {
-                    params.append(key + '[]', v);
-                });
-            } else if (value !== '' && value !== null && value !== undefined) {
-                params.set(key, value);
-            }
+        if (filters.since) params.set('since', filters.since);
+        if (filters.until) params.set('until', filters.until);
+        if (filters.q) params.set('q', filters.q);
+
+        Object.keys(filters.facets || {}).forEach(function(field) {
+            (filters.facets[field] || []).forEach(function(v) {
+                params.append(field + '[]', v);
+            });
+        });
+
+        Object.keys(filters.cols || {}).forEach(function(field) {
+            params.set('col[' + field + ']', filters.cols[field]);
         });
 
         if (extra) {
@@ -202,30 +202,34 @@
         renderGrid();
         renderFacets(payload.facets || {});
         updatePagerInfo(payload);
-        refreshTabCounts();
+        fetchCounts();
     }
 
-    async function refreshTabCounts() {
+    // One request returns the exact per-tab totals for the current filters
+    // (capped at the server scan ceiling, shown with a trailing "+").
+    async function fetchCounts() {
         const filters = buildFilters();
-        const tabs = Object.keys(state.tabCounts);
-        await Promise.all(tabs.map(async function(tab) {
-            const params = Object.assign({}, filters);
-            const url = buildRequestUrl(Object.assign({}, params), {limit: 1, offset: 0, mode: 'items'});
-            const u = url.replace(/type=[^&]*/, 'type=' + encodeURIComponent(tab));
+        const url = buildRequestUrl(filters, {mode: 'counts'});
 
-            try {
-                const r = await fetch(u, {credentials: 'same-origin'});
-                const p = await r.json();
-                if (p && p.ok) {
-                    const count = (p.count || 0) + (p.has_more ? '+' : '');
-                    state.tabCounts[tab] = count;
-                    const el = qs('[data-tab-count="' + tab + '"]');
-                    if (el) el.textContent = String(count);
-                }
-            } catch (e) {
-                // ignore
-            }
-        }));
+        let payload;
+        try {
+            const r = await fetch(url, {credentials: 'same-origin'});
+            payload = await r.json();
+        } catch (e) {
+            return;
+        }
+
+        if (!payload || !payload.ok || !payload.counts) {
+            return;
+        }
+
+        Object.keys(state.tabCounts).forEach(function(tab) {
+            const n = payload.counts[tab] || 0;
+            const label = String(n) + (payload.capped ? '+' : '');
+            state.tabCounts[tab] = label;
+            const el = qs('[data-tab-count="' + tab + '"]');
+            if (el) el.textContent = label;
+        });
     }
 
     function renderGrid() {

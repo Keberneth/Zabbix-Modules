@@ -18,7 +18,12 @@ class HistoryView extends CController {
     }
 
     protected function checkInput(): bool {
-        return true;
+        $fields = [
+            'checkid' => 'string',
+            'period_days' => 'int32'
+        ];
+
+        return $this->validateInput($fields);
     }
 
     protected function checkPermissions(): bool {
@@ -33,9 +38,9 @@ class HistoryView extends CController {
         $config = Config::mergeWithDefaults($config);
         $checks = $config['checks'];
 
-        $selected_check_id = Util::cleanString($_REQUEST['checkid'] ?? '', 128);
+        $selected_check_id = Util::cleanString($this->getInput('checkid', ''), 128);
         $period_days = Util::cleanInt(
-            $_REQUEST['period_days'] ?? ($config['history']['default_period_days'] ?? 7),
+            $this->getInput('period_days', (int) ($config['history']['default_period_days'] ?? 7)),
             (int) ($config['history']['default_period_days'] ?? 7),
             1,
             365

@@ -88,39 +88,6 @@ trait RebrandStorageTrait {
 		return is_array($config) ? $this->normalizeConfig($config) : $this->normalizeConfig([]);
 	}
 
-	private function detectActiveStorage(string $module_dir, string $frontend_root): array {
-		$primary_dir = $this->getPrimaryStorageDir($frontend_root);
-		$primary_config = $this->loadConfigFromDir($primary_dir);
-
-		if (is_file($this->getConfigFilePath($primary_dir))) {
-			return [
-				'mode' => 'primary',
-				'dir' => $primary_dir,
-				'url' => $this->getPrimaryStorageUrl(),
-				'config' => $primary_config
-			];
-		}
-
-		$legacy_dir = $this->getLegacyStorageDir($module_dir);
-		$legacy_config = $this->loadConfigFromDir($legacy_dir);
-
-		if (is_file($this->getConfigFilePath($legacy_dir))) {
-			return [
-				'mode' => 'legacy',
-				'dir' => $legacy_dir,
-				'url' => $this->getLegacyStorageUrl($module_dir),
-				'config' => $legacy_config
-			];
-		}
-
-		return [
-			'mode' => 'primary',
-			'dir' => $primary_dir,
-			'url' => $this->getPrimaryStorageUrl(),
-			'config' => $primary_config
-		];
-	}
-
 	private function getExistingLogoName(array $config, string $logo_key, string $storage_dir): ?string {
 		$filename = $this->normalizeLogoName($config[$logo_key] ?? null);
 
@@ -149,6 +116,24 @@ trait RebrandStorageTrait {
 		return is_dir($dir) || @mkdir($dir, 0755, true) || is_dir($dir);
 	}
 
+	/**
+	 * Dual-storage model
+	 * ------------------
+	 * Logos live in two places. The "serving" directory (module assets/logos,
+	 * referred to here as $legacy_dir) is web-reachable and is what the browser
+	 * actually loads. The "primary" directory (local/conf/rebrand) sits outside
+	 * the module tree so uploads survive a module reinstall. The three helpers
+	 * below keep the two in sync:
+	 *  - migrateLegacyAssets():    one-way copy serving -> primary for configs
+	 *                              that predate the primary store (fills gaps).
+	 *  - persistAssetsToPrimary(): copy freshly uploaded serving files into the
+	 *                              durable primary store (newest wins by mtime).
+	 *  - healLegacyAssets():       copy primary -> serving when the serving copy
+	 *                              is missing (e.g. right after a reinstall).
+	 *
+	 * Copy any logo referenced by config that exists only in the serving dir into
+	 * the durable primary store; never overwrites an existing primary file.
+	 */
 	private function migrateLegacyAssets(array $config, string $legacy_dir, string $primary_dir, array &$errors): void {
 		if ($legacy_dir === $primary_dir) {
 			return;
@@ -177,6 +162,11 @@ trait RebrandStorageTrait {
 		}
 	}
 
+	/**
+	 * Persist freshly served logo files into the durable primary store so they
+	 * survive a module reinstall. Copies only when the primary copy is missing or
+	 * older than the serving copy (newest-wins by filemtime).
+	 */
 	private function persistAssetsToPrimary(array $config, string $legacy_dir, string $primary_dir): void {
 		if ($legacy_dir === $primary_dir) {
 			return;
@@ -213,6 +203,12 @@ trait RebrandStorageTrait {
 		}
 	}
 
+	/**
+	 * Self-heal the web-served directory after a module reinstall: copy each
+	 * configured logo back from the durable primary store, but only when the
+	 * serving copy is actually missing (it never overwrites an existing file, so
+	 * the I/O is bounded and idempotent).
+	 */
 	private function healLegacyAssets(array $config, string $primary_dir, string $legacy_dir): void {
 		if ($legacy_dir === $primary_dir) {
 			return;
@@ -298,15 +294,22 @@ trait RebrandStorageTrait {
 		return is_string($mime) ? $mime : null;
 	}
 
+	/**
+	 * Content-sniff the uploaded file and require its MIME type to match the
+	 * declared extension. Fails closed: if fileinfo is unavailable or returns no
+	 * type, the upload is rejected rather than trusted on extension alone.
+	 *
+	 * SVG is intentionally absent from the whitelist (an SVG can carry embedded
+	 * <script> and would execute in the Zabbix origin when served directly).
+	 */
 	private function isAllowedUpload(string $tmp_name, string $extension): bool {
 		$mime = $this->detectMimeType($tmp_name);
 
 		if ($mime === null || $mime === '') {
-			return true;
+			return false;
 		}
 
 		$allowed_mimes = [
-			'svg' => ['image/svg+xml', 'text/plain', 'text/xml', 'application/xml'],
 			'png' => ['image/png'],
 			'jpg' => ['image/jpeg'],
 			'jpeg' => ['image/jpeg'],
@@ -341,8 +344,8 @@ trait RebrandStorageTrait {
 		$original_name = isset($upload['name']) && is_string($upload['name']) ? basename($upload['name']) : '';
 		$extension = strtolower(pathinfo($original_name, PATHINFO_EXTENSION));
 
-		if (!in_array($extension, ['svg', 'png', 'jpg', 'jpeg', 'gif', 'ico'], true)) {
-			return $meta['label'].': invalid file type. Allowed: SVG, PNG, JPG, GIF, ICO.';
+		if (!in_array($extension, ['png', 'jpg', 'jpeg', 'gif', 'ico'], true)) {
+			return $meta['label'].': invalid file type. Allowed: PNG, JPG, GIF, ICO.';
 		}
 
 		$file_size = isset($upload['size']) ? (int) $upload['size'] : 0;

@@ -1,0 +1,25 @@
+[Unit]
+Description=Zabbix → NetBox synchronization run (NetBoxSync module runner)
+Documentation=https://github.com/Keberneth/Zabbix-Modules
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Holds NETBOXSYNC_URL and NETBOXSYNC_SECRET. Keep it root-only (0640):
+#   sudo install -o root -g root -m 0640 /dev/null /etc/sysconfig/zabbix-netbox-sync
+# On Debian/Ubuntu use /etc/default/zabbix-netbox-sync and update the path below.
+EnvironmentFile=/etc/sysconfig/zabbix-netbox-sync
+# Invoked through /bin/sh so it works even though the module files are installed
+# mode 0644 (no executable bit).
+ExecStart=/bin/sh /usr/share/zabbix/modules/NetBoxSync/samples/netboxsync-run.sh
+
+# Hardening (optional; relax if your environment needs it).
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

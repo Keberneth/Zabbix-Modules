@@ -41,7 +41,20 @@ class Util {
     }
 
     public static function cleanUrl($value): string {
-        return trim((string) $value);
+        $value = trim((string) $value);
+
+        if ($value === '') {
+            return '';
+        }
+
+        // Drop any non-http(s) scheme (file://, gopher://, etc.) so it can never reach
+        // the server-side fetchers, including the background page-load runner.
+        $scheme = strtolower((string) parse_url($value, PHP_URL_SCHEME));
+        if ($scheme !== '' && $scheme !== 'http' && $scheme !== 'https') {
+            return '';
+        }
+
+        return $value;
     }
 
     public static function cleanInt($value, int $default = 0, ?int $min = null, ?int $max = null): int {

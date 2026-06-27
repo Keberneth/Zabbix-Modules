@@ -17,7 +17,7 @@ class BannerView extends CController {
 	}
 
 	protected function checkInput(): bool {
-		return true;
+		return $this->validateInput([]);
 	}
 
 	protected function checkPermissions(): bool {
@@ -25,11 +25,22 @@ class BannerView extends CController {
 	}
 
 	protected function doAction(): void {
-		$provider = new MotdDataProvider();
+		$motd = [];
+
+		try {
+			set_time_limit(300);
+
+			$provider = new MotdDataProvider();
+			$motd = $provider->getData((string) (\CWebUser::$data['userid'] ?? '0'));
+		}
+		catch (\Throwable $e) {
+			error_log('MOTD BannerView: '.$e->getMessage());
+			$motd = [];
+		}
 
 		$this->setResponse(new CControllerResponseData([
 			'title' => _('Today\'s Reminder'),
-			'motd' => $provider->getData()
+			'motd' => $motd
 		]));
 	}
 }

@@ -1,77 +1,97 @@
-/* Veeam Backup Report – theme-agnostic (inherits from Zabbix) */
-.veeamreport { max-width: 100%; color: inherit; }
-.veeamreport-page-title { margin: 0 0 4px 0; font-size: 22px; font-weight: 600; color: inherit; }
+/* Veeam Backup Report - Convention B theming (literal hex, [theme=...] dark overrides) */
+.veeamreport { max-width: 100%; color: #1f2b3a; }
+.veeamreport-page-title { margin: 0 0 4px 0; font-size: 22px; font-weight: 600; color: #2a3441; }
 .veeamreport-section { margin-top: 18px; }
-.veeamreport-section-title { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; color: inherit; }
-.veeamreport-section-subtitle { margin: 0 0 12px 0; font-size: 12px; opacity: 0.6; }
+.veeamreport-section-title { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; color: #2a3441; }
+.veeamreport-section-subtitle { margin: 0 0 12px 0; font-size: 12px; color: #5c6b7a; }
+
 .veeamreport-info-bar {
     padding: 10px 14px;
     margin: 10px 0 12px 0;
-    background: rgba(71, 150, 196, 0.12);
-    border: 1px solid rgba(71, 150, 196, 0.3);
-    border-radius: 6px;
-    color: rgb(71, 150, 196);
+    background: #f7f9fc;
+    border: 1px solid #dfe4ec;
+    border-radius: 4px;
+    color: #34485f;
 }
-.veeamreport-info-label { font-weight: 600; }
-.veeamreport-sep { margin: 0 8px; opacity: 0.5; }
+.veeamreport-info-label { font-weight: 600; color: #0f6ad8; }
+.veeamreport-sep { margin: 0 8px; color: #94a3b8; }
+
 .veeamreport-alert {
-    padding: 10px 14px;
+    padding: 12px 14px;
     margin: 10px 0 12px 0;
-    border-radius: 6px;
+    border-radius: 4px;
     border: 1px solid transparent;
+    font-size: 13px;
 }
 .veeamreport-alert--warning {
-    background: rgba(251, 191, 36, 0.12);
-    border-color: rgba(251, 191, 36, 0.4);
-    color: rgb(251, 191, 36);
+    background: #fff7e6;
+    border-color: #f1d59c;
+    color: #7a5a12;
 }
+
 .veeamreport-filter-form {
-    padding: 12px 14px;
+    padding: 14px 16px;
     margin: 14px 0 16px 0;
-    background: rgba(128, 128, 128, 0.08);
-    border: 1px solid rgba(128, 128, 128, 0.2);
-    border-radius: 8px;
+    background: #ffffff;
+    border: 1px solid #dfe4ec;
+    border-radius: 4px;
+    box-sizing: border-box;
 }
 .veeamreport-filter-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 12px;
 }
+.veeamreport-field {
+    display: flex;
+    flex-direction: column;
+    min-width: 140px;
+}
 .veeamreport-field label {
     display: block;
     margin-bottom: 6px;
+    font-size: 12px;
     font-weight: 600;
-    color: inherit;
+    color: #2a3441;
 }
 .veeamreport-field input,
 .veeamreport-field select {
     width: 100%;
     box-sizing: border-box;
-    background: rgba(128, 128, 128, 0.1);
-    color: inherit;
-    border: 1px solid rgba(128, 128, 128, 0.25);
+    min-height: 34px;
+    background: #ffffff;
+    color: #1f2b3a;
+    border: 1px solid #b9c3d0;
     border-radius: 4px;
-    padding: 6px 8px;
+    padding: 6px 10px;
+    font: inherit;
 }
-.veeamreport--dark .veeamreport-field select,
-.veeamreport--dark .veeamreport-field select option {
-    background: #1a1a1a;
-    color: #f2f2f2;
-}
-.veeamreport--dark .veeamreport-multiselect {
-    background: #1a1a1a;
-    color: #f2f2f2;
-}
+.veeamreport-field input::placeholder { color: #5c6b7a; }
 .veeamreport-field input:focus,
 .veeamreport-field select:focus {
-    outline: none;
-    border-color: rgb(71, 150, 196);
-    box-shadow: 0 0 0 2px rgba(71, 150, 196, 0.2);
+    outline: 2px solid #2e7dd1;
+    outline-offset: -1px;
+    border-color: #2e7dd1;
 }
+.veeamreport-field--hidden { display: none; }
 .veeamreport-field--wide { grid-column: span 2; }
-.veeamreport-field-hint { margin-top: 4px; font-size: 11px; opacity: 0.55; }
+.veeamreport-field-hint { margin-top: 4px; font-size: 11px; color: #5c6b7a; }
 .veeamreport-form-actions { margin-top: 12px; }
 .veeamreport-multiselect { min-height: 11em; padding: 4px; }
+
+.veeamreport-btn-primary {
+    min-height: 34px;
+    padding: 6px 16px;
+    border: 1px solid #0f6ad8;
+    border-radius: 4px;
+    background: #0f6ad8;
+    color: #ffffff;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+}
+.veeamreport-btn-primary:hover { background: #0d5ec0; border-color: #0d5ec0; }
+
 .veeamreport-downloads {
     display: flex;
     flex-wrap: wrap;
@@ -85,27 +105,83 @@
     margin: 12px 0 18px 0;
 }
 .veeamreport-card {
-    padding: 12px;
-    border: 1px solid rgba(128, 128, 128, 0.2);
-    background: rgba(128, 128, 128, 0.06);
-    border-radius: 8px;
+    padding: 16px;
+    border: 1px solid #dfe4ec;
+    background: #ffffff;
+    border-radius: 4px;
+    box-sizing: border-box;
 }
 .veeamreport-card-label {
     margin-bottom: 6px;
     font-size: 12px;
     font-weight: 600;
-    opacity: 0.6;
+    color: #5c6b7a;
 }
 .veeamreport-card-value {
     font-size: 24px;
     line-height: 1.2;
     font-weight: 700;
-    color: inherit;
+    color: #1f2b3a;
 }
 .veeamreport-card-sub {
     margin-top: 6px;
     font-size: 12px;
-    opacity: 0.65;
+    color: #5c6b7a;
 }
-.veeamreport-empty-note { margin: 4px 0 10px 0; opacity: 0.55; }
+.veeamreport-empty-note { margin: 4px 0 10px 0; color: #5c6b7a; }
 .veeamreport-wrap { white-space: normal; word-break: break-word; }
+
+/* Numeric cells in the native list-table: right-aligned, tabular figures. */
+.veeamreport-num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---------- Dark themes (dark-theme + hc-dark) ---------- */
+[theme='dark-theme'] .veeamreport,
+[theme='hc-dark'] .veeamreport { color: #eef3f7; }
+
+[theme='dark-theme'] .veeamreport-page-title,
+[theme='hc-dark'] .veeamreport-page-title,
+[theme='dark-theme'] .veeamreport-section-title,
+[theme='hc-dark'] .veeamreport-section-title,
+[theme='dark-theme'] .veeamreport-card-value,
+[theme='hc-dark'] .veeamreport-card-value { color: #eef3f7; }
+
+[theme='dark-theme'] .veeamreport-section-subtitle,
+[theme='hc-dark'] .veeamreport-section-subtitle,
+[theme='dark-theme'] .veeamreport-field-hint,
+[theme='hc-dark'] .veeamreport-field-hint,
+[theme='dark-theme'] .veeamreport-card-label,
+[theme='hc-dark'] .veeamreport-card-label,
+[theme='dark-theme'] .veeamreport-card-sub,
+[theme='hc-dark'] .veeamreport-card-sub,
+[theme='dark-theme'] .veeamreport-empty-note,
+[theme='hc-dark'] .veeamreport-empty-note { color: #bec8d3; }
+
+[theme='dark-theme'] .veeamreport-info-bar,
+[theme='hc-dark'] .veeamreport-info-bar { background: #1a2230; border-color: #3b4a5b; color: #d7dfe7; }
+
+[theme='dark-theme'] .veeamreport-alert--warning,
+[theme='hc-dark'] .veeamreport-alert--warning { background: #1a2230; border-color: #3b4a5b; color: #d7dfe7; }
+
+[theme='dark-theme'] .veeamreport-filter-form,
+[theme='hc-dark'] .veeamreport-filter-form,
+[theme='dark-theme'] .veeamreport-card,
+[theme='hc-dark'] .veeamreport-card { background: #1f2733; border-color: #3b4a5b; }
+
+[theme='dark-theme'] .veeamreport-field label,
+[theme='hc-dark'] .veeamreport-field label { color: #eef3f7; }
+
+[theme='dark-theme'] .veeamreport-field input,
+[theme='hc-dark'] .veeamreport-field input,
+[theme='dark-theme'] .veeamreport-field select,
+[theme='hc-dark'] .veeamreport-field select {
+    background: #111821;
+    border-color: #5b6b7f;
+    color: #eef3f7;
+}
+[theme='dark-theme'] .veeamreport-field input::placeholder,
+[theme='hc-dark'] .veeamreport-field input::placeholder { color: #9fb0c3; }
+
+[theme='dark-theme'] .veeamreport-field input[type="date"],
+[theme='hc-dark'] .veeamreport-field input[type="date"],
+[theme='dark-theme'] .veeamreport-field input[type="month"],
+[theme='hc-dark'] .veeamreport-field input[type="month"] { color-scheme: dark; }

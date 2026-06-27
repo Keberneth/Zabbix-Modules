@@ -17,7 +17,11 @@ class BannerData extends CController {
 	}
 
 	protected function checkInput(): bool {
-		return true;
+		$fields = [
+			'fingerprint' => 'string'
+		];
+
+		return $this->validateInput($fields);
 	}
 
 	protected function checkPermissions(): bool {
@@ -25,16 +29,44 @@ class BannerData extends CController {
 	}
 
 	protected function doAction(): void {
-		$provider = new MotdDataProvider();
-		$payload = [
-			'ok' => true,
-			'data' => $provider->getData()
-		];
+		try {
+			set_time_limit(300);
+
+			$provider = new MotdDataProvider();
+			$data = $provider->getData((string) (\CWebUser::$data['userid'] ?? '0'));
+
+			$client_fp = $this->hasInput('fingerprint') ? (string) $this->getInput('fingerprint') : '';
+			if ($client_fp !== '' && $client_fp === (string) ($data['fingerprint'] ?? '')) {
+				$payload = [
+					'ok' => true,
+					'not_modified' => true,
+					'fingerprint' => (string) ($data['fingerprint'] ?? '')
+				];
+			}
+			else {
+				$payload = [
+					'ok' => true,
+					'data' => $data
+				];
+			}
+
+			$json = json_encode(
+				$payload,
+				JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+			);
+			if ($json === false) {
+				$json = '{"ok":false,"error":"Failed to encode response."}';
+			}
+		}
+		catch (\Throwable $e) {
+			error_log('MOTD BannerData: '.$e->getMessage());
+			$json = '{"ok":false,"error":"An internal error occurred while building the reminder."}';
+		}
 
 		header('Content-Type: application/json; charset=UTF-8');
 		$this->setResponse(
 			(new CControllerResponseData([
-				'main_block' => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+				'main_block' => $json
 			]))->disableView()
 		);
 	}

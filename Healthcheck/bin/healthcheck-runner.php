@@ -26,6 +26,10 @@ TXT
     exit(0);
 }
 
+if (function_exists('set_time_limit')) {
+    @set_time_limit(300);
+}
+
 $check_id = Util::cleanString($options['check-id'] ?? '', 128);
 $force = array_key_exists('force', $options);
 $json = array_key_exists('json', $options);
@@ -36,7 +40,16 @@ try {
     $result = Runner::runDueChecks($config, $pdo, $check_id, $force);
 
     if ($json) {
-        fwrite(STDOUT, json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES).PHP_EOL);
+        $encoded = json_encode(
+            $result,
+            JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+        );
+
+        if ($encoded === false) {
+            $encoded = '{"ok":false,"message":"Failed to encode result."}';
+        }
+
+        fwrite(STDOUT, $encoded.PHP_EOL);
     }
     else {
         fwrite(STDOUT, ($result['message'] ?? 'Healthcheck runner finished.').PHP_EOL);
@@ -55,13 +68,21 @@ try {
     exit(!empty($result['ok']) ? 0 : 1);
 }
 catch (Throwable $e) {
+    error_log('Healthcheck runner: '.$e->getMessage());
+
     $message = 'Healthcheck runner failed: '.$e->getMessage();
 
     if ($json) {
-        fwrite(STDOUT, json_encode([
+        $encoded = json_encode([
             'ok' => false,
             'message' => $message
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES).PHP_EOL);
+        ], JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        if ($encoded === false) {
+            $encoded = '{"ok":false,"message":"Healthcheck runner failed."}';
+        }
+
+        fwrite(STDOUT, $encoded.PHP_EOL);
     }
     else {
         fwrite(STDERR, $message.PHP_EOL);

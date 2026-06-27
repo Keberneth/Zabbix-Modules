@@ -56,16 +56,29 @@ $auto_refresh_seconds = max(30, $min_interval);
 
 ob_start();
 ?>
-<meta http-equiv="refresh" content="<?= (int) $auto_refresh_seconds ?>">
-<div id="healthcheck-heartbeat-root" class="hc-page hc-heartbeat-page" data-healthcheck-theme="<?= $h($hc_theme) ?>" data-run-url="<?= $h($run_url) ?>" data-run-csrf-name="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>" data-run-csrf-token="<?= $h(CCsrfTokenHelper::get('healthcheck.run')) ?>">
+<div id="healthcheck-heartbeat-root" class="hc-page hc-heartbeat-page"
+     data-healthcheck-theme="<?= $h($hc_theme) ?>"
+     data-run-url="<?= $h($run_url) ?>"
+     data-run-csrf-name="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>"
+     data-run-csrf-token="<?= $h(CCsrfTokenHelper::get('healthcheck.run')) ?>"
+     data-refresh-seconds="<?= (int) $auto_refresh_seconds ?>"
+     data-i18n-running="<?= $h(_('Running…')) ?>"
+     data-i18n-run-completed="<?= $h(_('Run completed.')) ?>"
+     data-i18n-run-failed="<?= $h(_('Run failed.')) ?>"
+     data-i18n-run-url-missing="<?= $h(_('Run URL is missing.')) ?>"
+     data-i18n-unexpected="<?= $h(_('Unexpected response from server.')) ?>">
     <div class="hc-header">
         <div>
             <h1><?= $h($data['title'] ?? _('Healthcheck heartbeat')) ?></h1>
             <p class="hc-muted">
-                Latest health state per configured check, with the most recent step-level details and recent failures.
+                <?= $h(_('Latest health state per configured check, with the most recent step-level details and recent failures.')) ?>
             </p>
         </div>
         <div class="hc-header-actions">
+            <label class="hc-checkbox hc-autorefresh-toggle">
+                <input type="checkbox" id="hc-autorefresh-toggle" checked>
+                <?= $h(_('Auto-refresh')) ?>
+            </label>
             <?php if ($is_super_admin): ?>
                 <button type="button" class="btn-alt hc-run-button" data-checkid="" data-force="1"><?= $h(_('Run all now')) ?></button>
             <?php endif; ?>
@@ -225,7 +238,7 @@ ob_start();
                             <td><?= $h($failure['check_name'] ?? $failure['checkid'] ?? '') ?></td>
                             <td><?= $h(Util::formatTimestamp($failure['finished_at'] ?? 0)) ?></td>
                             <td><?= $h(Util::formatDurationMs($failure['duration_ms'] ?? null)) ?></td>
-                            <td><?= $h($failure['summary'] ?? $failure['error_text'] ?? '') ?></td>
+                            <td class="hc-text-fail"><?= $h($failure['summary'] ?? $failure['error_text'] ?? '') ?></td>
                         </tr>
                     <?php endforeach; ?>
                     <?php if ($recent_failures === []): ?>

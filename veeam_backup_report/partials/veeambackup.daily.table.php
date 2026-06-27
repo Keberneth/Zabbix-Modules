@@ -12,24 +12,24 @@
             <thead>
                 <tr>
                     <th><?php echo $esc(_('Date')); ?></th>
-                    <th><?php echo $esc(_('Total 24h')); ?></th>
-                    <th><?php echo $esc(_('Total 31d')); ?></th>
-                    <th><?php echo $esc(_('Assigned 31d')); ?></th>
-                    <th><?php echo $esc(_('Shared 31d')); ?></th>
-                    <th><?php echo $esc(_('Coverage')); ?></th>
-                    <th><?php echo $esc(_('Hosts with data')); ?></th>
+                    <th class="veeamreport-num"><?php echo $esc(_('Total 24h')); ?></th>
+                    <th class="veeamreport-num"><?php echo $esc(_('Total 31d')); ?></th>
+                    <th class="veeamreport-num"><?php echo $esc(_('Assigned 31d')); ?></th>
+                    <th class="veeamreport-num"><?php echo $esc(_('Shared 31d')); ?></th>
+                    <th class="veeamreport-num"><?php echo $esc(_('Coverage')); ?></th>
+                    <th class="veeamreport-num"><?php echo $esc(_('Hosts with data')); ?></th>
                 </tr>
             </thead>
             <tbody>
                 <?php foreach ($report['daily'] as $row): ?>
                     <tr>
                         <td><?php echo $esc($row['date']); ?></td>
-                        <td><?php echo $esc($helper->formatBytes($row['size24h'])); ?></td>
-                        <td><?php echo $esc($helper->formatBytes($row['size31d'])); ?></td>
-                        <td><?php echo $esc($helper->formatBytes($row['assigned31d'])); ?></td>
-                        <td><?php echo $esc($helper->formatBytes($row['shared31d'])); ?></td>
-                        <td><?php echo $esc($helper->formatPct($row['coverage_pct'], 2)); ?></td>
-                        <td><?php echo $esc($row['hosts_with_data']); ?></td>
+                        <td class="veeamreport-num"><?php echo $esc($helper->formatBytes($row['size24h'])); ?></td>
+                        <td class="veeamreport-num"><?php echo $esc($helper->formatBytes($row['size31d'])); ?></td>
+                        <td class="veeamreport-num"><?php echo $esc($helper->formatBytes($row['assigned31d'])); ?></td>
+                        <td class="veeamreport-num"><?php echo $esc($helper->formatBytes($row['shared31d'])); ?></td>
+                        <td class="veeamreport-num"><?php echo $esc($helper->formatPct($row['coverage_pct'], 2)); ?></td>
+                        <td class="veeamreport-num"><?php echo $esc($row['hosts_with_data']); ?></td>
                     </tr>
                 <?php endforeach; ?>
             </tbody>

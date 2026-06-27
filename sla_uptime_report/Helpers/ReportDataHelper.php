@@ -8,6 +8,47 @@ class ReportDataHelper {
 
 	public const SLA_MONTHS = 12;
 
+	/**
+	 * Hard bounds (DESIGN_SYSTEM.md §6 performance baseline). All heavy fetches clamp to these and
+	 * surface a note via getNotes() when a cap is hit, so a single oversized request can never
+	 * white-screen the frontend.
+	 */
+	public const MAX_RANGE_DAYS = 768;
+	public const MAX_HOSTS = 5000;
+	public const MAX_SLAS = 200;
+	public const FETCH_BATCH = 2000;
+	public const MAX_HISTORY_ROWS = 200000;
+	public const HISTORY_ITEM_CHUNK = 1000;
+	public const TREND_ITEM_CHUNK = 1000;
+	public const ITEM_HOST_CHUNK = 1000;
+	public const TRENDS_THRESHOLD_SECONDS = 7 * 86400;
+
+	/**
+	 * Availability is detected from any one of these item keys (priority order: first match wins).
+	 * All three are unsigned-integer items where value 1 means "up/available".
+	 */
+	public const AVAILABILITY_ITEM_KEYS = ['agent.ping', 'icmpping', 'zabbix[host,agent,available]'];
+
+	/**
+	 * Human-readable truncation/limit notes accumulated during a fetch, surfaced to the UI.
+	 *
+	 * @var array<string, string>
+	 */
+	private array $notes = [];
+
+	/**
+	 * Return de-duplicated limit/truncation notes collected while building the report.
+	 *
+	 * @return array<int, string>
+	 */
+	public function getNotes(): array {
+		return array_values($this->notes);
+	}
+
+	private function addNote(string $note): void {
+		$this->notes[$note] = $note;
+	}
+
 	public static function getDefaultFilter(): array {
 		$prev_month = gmdate('Y-m', gmmktime(0, 0, 0, (int) gmdate('n') - 1, 1, (int) gmdate('Y')));
 
@@ -52,7 +93,7 @@ class ReportDataHelper {
 						$from = gmmktime(0, 0, 0, $month, 1, $year);
 						$to = gmmktime(0, 0, 0, $month + 1, 1, $year) - 1;
 
-						return [$from, $to];
+						return self::clampRange([$from, $to]);
 					}
 				}
 				break;
@@ -62,7 +103,7 @@ class ReportDataHelper {
 				$to = self::parseDateBoundary($filter['date_to'], 'end');
 
 				if ($from !== null && $to !== null && $to >= $from) {
-					return [$from, $to];
+					return self::clampRange([$from, $to]);
 				}
 				break;
 
@@ -70,48 +111,32 @@ class ReportDataHelper {
 				$days_back = max(1, min(366, (int) $filter['days_back']));
 				$now = time();
 
-				return [$now - ($days_back * 86400), $now];
+				return self::clampRange([$now - ($days_back * 86400), $now]);
 		}
 
 		$first_this_month = gmmktime(0, 0, 0, (int) gmdate('n'), 1, (int) gmdate('Y'));
 		$first_prev_month = gmmktime(0, 0, 0, (int) gmdate('n') - 1, 1, (int) gmdate('Y'));
 
-		return [$first_prev_month, $first_this_month - 1];
+		return self::clampRange([$first_prev_month, $first_this_month - 1]);
 	}
 
-	public function getHostGroupOptions(): array {
-		$groups = API::HostGroup()->get([
-			'output' => ['groupid', 'name'],
-			'sortfield' => 'name'
-		]);
+	/**
+	 * Clamp a [from, to] window to MAX_RANGE_DAYS, anchoring on the end so the most recent data is
+	 * always covered. Keeps the displayed period consistent with the data actually fetched.
+	 *
+	 * @param array{0:int,1:int} $range
+	 *
+	 * @return array{0:int,1:int}
+	 */
+	private static function clampRange(array $range): array {
+		[$from, $to] = $range;
+		$max_seconds = self::MAX_RANGE_DAYS * 86400;
 
-		if (!is_array($groups)) {
-			return [];
+		if (($to - $from) > $max_seconds) {
+			$from = $to - $max_seconds;
 		}
 
-		usort($groups, static function (array $left, array $right): int {
-			return strcmp((string) $left['name'], (string) $right['name']);
-		});
-
-		return $groups;
-	}
-
-	public function getSlaOptions(): array {
-		$slas = API::Sla()->get([
-			'output' => ['slaid', 'name', 'status', 'slo'],
-			'filter' => ['status' => ZBX_SLA_STATUS_ENABLED],
-			'sortfield' => 'name'
-		]);
-
-		if (!is_array($slas)) {
-			return [];
-		}
-
-		usort($slas, static function (array $left, array $right): int {
-			return strcmp((string) $left['name'], (string) $right['name']);
-		});
-
-		return $slas;
+		return [$from, $to];
 	}
 
 	public function getSelectedHostGroupOptions(array $groupids): array {
@@ -157,6 +182,11 @@ class ReportDataHelper {
 
 		if (!is_array($slas) || $slas === []) {
 			return [];
+		}
+
+		if (count($slas) > self::MAX_SLAS) {
+			$slas = array_slice($slas, 0, self::MAX_SLAS);
+			$this->addNote(_s('SLA heatmap limited to the first %1$d SLAs; refine the SLA filter to see the rest.', self::MAX_SLAS));
 		}
 
 		$end_month = (int) gmdate('n', $time_to);
@@ -313,34 +343,58 @@ class ReportDataHelper {
 			return [];
 		}
 
-		$items = API::Item()->get([
-			'output' => ['itemid', 'hostid', 'delay'],
-			'hostids' => $hostids,
-			'filter' => ['key_' => 'agent.ping']
-		]);
+		if (count($hostids) > self::MAX_HOSTS) {
+			$keep = array_fill_keys(array_slice($hostids, 0, self::MAX_HOSTS), true);
+			$hostids = array_slice($hostids, 0, self::MAX_HOSTS);
 
+			foreach ($host_groups_map as $hostid => $names) {
+				if (!isset($keep[$hostid])) {
+					unset($host_groups_map[$hostid], $host_name_map[$hostid]);
+				}
+			}
+
+			$this->addNote(_s('Availability limited to the first %1$d hosts; narrow the host group filter to see the rest.', self::MAX_HOSTS));
+		}
+
+		// Resolve availability items via an OR-set of supported keys, picking the highest-priority
+		// key present per host (AVAILABILITY_ITEM_KEYS order). Host id sets are chunked to bound the
+		// per-call payload on large installs.
+		$priority = array_flip(self::AVAILABILITY_ITEM_KEYS);
 		$items_by_host = [];
 
-		if (is_array($items)) {
-			usort($items, static function (array $left, array $right): int {
-				return strcmp((string) $left['itemid'], (string) $right['itemid']);
-			});
+		foreach (array_chunk($hostids, self::ITEM_HOST_CHUNK) as $hostid_chunk) {
+			$items = API::Item()->get([
+				'output' => ['itemid', 'hostid', 'key_', 'delay'],
+				'hostids' => $hostid_chunk,
+				'filter' => ['key_' => self::AVAILABILITY_ITEM_KEYS]
+			]);
+
+			if (!is_array($items)) {
+				continue;
+			}
 
 			foreach ($items as $item) {
 				$hostid = (string) $item['hostid'];
+				$itemid = (string) $item['itemid'];
+				$rank = $priority[(string) $item['key_']] ?? PHP_INT_MAX;
 
-				if (!isset($items_by_host[$hostid])) {
+				$current = $items_by_host[$hostid] ?? null;
+
+				if ($current === null
+						|| $rank < $current['priority']
+						|| ($rank === $current['priority'] && strcmp($itemid, $current['itemid']) < 0)) {
 					$items_by_host[$hostid] = [
-						'itemid' => (string) $item['itemid'],
+						'itemid' => $itemid,
 						'hostid' => $hostid,
-						'delay' => isset($item['delay']) ? (string) $item['delay'] : null
+						'delay' => isset($item['delay']) ? (string) $item['delay'] : null,
+						'priority' => $rank
 					];
 				}
 			}
 		}
 
 		$window_seconds = max(1, ($time_to - $time_from) + 1);
-		$availability_by_host = ($window_seconds > (7 * 86400))
+		$availability_by_host = ($window_seconds > self::TRENDS_THRESHOLD_SECONDS)
 			? $this->calculateAvailabilityFromTrends(array_values($items_by_host), $time_from, $time_to)
 			: $this->calculateAvailabilityFromHistory(array_values($items_by_host), $time_from, $time_to);
 
@@ -623,13 +677,98 @@ class ReportDataHelper {
 			: gmmktime(23, 59, 59, $month, $day, $year);
 	}
 
+	/**
+	 * Raw-history availability for short windows (<= TRENDS_THRESHOLD_SECONDS).
+	 *
+	 * Performance: instead of one paginated History.get PER item (the old N+1 loop), all item ids
+	 * are fetched in ITEM-chunked, clock-keyset-paginated batches (FETCH_BATCH rows per page) and
+	 * bucketed by item id in PHP. Total rows are capped at MAX_HISTORY_ROWS; when the cap is hit a
+	 * note is surfaced and the partial result is used (availability is still computed from whatever
+	 * was read). Availability per item = ok-samples / expected-samples, where expected = observed +
+	 * inferred missing samples (so polling gaps count as downtime).
+	 *
+	 * @param array<int, array{itemid:string,hostid:string,delay:?string}> $items
+	 */
 	private function calculateAvailabilityFromHistory(array $items, int $time_from, int $time_to): array {
 		$result = [];
 		$window_seconds = max(1, ($time_to - $time_from) + 1);
 
+		if ($items === []) {
+			return $result;
+		}
+
+		$itemids = [];
+		$host_by_item = [];
+		$delay_by_item = [];
+
 		foreach ($items as $item) {
-			$history = $this->getHistoryRows((string) $item['itemid'], $time_from, $time_to);
-			$interval = $this->inferInterval($history, $item['delay'] ?? null);
+			$itemid = (string) $item['itemid'];
+			$itemids[] = $itemid;
+			$host_by_item[$itemid] = (string) $item['hostid'];
+			$delay_by_item[$itemid] = $item['delay'] ?? null;
+		}
+
+		$rows_by_item = [];
+		$total_rows = 0;
+		$limit_reached = false;
+
+		foreach (array_chunk($itemids, self::HISTORY_ITEM_CHUNK) as $itemid_chunk) {
+			$cursor = $time_from;
+
+			do {
+				$batch = API::History()->get([
+					'output' => ['itemid', 'clock', 'value'],
+					'itemids' => $itemid_chunk,
+					'history' => ITEM_VALUE_TYPE_UINT64,
+					'time_from' => $cursor,
+					'time_till' => $time_to,
+					'sortfield' => 'clock',
+					'sortorder' => 'ASC',
+					'limit' => self::FETCH_BATCH
+				]);
+
+				if (!is_array($batch) || $batch === []) {
+					break;
+				}
+
+				foreach ($batch as $row) {
+					$rows_by_item[(string) $row['itemid']][] = $row;
+					$total_rows++;
+
+					if ($total_rows >= self::MAX_HISTORY_ROWS) {
+						$limit_reached = true;
+						break;
+					}
+				}
+
+				if ($limit_reached) {
+					break;
+				}
+
+				$last_clock = (int) $batch[count($batch) - 1]['clock'];
+
+				// A full page never spans a single second (max same-second rows <= chunk size <
+				// FETCH_BATCH), so advancing to last_clock+1 cannot skip unread rows.
+				if (count($batch) < self::FETCH_BATCH || $last_clock >= $time_to) {
+					break;
+				}
+
+				$cursor = $last_clock + 1;
+			}
+			while (true);
+
+			if ($limit_reached) {
+				break;
+			}
+		}
+
+		if ($limit_reached) {
+			$this->addNote(_s('History scan stopped at %1$s rows; availability percentages may be approximate.', self::MAX_HISTORY_ROWS));
+		}
+
+		foreach ($itemids as $itemid) {
+			$history = $rows_by_item[$itemid] ?? [];
+			$interval = $this->inferInterval($history, $delay_by_item[$itemid] ?? null);
 			$expected = count($history) + $this->countMissingSamples($history, $time_from, $time_to, $interval);
 
 			$ok = 0;
@@ -642,7 +781,7 @@ class ReportDataHelper {
 			$pct = $expected > 0 ? (($ok / $expected) * 100.0) : null;
 			$uptime_seconds = $pct !== null ? (int) round(($pct / 100.0) * $window_seconds) : 0;
 
-			$result[(string) $item['hostid']] = [
+			$result[$host_by_item[$itemid]] = [
 				'availability' => $this->formatPct($pct, 1),
 				'pct' => $pct,
 				'uptime_seconds' => max(0, min($window_seconds, $uptime_seconds)),
@@ -653,10 +792,23 @@ class ReportDataHelper {
 		return $result;
 	}
 
+	/**
+	 * Trend-based availability for long windows (> TRENDS_THRESHOLD_SECONDS).
+	 *
+	 * Approximation: each hourly trend row carries value_avg = fraction of "up" samples in that
+	 * hour (in [0,1] for agent.ping / icmpping). Summing value_avg over covered hours gives total
+	 * "up hours"; dividing by the number of COVERED hours (count of trend rows actually present,
+	 * not ceil(window/3600)) yields availability. This means hours with no trend data are excluded
+	 * from the denominator rather than silently counted as downtime — a host with sparse coverage
+	 * is rated on the data it has, and a host with zero coverage reports N/A. value_avg is clamped
+	 * to [0,1] so the zabbix[host,agent,available] item (values 0/1/2) cannot inflate uptime.
+	 * Trend.get is array_chunk'd to bound the per-call payload on large host sets.
+	 *
+	 * @param array<int, array{itemid:string,hostid:string,delay:?string}> $items
+	 */
 	private function calculateAvailabilityFromTrends(array $items, int $time_from, int $time_to): array {
 		$result = [];
 		$window_seconds = max(1, ($time_to - $time_from) + 1);
-		$expected_hours = max(1, (int) ceil($window_seconds / 3600));
 
 		if ($items === []) {
 			return $result;
@@ -669,16 +821,21 @@ class ReportDataHelper {
 			$host_by_item[(string) $item['itemid']] = (string) $item['hostid'];
 		}
 
-		$trends = API::Trend()->get([
-			'output' => ['itemid', 'clock', 'num', 'value_avg'],
-			'itemids' => $itemids,
-			'time_from' => $time_from,
-			'time_till' => $time_to
-		]);
-
 		$up_hours_by_host = [];
+		$covered_hours_by_host = [];
 
-		if (is_array($trends)) {
+		foreach (array_chunk($itemids, self::TREND_ITEM_CHUNK) as $itemid_chunk) {
+			$trends = API::Trend()->get([
+				'output' => ['itemid', 'clock', 'value_avg'],
+				'itemids' => $itemid_chunk,
+				'time_from' => $time_from,
+				'time_till' => $time_to
+			]);
+
+			if (!is_array($trends)) {
+				continue;
+			}
+
 			foreach ($trends as $trend) {
 				$itemid = (string) $trend['itemid'];
 
@@ -687,21 +844,31 @@ class ReportDataHelper {
 				}
 
 				$hostid = $host_by_item[$itemid];
+				$value_avg = max(0.0, min(1.0, (float) $trend['value_avg']));
 
-				if (!isset($up_hours_by_host[$hostid])) {
-					$up_hours_by_host[$hostid] = 0.0;
-				}
-
-				$up_hours_by_host[$hostid] += (float) $trend['value_avg'];
+				$up_hours_by_host[$hostid] = ($up_hours_by_host[$hostid] ?? 0.0) + $value_avg;
+				$covered_hours_by_host[$hostid] = ($covered_hours_by_host[$hostid] ?? 0) + 1;
 			}
 		}
 
 		foreach ($items as $item) {
 			$hostid = (string) $item['hostid'];
+			$covered_hours = $covered_hours_by_host[$hostid] ?? 0;
+
+			if ($covered_hours === 0) {
+				$result[$hostid] = [
+					'availability' => 'No data',
+					'pct' => null,
+					'uptime_seconds' => 0,
+					'downtime_seconds' => 0
+				];
+
+				continue;
+			}
+
 			$up_hours = $up_hours_by_host[$hostid] ?? 0.0;
-			$pct = ($up_hours / $expected_hours) * 100.0;
-			$pct = max(0.0, min(100.0, $pct));
-			$uptime_seconds = (int) round($up_hours * 3600);
+			$pct = max(0.0, min(100.0, ($up_hours / $covered_hours) * 100.0));
+			$uptime_seconds = (int) round(($pct / 100.0) * $window_seconds);
 
 			$result[$hostid] = [
 				'availability' => $this->formatPct($pct, 1),
@@ -714,43 +881,12 @@ class ReportDataHelper {
 		return $result;
 	}
 
-	private function getHistoryRows(string $itemid, int $time_from, int $time_to): array {
-		$rows = [];
-		$cursor = $time_from;
-
-		do {
-			$chunk = API::History()->get([
-				'output' => ['clock', 'value'],
-				'itemids' => [$itemid],
-				'history' => ITEM_VALUE_TYPE_UINT64,
-				'time_from' => $cursor,
-				'time_till' => $time_to,
-				'sortfield' => 'clock',
-				'sortorder' => 'ASC',
-				'limit' => 10000
-			]);
-
-			if (!is_array($chunk) || $chunk === []) {
-				break;
-			}
-
-			foreach ($chunk as $row) {
-				$rows[] = $row;
-			}
-
-			$last_clock = (int) $chunk[count($chunk) - 1]['clock'];
-
-			if ($last_clock >= $time_to || count($chunk) < 10000) {
-				break;
-			}
-
-			$cursor = $last_clock + 1;
-		}
-		while (true);
-
-		return $rows;
-	}
-
+	/**
+	 * Estimate how many polls SHOULD have produced a sample in [start, end] but did not, by walking
+	 * the observed clocks and counting whole step-sized gaps before the first, between samples, and
+	 * after the last. Used as the "downtime" portion of the availability denominator. Assumes a
+	 * roughly fixed polling interval ($step); irregular intervals only skew the missing estimate.
+	 */
 	private function countMissingSamples(array $history, int $start, int $end, int $step): int {
 		if ($step <= 0) {
 			return 0;
@@ -777,6 +913,11 @@ class ReportDataHelper {
 		return $missing;
 	}
 
+	/**
+	 * Determine the polling interval (seconds) for an availability item. Prefers the configured item
+	 * delay; if that is unavailable or non-numeric (e.g. a macro/flexible interval) it falls back to
+	 * the median of observed clock deltas, and finally to 60s when nothing can be inferred.
+	 */
 	private function inferInterval(array $history, ?string $delay): int {
 		$parsed_delay = $this->parseDelayToSeconds($delay);
 

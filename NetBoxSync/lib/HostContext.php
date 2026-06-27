@@ -2,6 +2,13 @@
 
 namespace Modules\NetBoxSync\Lib;
 
+/**
+ * Per-host view over Zabbix data used during a sync: resolves item values, OS
+ * detection/EOL, CPU/memory, disks, interfaces, and the agent interface, and
+ * carries the resolved NetBox VM/device plus the interpolation vars. All lookups
+ * are memoized; seedPrefetch() prefills those caches from the run-wide bulk
+ * prefetch so no per-host API call is needed for the common selectors.
+ */
 class HostContext {
 
     private array $host;
@@ -32,6 +39,39 @@ class HostContext {
             'host' => $this->hostName(),
             'hostid' => $this->hostId()
         ];
+    }
+
+    /**
+     * Seed the per-host caches from a run-wide bulk prefetch so the standard
+     * syncs hit prefilled maps instead of issuing one Item/HostInterface API call
+     * per host (the classic N+1). Keys/names are seeded for every REQUESTED
+     * selector — including those with no matching item (null) — so a miss never
+     * falls back to a per-host lookup.
+     *
+     * @param array $bundle keys[key=>item|null], names[name=>item|null],
+     *                      searches[cache_key=>rows], agent_interface (array|null)
+     */
+    public function seedPrefetch(array $bundle): void {
+        foreach (($bundle['keys'] ?? []) as $key => $item) {
+            $this->item_key_cache[(string) $key] = is_array($item) ? $item : null;
+        }
+
+        foreach (($bundle['names'] ?? []) as $name => $item) {
+            $this->item_name_cache[(string) $name] = is_array($item) ? $item : null;
+        }
+
+        foreach (($bundle['searches'] ?? []) as $cache_key => $rows) {
+            $this->search_key_cache[(string) $cache_key] = is_array($rows) ? $rows : [];
+        }
+
+        if (array_key_exists('agent_interface', $bundle)) {
+            $agent = $bundle['agent_interface'];
+            $this->agent_interface = is_array($agent) ? $agent : null;
+
+            if (is_array($this->agent_interface)) {
+                $this->setVar('agent_ip', (string) ($this->agent_interface['ip'] ?? ''));
+            }
+        }
     }
 
     public function hostId(): string {
@@ -102,8 +142,13 @@ class HostContext {
         return $this->item_name_cache[$name];
     }
 
+    /** Cache key for a key/name search, shared with the run-wide bulk prefetch. */
+    public static function searchCacheKey(string $pattern, array $extra = []): string {
+        return md5($pattern.'|'.json_encode($extra));
+    }
+
     public function searchItemsByKey(string $pattern, array $extra = []): array {
-        $cache_key = md5($pattern.'|'.json_encode($extra));
+        $cache_key = self::searchCacheKey($pattern, $extra);
 
         if (!array_key_exists($cache_key, $this->search_key_cache)) {
             $this->search_key_cache[$cache_key] = $this->zabbix->searchItemsByKey($this->hostId(), $pattern, $extra);
@@ -113,7 +158,7 @@ class HostContext {
     }
 
     public function searchItemsByName(string $pattern, array $extra = []): array {
-        $cache_key = md5($pattern.'|'.json_encode($extra));
+        $cache_key = self::searchCacheKey($pattern, $extra);
 
         if (!array_key_exists($cache_key, $this->search_name_cache)) {
             $this->search_name_cache[$cache_key] = $this->zabbix->searchItemsByName($this->hostId(), $pattern, $extra);

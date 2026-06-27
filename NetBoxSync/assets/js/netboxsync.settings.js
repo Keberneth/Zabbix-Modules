@@ -138,6 +138,59 @@
         }, 1200);
     }
 
+    async function testConnection(form) {
+        var button = qs('#nbs-test-connection');
+        if (!button) {
+            return;
+        }
+
+        var testUrl = button.getAttribute('data-test-url');
+        var fd = new FormData();
+
+        function fieldValue(name) {
+            var el = form.querySelector('[name="' + name + '"]');
+            return el ? el.value : '';
+        }
+
+        function fieldChecked(name) {
+            var el = form.querySelector('[name="' + name + '"]');
+            return el && el.checked ? '1' : '0';
+        }
+
+        fd.append('url', fieldValue('netbox[url]'));
+        fd.append('token', fieldValue('netbox[token]'));
+        fd.append('verify_peer', fieldChecked('netbox[verify_peer]'));
+        fd.append('timeout', fieldValue('netbox[timeout]') || '15');
+
+        var tokenName = qs('#nbs-test-csrf-token-name');
+        var tokenValue = qs('#nbs-test-csrf-token-value');
+        if (tokenName && tokenValue) {
+            fd.append(tokenName.value, tokenValue.value);
+        }
+
+        showStatus('Testing NetBox connection…', 'warn');
+
+        var response = await fetch(testUrl, {
+            method: 'POST',
+            body: fd,
+            credentials: 'same-origin'
+        });
+
+        var payload;
+        try {
+            payload = await response.json();
+        }
+        catch (e) {
+            throw new Error('The test action did not return valid JSON.');
+        }
+
+        if (!response.ok || !payload.ok) {
+            throw new Error(payload.error || 'Connection test failed.');
+        }
+
+        showStatus(payload.message || 'Connection OK.', 'ok');
+    }
+
     function initForm() {
         var form = qs('#nbs-settings-form');
         if (!form) {
@@ -155,6 +208,15 @@
         if (runButton) {
             runButton.addEventListener('click', function() {
                 runNow(form).catch(function(error) {
+                    showStatus(error.message || String(error), 'error');
+                });
+            });
+        }
+
+        var testButton = qs('#nbs-test-connection');
+        if (testButton) {
+            testButton.addEventListener('click', function() {
+                testConnection(form).catch(function(error) {
                     showStatus(error.message || String(error), 'error');
                 });
             });

@@ -18,7 +18,11 @@ class HeartbeatView extends CController {
     }
 
     protected function checkInput(): bool {
-        return true;
+        $fields = [
+            'checkid' => 'string'
+        ];
+
+        return $this->validateInput($fields);
     }
 
     protected function checkPermissions(): bool {
@@ -33,15 +37,23 @@ class HeartbeatView extends CController {
 
         $checks = Config::mergeWithDefaults($config)['checks'];
 
-        $selected_check_id = Util::cleanString($_REQUEST['checkid'] ?? '', 128);
+        $selected_check_id = Util::cleanString($this->getInput('checkid', ''), 128);
         if ($selected_check_id === '' && $checks !== []) {
             $selected_check_id = (string) ($checks[0]['id'] ?? '');
         }
 
+        $check_ids = [];
+        foreach ($checks as $check) {
+            $check_ids[] = (string) ($check['id'] ?? '');
+        }
+
+        // Single grouped query for the latest run per check instead of one query per check.
+        $latest_by_id = Storage::getLatestRunsByCheckIds($pdo, $check_ids);
+
         $latest_runs = [];
         foreach ($checks as $check) {
             $check_id = (string) ($check['id'] ?? '');
-            $latest_runs[$check_id] = Storage::getLatestRunByCheckId($pdo, $check_id);
+            $latest_runs[$check_id] = $latest_by_id[$check_id] ?? null;
         }
 
         $selected_run = null;

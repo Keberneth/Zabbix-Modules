@@ -109,6 +109,61 @@ facets (Host, OS, Target, Sync, Field, Disk) and per-column filters to
 isolate changes — e.g. filter OS = `Windows Server 2019` + `Windows Server
 2022`, then Sync = `vm_disks`, to see every Windows 2019/2022 disk delta.
 
+## Configuration reference
+
+All settings live on **Monitoring → NetBox Sync → Settings**, grouped into cards.
+Secrets (NetBox token, runner shared secret) are never echoed back to the page —
+leave the field blank to keep the stored value, or tick *Clear* to remove it.
+
+### Connections → NetBox
+| Field | Meaning |
+| --- | --- |
+| Enabled | Master switch for all NetBox writes. A run aborts early if this is off. |
+| Base URL | NetBox root, e.g. `https://netbox.example.com` (a trailing `/api` is added automatically). |
+| API token | NetBox API token. Prefer `Token environment variable` over storing it here. |
+| Token environment variable | Name of an env var read at runtime (overrides the stored token when set). |
+| Verify TLS | Validate the NetBox certificate (turn off only for self-signed lab setups). |
+| Timeout | Per-request cURL timeout in seconds (5–300). |
+| **Test connection** | Runs a single `GET /status/` using the values currently in the form (blank fields fall back to the stored config) and reports success or a generic failure. |
+
+### Runner and scheduling
+| Field | Meaning |
+| --- | --- |
+| Runner enabled | Allow secret-gated runs via `action=netboxsync.run` (cron/systemd). |
+| Global interval | Default seconds between runs of each sync/mapping unless it overrides it. |
+| Default prefix length | Mask used when creating a NetBox prefix for a discovered primary IP. |
+| Max hosts per run | 0 = all (capped at 50000). Otherwise processes at most this many hosts. |
+| Shared secret / env var | Secret the runner must present (`X-NetBox-Sync-Secret` header or `?secret=`). |
+| Lock TTL | Advisory lock lifetime preventing overlapping runs. |
+| State path / Log path | Writable directories for run state and the structured event log (see Filesystem permissions). |
+
+### Built-in sync catalogue
+Each row mirrors one step of the original sync scripts (VM base object, OS/EOL,
+SQL license, disks, interfaces, primary IP, listening services, device object,
+device serial). Toggle rows independently and optionally set a per-row interval
+override (`0` = use the global interval).
+
+### VM sync defaults
+Item keys/names used to read OS, CPU, memory, SQL version, disks, and interfaces
+from Zabbix, plus VM creation policy (create/update/require-OS), the NetBox
+memory/disk **unit** (MB vs GB — NetBox 4.3+ stores disk size in GB), and
+prune toggles for stale disks/interfaces.
+
+### Listening-services sync
+Enables the `vm_services` row. Point `Windows item name` / `Linux item name`
+at the items populated by the listening-service plugins/templates.
+
+### Device sync defaults
+Device creation policy and the source (mode + value) for device name,
+manufacturer, model, and serial, plus auto-create toggles for missing
+manufacturers and device types.
+
+### Custom mappings
+Reusable, code-free syncs: pick a source (item key/name, static, host name,
+agent IP), an optional JSON path + transform, a target object (VM / Device /
+Custom URL) and target field. Advanced options add a host-name regex gate
+(evaluated under ReDoS guards), relation lookups, and ensure-if-missing logic.
+
 ## Notes
 
 - End-of-life lookup uses `endoflife.date`, like the current VM sync script logic.

@@ -244,10 +244,8 @@
 
       cyContainer.innerHTML = "";
 
-      if (showNoEdgesAlert) {
-        alert("No edges matched the current filters.");
-      }
-
+      // The inline placeholder/banner is set by setGraphPlaceholder() in the
+      // app layer; no blocking window.alert() here.
       return false;
     }
 

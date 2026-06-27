@@ -7,6 +7,9 @@ use PDO,
 
 class Runner {
 
+    /** Hard cap on item rows transferred when computing the freshest data timestamp. */
+    public const MAX_FRESH_ITEMS = 50000;
+
     public static function runDueChecks(array $config, PDO $pdo, string $only_check_id = '', bool $force = false): array {
         Storage::ensureSchema($pdo);
 
@@ -107,6 +110,10 @@ class Runner {
     }
 
     public static function runSingleCheck(array $check): array {
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(300);
+        }
+
         $started_at = time();
         $started_us = microtime(true);
 
@@ -267,53 +274,39 @@ class Runner {
             $run['items_count'] = $items_count['items_count'] ?? null;
 
             $freshest = $run_step('freshest_data', 'Most recent item data', static function() use ($api, $check): array {
-                $hosts = $api->call('host.get', [
-                    'filter' => [
-                        'status' => 0
-                    ],
-                    'output' => ['hostid'],
-                    'limit' => (int) ($check['host_limit'] ?? 5000)
-                ]);
-
-                if (!is_array($hosts) || $hosts === []) {
-                    throw new RuntimeException('No monitored hosts found.');
-                }
-
                 $now_ts = time();
-                $freshest_ts = 0;
-                $checked_hosts_count = 0;
                 $freshness_max_age = (int) ($check['freshness_max_age'] ?? 900);
 
-                foreach ($hosts as $host) {
-                    if (!is_array($host) || empty($host['hostid'])) {
-                        continue;
-                    }
+                // Bound rows transferred: one capped item.get over all enabled items on
+                // monitored hosts, then compute max(lastclock) in PHP. Replaces the former
+                // per-host N+1 loop (up to host_limit sequential item.get calls).
+                $sample_limit = min(
+                    self::MAX_FRESH_ITEMS,
+                    max(1, (int) ($check['item_limit_per_host'] ?? 10000))
+                );
 
-                    $checked_hosts_count++;
+                $items = $api->call('item.get', [
+                    'monitored' => true,
+                    'filter' => [
+                        'status' => 0,
+                        'state' => 0
+                    ],
+                    'output' => ['lastclock'],
+                    'limit' => $sample_limit
+                ]);
 
-                    $items = $api->call('item.get', [
-                        'hostids' => [(string) $host['hostid']],
-                        'filter' => [
-                            'status' => 0,
-                            'state' => 0
-                        ],
-                        'output' => ['itemid', 'lastclock'],
-                        'limit' => (int) ($check['item_limit_per_host'] ?? 10000)
-                    ]);
+                if (!is_array($items) || $items === []) {
+                    throw new RuntimeException('No enabled items with data were found.');
+                }
 
-                    if (!is_array($items)) {
-                        continue;
-                    }
+                $sampled = count($items);
+                $truncated = $sampled >= $sample_limit;
 
-                    foreach ($items as $item) {
-                        $last_clock = (int) ($item['lastclock'] ?? 0);
-                        if ($last_clock > $freshest_ts) {
-                            $freshest_ts = $last_clock;
-                        }
-                    }
-
-                    if ($freshest_ts > 0 && ($now_ts - $freshest_ts) <= $freshness_max_age) {
-                        break;
+                $freshest_ts = 0;
+                foreach ($items as $item) {
+                    $last_clock = (int) ($item['lastclock'] ?? 0);
+                    if ($last_clock > $freshest_ts) {
+                        $freshest_ts = $last_clock;
                     }
                 }
 
@@ -329,9 +322,13 @@ class Runner {
                     );
                 }
 
+                $sample_note = $truncated
+                    ? ' (sampled '.$sampled.' items, capped at '.$sample_limit.')'
+                    : ' (sampled '.$sampled.' items)';
+
                 $detail = $age < 0
-                    ? 'Most recent item data is '.abs($age).' seconds in the future (clock skew detected).'
-                    : 'Most recent item data update was '.$age.' seconds ago (checked '.$checked_hosts_count.' hosts).';
+                    ? 'Most recent item data is '.abs($age).' seconds in the future (clock skew detected)'.$sample_note.'.'
+                    : 'Most recent item data update was '.$age.' seconds ago'.$sample_note.'.';
 
                 return [
                     'detail' => $detail,

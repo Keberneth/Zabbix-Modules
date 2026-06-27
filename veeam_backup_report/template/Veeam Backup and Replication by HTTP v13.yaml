@@ -1,0 +1,2267 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: 8879279c60a3406488a39497f2044629
+      name: Templates/Applications
+  templates:
+    - uuid: 3dca8413400041efa8c32b7180c1fd0a
+      template: 'Veeam Backup and Replication by HTTP v13'
+      name: 'Veeam Backup and Replication by HTTP v13'
+      description: |
+        This template monitors Veeam Backup & Replication 13 by using the REST API over HTTPS.
+        
+        What is new compared with the older HTTP template:
+          * Uses a macro-driven API version header for VBR 13.
+          * Adds rolling backup-size reporting per repository and per protected object/host.
+          * Adds rolling totals for 24h and 31d windows.
+          * Replaces placeholder regex macros with safe defaults.
+          * Removes session LLD to avoid high-cardinality churn and focuses on durable reporting data.
+        
+        Important notes:
+          * The backup report is a rolling window based on Veeam REST data, not historical backfill in Zabbix.
+          * Protected-object attribution is exact when Veeam exposes a unique backup file/object relation.
+            If Veeam uses shared or legacy single-file chains, unresolved bytes are kept in global
+            shared/unassigned items instead of being guessed.
+        
+        Setup:
+          1. Link the template to a host that represents the Veeam Backup & Replication server.
+          2. Set {$VEEAM.API.URL}, {$VEEAM.USER}, {$VEEAM.PASSWORD}, and confirm {$VEEAM.API.VERSION}.
+          3. Make sure the Veeam HTTPS certificate is trusted by the Zabbix server/proxy OS.
+          4. Wait for the master items to collect data and check the two error items first if data is missing.
+      vendor:
+        name: Iver
+        version: 7.0.0
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: 288b494e47694d5aa1c7d2b3c1a9e23f
+          name: 'Backup size assigned to protected objects 31d'
+          type: DEPENDENT
+          key: veeam.backup.total.assigned.size.31d
+          delay: '0'
+          units: B
+          description: 'Rolling backup size total from Veeam backup files.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.summary.assignedBackupSize31d
+          master_item:
+            key: veeam.get.backup.report
+          tags:
+            - tag: component
+              value: backup-report
+        - uuid: 5da9e6b54f614144aa30cc3eefb1c2c4
+          name: 'Backup attribution coverage 31d'
+          type: DEPENDENT
+          key: veeam.backup.total.attribution.coverage
+          delay: '0'
+          value_type: FLOAT
+          units: '%'
+          description: 'Percent of rolling 31-day backup size that could be safely attributed to a protected object/host.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.summary.attributionCoveragePct31d
+          master_item:
+            key: veeam.get.backup.report
+          tags:
+            - tag: component
+              value: backup-report
+        - uuid: 5e9fec549db04d0e8a8ef5f8c11aaa0b
+          name: 'Backup size shared or unassigned 31d'
+          type: DEPENDENT
+          key: veeam.backup.total.shared.size.31d
+          delay: '0'
+          units: B
+          description: 'Rolling backup size total from Veeam backup files.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.summary.sharedUnassignedBackupSize31d
+          master_item:
+            key: veeam.get.backup.report
+          tags:
+            - tag: component
+              value: backup-report
+        - uuid: 5ee448d944ff40e999d3f3d9e28db1a5
+          name: 'Backup size total 24h'
+          type: DEPENDENT
+          key: veeam.backup.total.size.24h
+          delay: '0'
+          units: B
+          description: 'Rolling backup size total from Veeam backup files.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.summary.backupSize24h
+          master_item:
+            key: veeam.get.backup.report
+          tags:
+            - tag: component
+              value: backup-report
+        - uuid: 81ba34027af54191a7a379278bf9cb42
+          name: 'Backup size total 31d'
+          type: DEPENDENT
+          key: veeam.backup.total.size.31d
+          delay: '0'
+          units: B
+          description: 'Rolling backup size total from Veeam backup files.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.summary.backupSize31d
+          master_item:
+            key: veeam.get.backup.report
+          tags:
+            - tag: component
+              value: backup-report
+          triggers:
+            - uuid: c19ac5b6b273e8bb2fccbbf8008a525c
+              expression: 'nodata(/Veeam Backup and Replication by HTTP v13/veeam.backup.total.size.31d,{$VEEAM.BACKUP.REPORT.NODATA})=1'
+              name: 'No data from Veeam rolling backup report'
+              priority: WARNING
+              description: 'The rolling backup report master item has not produced data within the configured period. Check the backup-report error item and API connectivity.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: c7d1a941b6e046db8f34e56a6d476758
+          name: 'Get backup report errors'
+          type: DEPENDENT
+          key: veeam.get.backup.errors
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          description: 'Errors returned by the rolling backup report master item.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.error
+              error_handler: CUSTOM_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: veeam.get.backup.report
+          tags:
+            - tag: component
+              value: backup-report
+            - tag: component
+              value: status
+          triggers:
+            - uuid: 3502ac18aa674d499aba155e732dc8b4
+              expression: 'length(last(/Veeam Backup and Replication by HTTP v13/veeam.get.backup.errors))>0'
+              name: 'There are errors in requests to Veeam API (backup report)'
+              opdata: '{ITEM.LASTVALUE1}'
+              priority: AVERAGE
+              description: 'Zabbix has received errors while requesting Veeam rolling backup report data.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: ac783e3a90614ff094f64a9b4d51f504
+          name: 'Get backup report'
+          type: SCRIPT
+          key: veeam.get.backup.report
+          delay: '{$VEEAM.BACKUP.REPORT.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          params: |
+            var Veeam = {
+                params: {},
+                token: '',
+            
+                setParams: function (params) {
+                    var required = ['api_endpoint', 'api_version', 'page_limit', 'report_days', 'user', 'password'],
+                        i;
+            
+                    for (i = 0; i < required.length; i++) {
+                        if (typeof params !== 'object' || typeof params[required[i]] === 'undefined' || params[required[i]] === '') {
+                            throw 'Required param is not set: ' + required[i] + '.';
+                        }
+                    }
+            
+                    this.params = params;
+            
+                    if (typeof this.params.api_endpoint === 'string' && !/\/$/.test(this.params.api_endpoint)) {
+                        this.params.api_endpoint += '/';
+                    }
+            
+                    this.params.page_limit = parseInt(this.params.page_limit, 10);
+                    this.params.report_days = parseInt(this.params.report_days, 10);
+            
+                    if (isNaN(this.params.page_limit) || this.params.page_limit < 1 || this.params.page_limit > 1000) {
+                        throw 'Incorrect "page_limit" parameter given: ' + params.page_limit + '. Must be between 1 and 1000.';
+                    }
+            
+                    if (isNaN(this.params.report_days) || this.params.report_days < 1 || this.params.report_days > 365) {
+                        throw 'Incorrect "report_days" parameter given: ' + params.report_days + '. Must be between 1 and 365.';
+                    }
+                },
+            
+                buildUrl: function (path, query) {
+                    var url = this.params.api_endpoint + String(path).replace(/^\//, ''),
+                        parts = [],
+                        k;
+            
+                    query = query || {};
+            
+                    for (k in query) {
+                        if (query.hasOwnProperty(k) && query[k] !== '' && query[k] !== null && typeof query[k] !== 'undefined') {
+                            parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(query[k]));
+                        }
+                    }
+            
+                    if (parts.length) {
+                        url += ((url.indexOf('?') === -1) ? '?' : '&') + parts.join('&');
+                    }
+            
+                    return url;
+                },
+            
+                iso: function (timestamp) {
+                    return new Date(timestamp).toISOString().replace(/\.\d+Z$/, 'Z');
+                },
+            
+                round2: function (value) {
+                    return Math.round(value * 100) / 100;
+                },
+            
+                simpleHash: function (value) {
+                    var hash = 0,
+                        i,
+                        chr,
+                        hex;
+            
+                    value = String(value || '');
+            
+                    for (i = 0; i < value.length; i++) {
+                        chr = value.charCodeAt(i);
+                        hash = ((hash << 5) - hash) + chr;
+                        hash = hash & hash;
+                    }
+            
+                    if (hash < 0) {
+                        hash = hash * -1;
+                    }
+            
+                    hex = hash.toString(16);
+                    while (hex.length < 8) {
+                        hex = '0' + hex;
+                    }
+            
+                    return hex;
+                },
+            
+                objectFallbackKey: function (platformName, name) {
+                    return 'rp-' + this.simpleHash((platformName || '') + '|' + (name || ''));
+                },
+            
+                normalizeBool: function (value) {
+                    return value ? 1 : 0;
+                },
+            
+                createRequest: function () {
+                    var req = new HttpRequest();
+            
+                    if (typeof this.params.http_proxy !== 'undefined' && this.params.http_proxy !== '') {
+                        req.setProxy(this.params.http_proxy);
+                    }
+            
+                    req.addHeader('Authorization: Bearer ' + this.token);
+                    req.addHeader('x-api-version: ' + this.params.api_version);
+            
+                    return req;
+                },
+            
+                login: function () {
+                    var req = new HttpRequest(),
+                        resp;
+            
+                    if (typeof this.params.http_proxy !== 'undefined' && this.params.http_proxy !== '') {
+                        req.setProxy(this.params.http_proxy);
+                    }
+            
+                    req.addHeader('Content-Type: application/x-www-form-urlencoded');
+                    req.addHeader('x-api-version: ' + this.params.api_version);
+            
+                    resp = req.post(
+                        this.params.api_endpoint + 'api/oauth2/token',
+                        'grant_type=password&username=' + encodeURIComponent(this.params.user) +
+                        '&password=' + encodeURIComponent(this.params.password)
+                    );
+            
+                    if (req.getStatus() !== 200 || resp === null) {
+                        throw 'Login failed with status code ' + req.getStatus() + ': ' + resp;
+                    }
+            
+                    try {
+                        resp = JSON.parse(resp);
+                    }
+                    catch (error) {
+                        throw 'Failed to parse authentication token for the logon session.';
+                    }
+            
+                    if (!resp.hasOwnProperty('access_token')) {
+                        throw 'Auth response does not contain access token.';
+                    }
+            
+                    this.token = resp.access_token;
+                },
+            
+                request: function (url) {
+                    var req = this.createRequest(),
+                        resp;
+            
+                    resp = req.get(url);
+            
+                    if (req.getStatus() !== 200 || resp === null) {
+                        throw 'Request failed with status code ' + req.getStatus() + ': ' + resp;
+                    }
+            
+                    try {
+                        return JSON.parse(resp);
+                    }
+                    catch (error) {
+                        throw 'Failed to parse response received from API.';
+                    }
+                },
+            
+                getAll: function (path, query) {
+                    var all = [],
+                        skip = 0,
+                        limit = this.params.page_limit,
+                        resp,
+                        count,
+                        i,
+                        guard = 0,
+                        pageQuery,
+                        pagination = {
+                            total: 0,
+                            count: 0,
+                            skip: 0,
+                            limit: limit
+                        };
+            
+                    query = query || {};
+            
+                    while (true) {
+                        guard += 1;
+            
+                        if (guard > 5000) {
+                            throw 'Pagination guard limit exceeded for endpoint: ' + path;
+                        }
+            
+                        pageQuery = {};
+                        for (i in query) {
+                            if (query.hasOwnProperty(i)) {
+                                pageQuery[i] = query[i];
+                            }
+                        }
+            
+                        pageQuery.skip = skip;
+                        pageQuery.limit = limit;
+            
+                        resp = this.request(this.buildUrl(path, pageQuery));
+            
+                        if (typeof resp !== 'object' || resp === null) {
+                            throw 'Unexpected API response for endpoint: ' + path;
+                        }
+            
+                        if (!resp.hasOwnProperty('data')) {
+                            return resp;
+                        }
+            
+                        count = resp.data.length;
+            
+                        for (i = 0; i < count; i++) {
+                            all.push(resp.data[i]);
+                        }
+            
+                        if (resp.hasOwnProperty('pagination')) {
+                            pagination = resp.pagination;
+                        }
+            
+                        if (!resp.hasOwnProperty('pagination') || count === 0 || count < limit) {
+                            break;
+                        }
+            
+                        skip += count;
+            
+                        if (typeof resp.pagination.total !== 'undefined' && skip >= resp.pagination.total) {
+                            break;
+                        }
+                    }
+            
+                    return {
+                        data: all,
+                        pagination: {
+                            total: all.length,
+                            count: all.length,
+                            skip: 0,
+                            limit: limit
+                        }
+                    };
+                },
+            
+                safeGetAll: function (target, key, path, query, errors) {
+                    try {
+                        target[key] = this.getAll(path, query || {});
+                    }
+                    catch (error) {
+                        target[key] = {
+                            data: [],
+                            pagination: {
+                                total: 0,
+                                count: 0,
+                                skip: 0,
+                                limit: this.params.page_limit
+                            }
+                        };
+                        errors.push(key + ': ' + error);
+                    }
+                },
+            
+                ensureObject: function (objects, key, data) {
+                    var base = data || {},
+                        k;
+            
+                    if (!objects.hasOwnProperty(key)) {
+                        objects[key] = {
+                            key: key,
+                            name: base.name || 'Unknown',
+                            platformName: base.platformName || '',
+                            type: base.type || '',
+                            sourceId: base.sourceId || '',
+                            backupObjectId: base.backupObjectId || '',
+                            restorePoints31d: 0,
+                            backupFiles31d: 0,
+                            backupSize24h: 0,
+                            backupSize31d: 0,
+                            lastBackupTime: '',
+                            repositories: {},
+                            _attrObjectId: 0,
+                            _attrRestorePointName: 0
+                        };
+                    }
+            
+                    for (k in base) {
+                        if (base.hasOwnProperty(k) && (objects[key][k] === '' || typeof objects[key][k] === 'undefined')) {
+                            objects[key][k] = base[k];
+                        }
+                    }
+            
+                    return objects[key];
+                },
+            
+                repoNameList: function (repoMap) {
+                    var out = [],
+                        k;
+            
+                    for (k in repoMap) {
+                        if (repoMap.hasOwnProperty(k)) {
+                            out.push(k);
+                        }
+                    }
+            
+                    out.sort();
+            
+                    return out.join(', ');
+                },
+            
+                mapSize: function (input) {
+                    var count = 0,
+                        k;
+            
+                    for (k in input) {
+                        if (input.hasOwnProperty(k)) {
+                            count += 1;
+                        }
+                    }
+            
+                    return count;
+                },
+            
+                firstMapKey: function (input) {
+                    var k;
+            
+                    for (k in input) {
+                        if (input.hasOwnProperty(k)) {
+                            return k;
+                        }
+                    }
+            
+                    return '';
+                },
+            
+                getBackupReport: function () {
+                    var raw = {},
+                        errors = [],
+                        nowMs = (new Date()).getTime(),
+                        from24Ms = nowMs - 86400000,
+                        fromWindowMs = nowMs - (this.params.report_days * 86400000),
+                        from24 = this.iso(from24Ms),
+                        fromWindow = this.iso(fromWindowMs),
+                        repos = [],
+                        repoIndex = {},
+                        backupIndex = {},
+                        backupObjectByObjectId = {},
+                        backupObjectByNamePlatform = {},
+                        objects = {},
+                        recentBackupIds = {},
+                        backupFileObjectCandidates = {},
+                        i,
+                        repo,
+                        backup,
+                        bo,
+                        rp,
+                        rpNameKey,
+                        objectKey,
+                        obj,
+                        backupId,
+                        filesResp,
+                        files,
+                        bf,
+                        bfSize,
+                        bfTimeMs,
+                        in24,
+                        assigned31 = 0,
+                        total31 = 0,
+                        total24 = 0,
+                        shared31 = 0,
+                        protectedObjects = [],
+                        summary,
+                        repoIds = [];
+            
+                    this.safeGetAll(raw, 'repositories_states', 'api/v1/backupInfrastructure/repositories/states', {}, errors);
+                    this.safeGetAll(raw, 'backups', 'api/v1/backups', {}, errors);
+                    this.safeGetAll(raw, 'backupObjects', 'api/v1/backupObjects', {}, errors);
+                    this.safeGetAll(raw, 'restorePoints', 'api/v1/restorePoints', { createdAfterFilter: fromWindow }, errors);
+            
+                    for (i = 0; i < raw.repositories_states.data.length; i++) {
+                        repo = raw.repositories_states.data[i];
+                        repoIndex[repo.id] = {
+                            id: repo.id,
+                            name: repo.name || '',
+                            hostName: repo.hostName || '',
+                            path: repo.path || '',
+                            type: repo.type || '',
+                            capacityGB: parseFloat(repo.capacityGB || 0),
+                            freeGB: parseFloat(repo.freeGB || 0),
+                            usedSpaceGB: parseFloat(repo.usedSpaceGB || 0),
+                            freePct: (parseFloat(repo.capacityGB || 0) > 0) ? this.round2((parseFloat(repo.freeGB || 0) / parseFloat(repo.capacityGB || 0)) * 100) : 0,
+                            isOnline: !!repo.isOnline,
+                            isOutOfDate: !!repo.isOutOfDate,
+                            backupSize24h: 0,
+                            backupSize31d: 0,
+                            backupFiles24h: 0,
+                            backupFiles31d: 0
+                        };
+                        repoIds.push(repo.id);
+                    }
+            
+                    for (i = 0; i < raw.backups.data.length; i++) {
+                        backup = raw.backups.data[i];
+                        backupIndex[backup.id] = backup;
+                    }
+            
+                    for (i = 0; i < raw.backupObjects.data.length; i++) {
+                        bo = raw.backupObjects.data[i];
+                        objectKey = bo.id ? bo.id : this.objectFallbackKey(bo.platformName, bo.name);
+                        bo._zbx_key = objectKey;
+            
+                        if (bo.objectId !== '' && typeof bo.objectId !== 'undefined') {
+                            backupObjectByObjectId[String(bo.objectId)] = bo;
+                        }
+            
+                        backupObjectByNamePlatform[(bo.platformName || '') + '|' + String(bo.name || '').toLowerCase()] = bo;
+            
+                        this.ensureObject(objects, objectKey, {
+                            name: bo.name || 'Unknown',
+                            platformName: bo.platformName || '',
+                            type: bo.type || '',
+                            sourceId: bo.id || '',
+                            backupObjectId: bo.objectId || ''
+                        });
+                    }
+            
+                    for (i = 0; i < raw.restorePoints.data.length; i++) {
+                        rp = raw.restorePoints.data[i];
+                        if (rp.backupId) {
+                            recentBackupIds[rp.backupId] = 1;
+                        }
+            
+                        rpNameKey = (rp.platformName || '') + '|' + String(rp.name || '').toLowerCase();
+                        bo = backupObjectByNamePlatform.hasOwnProperty(rpNameKey) ? backupObjectByNamePlatform[rpNameKey] : null;
+                        objectKey = bo ? bo._zbx_key : this.objectFallbackKey(rp.platformName, rp.name);
+            
+                        obj = this.ensureObject(objects, objectKey, {
+                            name: rp.name || 'Unknown',
+                            platformName: rp.platformName || '',
+                            type: rp.type || '',
+                            sourceId: bo ? (bo.id || '') : '',
+                            backupObjectId: bo ? (bo.objectId || '') : ''
+                        });
+            
+                        obj.restorePoints31d += 1;
+            
+                        if (rp.creationTime && (!obj.lastBackupTime || (new Date(rp.creationTime)).getTime() > (new Date(obj.lastBackupTime)).getTime())) {
+                            obj.lastBackupTime = rp.creationTime;
+                        }
+            
+                        if (rp.backupFileId) {
+                            if (!backupFileObjectCandidates.hasOwnProperty(rp.backupFileId)) {
+                                backupFileObjectCandidates[rp.backupFileId] = {};
+                            }
+                            backupFileObjectCandidates[rp.backupFileId][objectKey] = 1;
+                        }
+            
+                        if (rp.backupId && backupIndex.hasOwnProperty(rp.backupId) && backupIndex[rp.backupId].repositoryName) {
+                            obj.repositories[backupIndex[rp.backupId].repositoryName] = 1;
+                        }
+                    }
+            
+                    for (backupId in recentBackupIds) {
+                        if (!recentBackupIds.hasOwnProperty(backupId)) {
+                            continue;
+                        }
+            
+                        if (!backupIndex.hasOwnProperty(backupId)) {
+                            errors.push('backups: recent backup "' + backupId + '" was referenced by a restore point but not returned by /api/v1/backups');
+                            continue;
+                        }
+            
+                        backup = backupIndex[backupId];
+            
+                        try {
+                            filesResp = this.getAll(
+                                'api/v1/backups/' + backupId + '/backupFiles',
+                                { createdAfterFilter: fromWindow }
+                            );
+                        }
+                        catch (error) {
+                            errors.push('backupFiles[' + backupId + ']: ' + error);
+                            continue;
+                        }
+            
+                        files = filesResp.data || [];
+            
+                        for (i = 0; i < files.length; i++) {
+                            bf = files[i];
+                            bfSize = parseInt(bf.backupSize || 0, 10);
+            
+                            if (isNaN(bfSize) || bfSize < 0) {
+                                bfSize = 0;
+                            }
+            
+                            bfTimeMs = bf.creationTime ? (new Date(bf.creationTime)).getTime() : 0;
+                            in24 = bfTimeMs >= from24Ms;
+            
+                            total31 += bfSize;
+                            if (in24) {
+                                total24 += bfSize;
+                            }
+            
+                            if (backup.repositoryId && repoIndex.hasOwnProperty(backup.repositoryId)) {
+                                repoIndex[backup.repositoryId].backupSize31d += bfSize;
+                                repoIndex[backup.repositoryId].backupFiles31d += 1;
+            
+                                if (in24) {
+                                    repoIndex[backup.repositoryId].backupSize24h += bfSize;
+                                    repoIndex[backup.repositoryId].backupFiles24h += 1;
+                                }
+                            }
+            
+                            objectKey = '';
+            
+                            if (typeof bf.objectId !== 'undefined' && bf.objectId !== '' &&
+                                backupObjectByObjectId.hasOwnProperty(String(bf.objectId))) {
+                                objectKey = backupObjectByObjectId[String(bf.objectId)]._zbx_key;
+                            }
+                            else if (bf.id && backupFileObjectCandidates.hasOwnProperty(bf.id) &&
+                                this.mapSize(backupFileObjectCandidates[bf.id]) === 1) {
+                                objectKey = this.firstMapKey(backupFileObjectCandidates[bf.id]);
+                            }
+            
+                            if (objectKey !== '' && objects.hasOwnProperty(objectKey)) {
+                                obj = objects[objectKey];
+                                obj.backupSize31d += bfSize;
+                                obj.backupFiles31d += 1;
+            
+                                if (in24) {
+                                    obj.backupSize24h += bfSize;
+                                }
+            
+                                if (bf.creationTime && (!obj.lastBackupTime || bfTimeMs > (new Date(obj.lastBackupTime)).getTime())) {
+                                    obj.lastBackupTime = bf.creationTime;
+                                }
+            
+                                if (backup.repositoryName) {
+                                    obj.repositories[backup.repositoryName] = 1;
+                                }
+            
+                                if (typeof bf.objectId !== 'undefined' && bf.objectId !== '' &&
+                                    backupObjectByObjectId.hasOwnProperty(String(bf.objectId))) {
+                                    obj._attrObjectId += 1;
+                                }
+                                else {
+                                    obj._attrRestorePointName += 1;
+                                }
+            
+                                assigned31 += bfSize;
+                            }
+                            else {
+                                shared31 += bfSize;
+                            }
+                        }
+                    }
+            
+                    repoIds.sort(function (a, b) {
+                        var an = repoIndex[a].name.toLowerCase(),
+                            bn = repoIndex[b].name.toLowerCase();
+            
+                        if (an < bn) {
+                            return -1;
+                        }
+                        if (an > bn) {
+                            return 1;
+                        }
+                        return 0;
+                    });
+            
+                    for (i = 0; i < repoIds.length; i++) {
+                        repos.push(repoIndex[repoIds[i]]);
+                    }
+            
+                    for (objectKey in objects) {
+                        if (!objects.hasOwnProperty(objectKey)) {
+                            continue;
+                        }
+            
+                        obj = objects[objectKey];
+            
+                        if (obj.restorePoints31d === 0 && obj.backupFiles31d === 0) {
+                            continue;
+                        }
+            
+                        if (obj._attrObjectId > 0 && obj._attrRestorePointName === 0) {
+                            obj.attributionMode = 'backupFile.objectId';
+                        }
+                        else if (obj._attrObjectId === 0 && obj._attrRestorePointName > 0) {
+                            obj.attributionMode = 'restorePointName';
+                        }
+                        else if (obj._attrObjectId > 0 && obj._attrRestorePointName > 0) {
+                            obj.attributionMode = 'mixed';
+                        }
+                        else {
+                            obj.attributionMode = 'unresolved';
+                        }
+            
+                        obj.repositories = this.repoNameList(obj.repositories);
+                        delete obj._attrObjectId;
+                        delete obj._attrRestorePointName;
+            
+                        protectedObjects.push(obj);
+                    }
+            
+                    protectedObjects.sort(function (a, b) {
+                        var an = String(a.name || '').toLowerCase(),
+                            bn = String(b.name || '').toLowerCase();
+            
+                        if (an < bn) {
+                            return -1;
+                        }
+                        if (an > bn) {
+                            return 1;
+                        }
+            
+                        if (a.platformName < b.platformName) {
+                            return -1;
+                        }
+                        if (a.platformName > b.platformName) {
+                            return 1;
+                        }
+            
+                        return 0;
+                    });
+            
+                    summary = {
+                        generatedAt: this.iso(nowMs),
+                        reportDays: this.params.report_days,
+                        reportFrom: fromWindow,
+                        repositoriesCount: repos.length,
+                        protectedObjectsCount: protectedObjects.length,
+                        totalRepoCapacityGB: 0,
+                        totalRepoFreeGB: 0,
+                        totalRepoUsedGB: 0,
+                        backupSize24h: total24,
+                        backupSize31d: total31,
+                        assignedBackupSize31d: assigned31,
+                        sharedUnassignedBackupSize31d: shared31,
+                        attributionCoveragePct31d: total31 > 0 ? this.round2((assigned31 / total31) * 100) : 100
+                    };
+            
+                    for (i = 0; i < repos.length; i++) {
+                        summary.totalRepoCapacityGB += repos[i].capacityGB;
+                        summary.totalRepoFreeGB += repos[i].freeGB;
+                        summary.totalRepoUsedGB += repos[i].usedSpaceGB;
+                    }
+            
+                    return {
+                        summary: summary,
+                        repositories: repos,
+                        backup_objects: protectedObjects,
+                        error: errors.join(' | ')
+                    };
+                }
+            };
+            
+            try {
+                Veeam.setParams(JSON.parse(value));
+                Veeam.login();
+                return JSON.stringify(Veeam.getBackupReport());
+            }
+            catch (error) {
+                error += (String(error).slice(-1) === '.') ? '' : '.';
+                Zabbix.log(3, '[ VEEAM BACKUP REPORT ] ERROR: ' + error);
+                return JSON.stringify({ error: error });
+            }
+          description: 'Collects rolling backup size totals and protected-object attribution data for the last N days.'
+          timeout: '{$VEEAM.DATA.TIMEOUT}'
+          parameters:
+            - name: api_endpoint
+              value: '{$VEEAM.API.URL}'
+            - name: api_version
+              value: '{$VEEAM.API.VERSION}'
+            - name: http_proxy
+              value: '{$VEEAM.HTTP.PROXY}'
+            - name: page_limit
+              value: '{$VEEAM.PAGE.LIMIT}'
+            - name: password
+              value: '{$VEEAM.PASSWORD}'
+            - name: report_days
+              value: '{$VEEAM.BACKUP.REPORT.DAYS}'
+            - name: user
+              value: '{$VEEAM.USER}'
+          tags:
+            - tag: component
+              value: backup-report
+            - tag: component
+              value: raw
+        - uuid: da2fd3ed0254449981fde84f097ee376
+          name: 'Get errors'
+          type: DEPENDENT
+          key: veeam.get.errors
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          description: 'Errors returned by the infrastructure/jobs collection master item.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.error
+              error_handler: CUSTOM_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: veeam.get.metrics
+          tags:
+            - tag: component
+              value: status
+          triggers:
+            - uuid: 7b86df63dfe9423c8ebd9836241b0c24
+              expression: 'length(last(/Veeam Backup and Replication by HTTP v13/veeam.get.errors))>0'
+              name: 'There are errors in requests to Veeam API (metrics)'
+              opdata: '{ITEM.LASTVALUE1}'
+              priority: AVERAGE
+              description: 'Zabbix has received errors while requesting Veeam infrastructure or job state data.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 382ba78499904e8f84dd68511c93ff7f
+          name: 'Get metrics'
+          type: SCRIPT
+          key: veeam.get.metrics
+          delay: '{$VEEAM.METRICS.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          params: |
+            var Veeam = {
+                params: {},
+                token: '',
+            
+                setParams: function (params) {
+                    var required = ['api_endpoint', 'api_version', 'page_limit', 'user', 'password'],
+                        i;
+            
+                    for (i = 0; i < required.length; i++) {
+                        if (typeof params !== 'object' || typeof params[required[i]] === 'undefined' || params[required[i]] === '') {
+                            throw 'Required param is not set: ' + required[i] + '.';
+                        }
+                    }
+            
+                    this.params = params;
+            
+                    if (typeof this.params.api_endpoint === 'string' && !/\/$/.test(this.params.api_endpoint)) {
+                        this.params.api_endpoint += '/';
+                    }
+            
+                    this.params.page_limit = parseInt(this.params.page_limit, 10);
+                    if (isNaN(this.params.page_limit) || this.params.page_limit < 1 || this.params.page_limit > 1000) {
+                        throw 'Incorrect "page_limit" parameter given: ' + params.page_limit + '. Must be between 1 and 1000.';
+                    }
+                },
+            
+                buildUrl: function (path, query) {
+                    var url = this.params.api_endpoint + String(path).replace(/^\//, ''),
+                        parts = [],
+                        k;
+            
+                    query = query || {};
+            
+                    for (k in query) {
+                        if (query.hasOwnProperty(k) && query[k] !== '' && query[k] !== null && typeof query[k] !== 'undefined') {
+                            parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(query[k]));
+                        }
+                    }
+            
+                    if (parts.length) {
+                        url += ((url.indexOf('?') === -1) ? '?' : '&') + parts.join('&');
+                    }
+            
+                    return url;
+                },
+            
+                createRequest: function () {
+                    var req = new HttpRequest();
+            
+                    if (typeof this.params.http_proxy !== 'undefined' && this.params.http_proxy !== '') {
+                        req.setProxy(this.params.http_proxy);
+                    }
+            
+                    req.addHeader('Authorization: Bearer ' + this.token);
+                    req.addHeader('x-api-version: ' + this.params.api_version);
+            
+                    return req;
+                },
+            
+                login: function () {
+                    var req = new HttpRequest(),
+                        resp;
+            
+                    if (typeof this.params.http_proxy !== 'undefined' && this.params.http_proxy !== '') {
+                        req.setProxy(this.params.http_proxy);
+                    }
+            
+                    req.addHeader('Content-Type: application/x-www-form-urlencoded');
+                    req.addHeader('x-api-version: ' + this.params.api_version);
+            
+                    resp = req.post(
+                        this.params.api_endpoint + 'api/oauth2/token',
+                        'grant_type=password&username=' + encodeURIComponent(this.params.user) +
+                        '&password=' + encodeURIComponent(this.params.password)
+                    );
+            
+                    if (req.getStatus() !== 200 || resp === null) {
+                        throw 'Login failed with status code ' + req.getStatus() + ': ' + resp;
+                    }
+            
+                    try {
+                        resp = JSON.parse(resp);
+                    }
+                    catch (error) {
+                        throw 'Failed to parse authentication token for the logon session.';
+                    }
+            
+                    if (!resp.hasOwnProperty('access_token')) {
+                        throw 'Auth response does not contain access token.';
+                    }
+            
+                    this.token = resp.access_token;
+                },
+            
+                request: function (url) {
+                    var req = this.createRequest(),
+                        resp;
+            
+                    resp = req.get(url);
+            
+                    if (req.getStatus() !== 200 || resp === null) {
+                        throw 'Request failed with status code ' + req.getStatus() + ': ' + resp;
+                    }
+            
+                    try {
+                        return JSON.parse(resp);
+                    }
+                    catch (error) {
+                        throw 'Failed to parse response received from API.';
+                    }
+                },
+            
+                getAll: function (path, query) {
+                    var all = [],
+                        skip = 0,
+                        limit = this.params.page_limit,
+                        resp,
+                        count,
+                        i,
+                        guard = 0,
+                        pageQuery,
+                        pagination = {
+                            total: 0,
+                            count: 0,
+                            skip: 0,
+                            limit: limit
+                        };
+            
+                    query = query || {};
+            
+                    while (true) {
+                        guard += 1;
+            
+                        if (guard > 1000) {
+                            throw 'Pagination guard limit exceeded for endpoint: ' + path;
+                        }
+            
+                        pageQuery = {};
+                        for (i in query) {
+                            if (query.hasOwnProperty(i)) {
+                                pageQuery[i] = query[i];
+                            }
+                        }
+            
+                        pageQuery.skip = skip;
+                        pageQuery.limit = limit;
+            
+                        resp = this.request(this.buildUrl(path, pageQuery));
+            
+                        if (typeof resp !== 'object' || resp === null) {
+                            throw 'Unexpected API response for endpoint: ' + path;
+                        }
+            
+                        if (!resp.hasOwnProperty('data')) {
+                            return resp;
+                        }
+            
+                        count = resp.data.length;
+            
+                        for (i = 0; i < count; i++) {
+                            all.push(resp.data[i]);
+                        }
+            
+                        if (resp.hasOwnProperty('pagination')) {
+                            pagination = resp.pagination;
+                        }
+            
+                        if (!resp.hasOwnProperty('pagination') || count === 0 || count < limit) {
+                            break;
+                        }
+            
+                        skip += count;
+            
+                        if (typeof resp.pagination.total !== 'undefined' && skip >= resp.pagination.total) {
+                            break;
+                        }
+                    }
+            
+                    return {
+                        data: all,
+                        pagination: {
+                            total: all.length,
+                            count: all.length,
+                            skip: 0,
+                            limit: limit
+                        }
+                    };
+                },
+            
+                safeGetAll: function (target, key, path, query, errors) {
+                    try {
+                        target[key] = this.getAll(path, query || {});
+                    }
+                    catch (error) {
+                        target[key] = {
+                            data: [],
+                            pagination: {
+                                total: 0,
+                                count: 0,
+                                skip: 0,
+                                limit: this.params.page_limit
+                            }
+                        };
+                        errors.push(key + ': ' + error);
+                    }
+                },
+            
+                calcSummary: function (data) {
+                    var summary = {
+                            proxiesCount: 0,
+                            managedServersCount: 0,
+                            repositoriesCount: 0,
+                            jobsCount: 0,
+                            totalRepoCapacityGB: 0,
+                            totalRepoFreeGB: 0,
+                            totalRepoUsedGB: 0,
+                            repositoriesOnline: 0,
+                            repositoriesOffline: 0
+                        },
+                        repos = (data.repositories_states && data.repositories_states.data) ? data.repositories_states.data : [],
+                        i,
+                        repo;
+            
+                    summary.proxiesCount = (data.proxies && data.proxies.data) ? data.proxies.data.length : 0;
+                    summary.managedServersCount = (data.managedServers && data.managedServers.data) ? data.managedServers.data.length : 0;
+                    summary.repositoriesCount = repos.length;
+                    summary.jobsCount = (data.jobs_states && data.jobs_states.data) ? data.jobs_states.data.length : 0;
+            
+                    for (i = 0; i < repos.length; i++) {
+                        repo = repos[i];
+                        summary.totalRepoCapacityGB += parseFloat(repo.capacityGB || 0);
+                        summary.totalRepoFreeGB += parseFloat(repo.freeGB || 0);
+                        summary.totalRepoUsedGB += parseFloat(repo.usedSpaceGB || 0);
+            
+                        if (repo.isOnline) {
+                            summary.repositoriesOnline += 1;
+                        }
+                        else {
+                            summary.repositoriesOffline += 1;
+                        }
+                    }
+            
+                    return summary;
+                },
+            
+                getMetricsData: function () {
+                    var data = {},
+                        errors = [];
+            
+                    this.safeGetAll(data, 'proxies', 'api/v1/backupInfrastructure/proxies', {}, errors);
+                    this.safeGetAll(data, 'managedServers', 'api/v1/backupInfrastructure/managedServers', {}, errors);
+                    this.safeGetAll(data, 'repositories_states', 'api/v1/backupInfrastructure/repositories/states', {}, errors);
+                    this.safeGetAll(data, 'jobs_states', 'api/v1/jobs/states', {}, errors);
+            
+                    data.summary = this.calcSummary(data);
+                    data.error = errors.join(' | ');
+            
+                    return data;
+                }
+            };
+            
+            try {
+                Veeam.setParams(JSON.parse(value));
+                Veeam.login();
+                return JSON.stringify(Veeam.getMetricsData());
+            }
+            catch (error) {
+                error += (String(error).slice(-1) === '.') ? '' : '.';
+                Zabbix.log(3, '[ VEEAM ] ERROR: ' + error);
+                return JSON.stringify({ error: error });
+            }
+          description: 'Collects infrastructure, repositories, proxies and job-state data from the Veeam REST API.'
+          timeout: '{$VEEAM.DATA.TIMEOUT}'
+          parameters:
+            - name: api_endpoint
+              value: '{$VEEAM.API.URL}'
+            - name: api_version
+              value: '{$VEEAM.API.VERSION}'
+            - name: http_proxy
+              value: '{$VEEAM.HTTP.PROXY}'
+            - name: page_limit
+              value: '{$VEEAM.PAGE.LIMIT}'
+            - name: password
+              value: '{$VEEAM.PASSWORD}'
+            - name: user
+              value: '{$VEEAM.USER}'
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 65a79d6f7fd64ca78ae1f8bad653b7f9
+          name: 'Repositories offline count'
+          type: DEPENDENT
+          key: veeam.repositories.offline.count
+          delay: '0'
+          description: 'Number of repositories currently offline.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.summary.repositoriesOffline
+          master_item:
+            key: veeam.get.metrics
+          tags:
+            - tag: component
+              value: repositories
+        - uuid: 4107b13b2ee9420b891d16968fc4efe7
+          name: 'Repositories online count'
+          type: DEPENDENT
+          key: veeam.repositories.online.count
+          delay: '0'
+          description: 'Number of repositories currently online.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.summary.repositoriesOnline
+          master_item:
+            key: veeam.get.metrics
+          tags:
+            - tag: component
+              value: repositories
+        - uuid: 4ee3b258214d44fc98898bb1bc9ab5d4
+          name: 'Repositories total capacity'
+          type: DEPENDENT
+          key: veeam.repositories.total.capacity.gb
+          delay: '0'
+          value_type: FLOAT
+          units: '!GB'
+          description: 'Global repository capacity summary calculated from /backupInfrastructure/repositories/states.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.summary.totalRepoCapacityGB
+          master_item:
+            key: veeam.get.metrics
+          tags:
+            - tag: component
+              value: repositories
+          triggers:
+            - uuid: 7b161a9ada48fa5951f849fe08c4a89d
+              expression: 'nodata(/Veeam Backup and Replication by HTTP v13/veeam.repositories.total.capacity.gb,{$VEEAM.METRICS.NODATA})=1'
+              name: 'No data from Veeam infrastructure metrics'
+              priority: WARNING
+              description: 'The infrastructure/jobs metrics master item has not produced data within the configured period. Check the metrics error item and API connectivity.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: ac999fef1c494bf5a354b672999c8392
+          name: 'Repositories total free space'
+          type: DEPENDENT
+          key: veeam.repositories.total.free.gb
+          delay: '0'
+          value_type: FLOAT
+          units: '!GB'
+          description: 'Global repository capacity summary calculated from /backupInfrastructure/repositories/states.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.summary.totalRepoFreeGB
+          master_item:
+            key: veeam.get.metrics
+          tags:
+            - tag: component
+              value: repositories
+        - uuid: 9550ca61b4b24ec185da00f2bc7b05f3
+          name: 'Repositories total used space'
+          type: DEPENDENT
+          key: veeam.repositories.total.used.gb
+          delay: '0'
+          value_type: FLOAT
+          units: '!GB'
+          description: 'Global repository capacity summary calculated from /backupInfrastructure/repositories/states.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.summary.totalRepoUsedGB
+          master_item:
+            key: veeam.get.metrics
+          tags:
+            - tag: component
+              value: repositories
+      discovery_rules:
+        - uuid: ad85280eef3e4a309c2e102b7797c475
+          name: 'Protected objects discovery'
+          type: DEPENDENT
+          key: veeam.backup.object.discovery
+          delay: '0'
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#NAME}'
+                value: '{$VEEAM.OBJECT.NAME.MATCHES}'
+                formulaid: A
+              - macro: '{#NAME}'
+                value: '{$VEEAM.OBJECT.NAME.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: B
+              - macro: '{#PLATFORM}'
+                value: '{$VEEAM.OBJECT.PLATFORM.MATCHES}'
+                formulaid: C
+              - macro: '{#PLATFORM}'
+                value: '{$VEEAM.OBJECT.PLATFORM.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: D
+          description: 'Discovery of protected objects/hosts seen in the rolling backup report window.'
+          item_prototypes:
+            - uuid: d4e06f90d2514a6f9b43142dc64cc263
+              name: 'Protected object [{#NAME}] [{#PLATFORM}]: Attribution mode'
+              type: DEPENDENT
+              key: 'veeam.backup.object.attribution[{#KEY}]'
+              delay: '0'
+              value_type: TEXT
+              trends: '0'
+              description: 'How size attribution was resolved for the object: backupFile.objectId, restorePointName, mixed or unresolved.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.attributionMode
+              master_item:
+                key: 'veeam.backup.object.raw[{#KEY}]'
+              tags:
+                - tag: component
+                  value: backup-report
+                - tag: object
+                  value: '{#NAME}'
+                - tag: platform
+                  value: '{#PLATFORM}'
+            - uuid: 5aaf22458014442888c787567e706b79
+              name: 'Protected object [{#NAME}] [{#PLATFORM}]: Backup files 31d'
+              type: DEPENDENT
+              key: 'veeam.backup.object.backupfiles.31d[{#KEY}]'
+              delay: '0'
+              description: 'Number of backup files attributed to the object in the rolling 31-day window.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.backupFiles31d
+              master_item:
+                key: 'veeam.backup.object.raw[{#KEY}]'
+              tags:
+                - tag: component
+                  value: backup-report
+                - tag: object
+                  value: '{#NAME}'
+                - tag: platform
+                  value: '{#PLATFORM}'
+            - uuid: ebd0411c9900485fa0cbe721beac471c
+              name: 'Protected object [{#NAME}] [{#PLATFORM}]: Last backup time'
+              type: DEPENDENT
+              key: 'veeam.backup.object.last.backup[{#KEY}]'
+              delay: '0'
+              value_type: TEXT
+              trends: '0'
+              description: 'Most recent restore point or backup file timestamp seen in the rolling report window.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.lastBackupTime
+              master_item:
+                key: 'veeam.backup.object.raw[{#KEY}]'
+              tags:
+                - tag: component
+                  value: backup-report
+                - tag: object
+                  value: '{#NAME}'
+                - tag: platform
+                  value: '{#PLATFORM}'
+            - uuid: 59c8d0ae5f6e40ff88de6a30e6144c0f
+              name: 'Protected object [{#NAME}] [{#PLATFORM}]: Get rolling report data'
+              type: DEPENDENT
+              key: 'veeam.backup.object.raw[{#KEY}]'
+              delay: '0'
+              history: '0'
+              value_type: TEXT
+              trends: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.backup_objects.[?(@.key==''{#KEY}'')].first()'
+              master_item:
+                key: veeam.get.backup.report
+              tags:
+                - tag: component
+                  value: backup-report
+                - tag: component
+                  value: raw
+                - tag: object
+                  value: '{#NAME}'
+                - tag: platform
+                  value: '{#PLATFORM}'
+            - uuid: 83a020c0290a4d48b86071f6795140d4
+              name: 'Protected object [{#NAME}] [{#PLATFORM}]: Repositories'
+              type: DEPENDENT
+              key: 'veeam.backup.object.repositories[{#KEY}]'
+              delay: '0'
+              value_type: TEXT
+              trends: '0'
+              description: 'Repository names seen for the object in the rolling report window.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.repositories
+              master_item:
+                key: 'veeam.backup.object.raw[{#KEY}]'
+              tags:
+                - tag: component
+                  value: backup-report
+                - tag: object
+                  value: '{#NAME}'
+                - tag: platform
+                  value: '{#PLATFORM}'
+            - uuid: 685d82c373914860979909bbedb21e3d
+              name: 'Protected object [{#NAME}] [{#PLATFORM}]: Restore points 31d'
+              type: DEPENDENT
+              key: 'veeam.backup.object.restorepoints.31d[{#KEY}]'
+              delay: '0'
+              description: 'Number of restore points seen in the rolling 31-day window.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.restorePoints31d
+              master_item:
+                key: 'veeam.backup.object.raw[{#KEY}]'
+              tags:
+                - tag: component
+                  value: backup-report
+                - tag: object
+                  value: '{#NAME}'
+                - tag: platform
+                  value: '{#PLATFORM}'
+            - uuid: e5ec6d5fc60b4f1fb39b6498d6c76662
+              name: 'Protected object [{#NAME}] [{#PLATFORM}]: Backup size 24h'
+              type: DEPENDENT
+              key: 'veeam.backup.object.size.24h[{#KEY}]'
+              delay: '0'
+              units: B
+              description: 'Rolling 24-hour backup-file size safely attributed to the object.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.backupSize24h
+              master_item:
+                key: 'veeam.backup.object.raw[{#KEY}]'
+              tags:
+                - tag: component
+                  value: backup-report
+                - tag: object
+                  value: '{#NAME}'
+                - tag: platform
+                  value: '{#PLATFORM}'
+            - uuid: f50e0d9a317c47c8bca62e4525c5e582
+              name: 'Protected object [{#NAME}] [{#PLATFORM}]: Backup size 31d'
+              type: DEPENDENT
+              key: 'veeam.backup.object.size.31d[{#KEY}]'
+              delay: '0'
+              units: B
+              description: 'Rolling 31-day backup-file size safely attributed to the object.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.backupSize31d
+              master_item:
+                key: 'veeam.backup.object.raw[{#KEY}]'
+              tags:
+                - tag: component
+                  value: backup-report
+                - tag: object
+                  value: '{#NAME}'
+                - tag: platform
+                  value: '{#PLATFORM}'
+          master_item:
+            key: veeam.get.backup.report
+          lld_macro_paths:
+            - lld_macro: '{#KEY}'
+              path: $.key
+            - lld_macro: '{#NAME}'
+              path: $.name
+            - lld_macro: '{#PLATFORM}'
+              path: $.platformName
+            - lld_macro: '{#TYPE}'
+              path: $.type
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.backup_objects
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 6h
+        - uuid: e6fa06f400a44483b3c3bc0215150405
+          name: 'Jobs states discovery'
+          type: DEPENDENT
+          key: veeam.job.state.discovery
+          delay: '0'
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#JOB.STATUS}'
+                value: '{$JOB.STATUS.MATCHES}'
+                formulaid: A
+              - macro: '{#JOB.STATUS}'
+                value: '{$JOB.STATUS.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: B
+              - macro: '{#NAME}'
+                value: '{$JOB.NAME.MATCHES}'
+                formulaid: C
+              - macro: '{#NAME}'
+                value: '{$JOB.NAME.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: D
+              - macro: '{#TYPE}'
+                value: '{$JOB.TYPE.MATCHES}'
+                formulaid: E
+              - macro: '{#TYPE}'
+                value: '{$JOB.TYPE.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: F
+          description: 'Discovery of job states returned by /api/v1/jobs/states.'
+          item_prototypes:
+            - uuid: 3f38e614600f4062842e2cfc9896d409
+              name: 'Job [{#NAME}] [{#TYPE}]: Last result'
+              type: DEPENDENT
+              key: 'veeam.jobs.last.result[{#ID}]'
+              delay: '0'
+              value_type: TEXT
+              trends: '0'
+              description: 'Last job result. Typical values are None, Success, Warning or Failed.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.lastResult
+              master_item:
+                key: 'veeam.jobs.states.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: job
+                  value: '{#NAME}'
+                - tag: workload
+                  value: '{#WORKLOAD}'
+              trigger_prototypes:
+                - uuid: d794e74108344731936d8d6eda820078
+                  expression: 'find(/Veeam Backup and Replication by HTTP v13/veeam.jobs.last.result[{#ID}],,"like","Failed")=1'
+                  name: 'Last job result failed'
+                  event_name: 'Failed job [{#NAME}]'
+                  priority: AVERAGE
+                  manual_close: 'YES'
+                  tags:
+                    - tag: scope
+                      value: availability
+                - uuid: 45fc10b173369753ba39b5c0e6382341
+                  expression: 'find(/Veeam Backup and Replication by HTTP v13/veeam.jobs.last.result[{#ID}],,"like","Warning")=1'
+                  name: 'Last job result has warnings'
+                  event_name: 'Job [{#NAME}] finished with warnings'
+                  opdata: '{ITEM.LASTVALUE1}'
+                  priority: WARNING
+                  manual_close: 'YES'
+                  tags:
+                    - tag: scope
+                      value: availability
+            - uuid: 49c4fdaad70546a594da5d0661e2a0c4
+              name: 'Job [{#NAME}] [{#TYPE}]: Last run'
+              type: DEPENDENT
+              key: 'veeam.jobs.last.run[{#ID}]'
+              delay: '0'
+              value_type: TEXT
+              trends: '0'
+              description: 'Last run time as returned by Veeam.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.lastRun
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: 'veeam.jobs.states.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: job
+                  value: '{#NAME}'
+            - uuid: 7bafd1c723f14cb49aa140061fbdfad0
+              name: 'Job [{#NAME}] [{#TYPE}]: Next run'
+              type: DEPENDENT
+              key: 'veeam.jobs.next.run[{#ID}]'
+              delay: '0'
+              value_type: TEXT
+              trends: '0'
+              description: 'Next run time as returned by Veeam.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.nextRun
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: 'veeam.jobs.states.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: job
+                  value: '{#NAME}'
+            - uuid: 91d52c1d5da641de84fe8ecdfd847641
+              name: 'Job [{#NAME}] [{#TYPE}]: Objects count'
+              type: DEPENDENT
+              key: 'veeam.jobs.objects.count[{#ID}]'
+              delay: '0'
+              description: 'Number of objects protected by the job, when provided by the REST API.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.objectsCount
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: 'veeam.jobs.states.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: job
+                  value: '{#NAME}'
+            - uuid: 2b3c72a03d6e493cb9e913cb1a8508ef
+              name: 'Job [{#NAME}] [{#TYPE}]: Get data'
+              type: DEPENDENT
+              key: 'veeam.jobs.states.raw[{#ID}]'
+              delay: '0'
+              history: '0'
+              value_type: TEXT
+              trends: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.jobs_states.data.[?(@.id==''{#ID}'')].first()'
+              master_item:
+                key: veeam.get.metrics
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: component
+                  value: raw
+                - tag: job
+                  value: '{#NAME}'
+            - uuid: 94ce52b3ae374184a3bc8becb806ad4f
+              name: 'Job [{#NAME}] [{#TYPE}]: Status'
+              type: DEPENDENT
+              key: 'veeam.jobs.status[{#ID}]'
+              delay: '0'
+              value_type: TEXT
+              trends: '0'
+              description: 'Current job status. Typical values are running, inactive or disabled.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.status
+              master_item:
+                key: 'veeam.jobs.states.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: jobs
+                - tag: job
+                  value: '{#NAME}'
+                - tag: workload
+                  value: '{#WORKLOAD}'
+          master_item:
+            key: veeam.get.metrics
+          lld_macro_paths:
+            - lld_macro: '{#ID}'
+              path: $.id
+            - lld_macro: '{#JOB.STATUS}'
+              path: $.status
+            - lld_macro: '{#NAME}'
+              path: $.name
+            - lld_macro: '{#REPOSITORY.NAME}'
+              path: $.repositoryName
+            - lld_macro: '{#TYPE}'
+              path: $.type
+            - lld_macro: '{#WORKLOAD}'
+              path: $.workload
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.jobs_states.data
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 6h
+        - uuid: 748261dd3f12469db7b5a036e8987ec4
+          name: 'Proxies discovery'
+          type: DEPENDENT
+          key: veeam.proxies.discovery
+          delay: '0'
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#NAME}'
+                value: '{$PROXIES.NAME.MATCHES}'
+                formulaid: A
+              - macro: '{#NAME}'
+                value: '{$PROXIES.NAME.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: B
+              - macro: '{#TYPE}'
+                value: '{$PROXIES.TYPE.MATCHES}'
+                formulaid: C
+              - macro: '{#TYPE}'
+                value: '{$PROXIES.TYPE.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: D
+          description: 'Discovery of backup proxies.'
+          item_prototypes:
+            - uuid: 43bd8a47907e45cc882dadf30d6d2eca
+              name: 'Proxy [{#NAME}] [{#TYPE}]: Max task count'
+              type: DEPENDENT
+              key: 'veeam.proxy.maxtask[{#ID}]'
+              delay: '0'
+              description: 'Maximum number of concurrent tasks on the proxy.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.server.maxTaskCount
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: 'veeam.proxy.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: proxies
+                - tag: proxy
+                  value: '{#NAME}'
+            - uuid: 5ed3b66a28ef4e47b1aa9c8845caa769
+              name: 'Proxy [{#NAME}] [{#TYPE}]: Get data'
+              type: DEPENDENT
+              key: 'veeam.proxy.raw[{#ID}]'
+              delay: '0'
+              history: '0'
+              value_type: TEXT
+              trends: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.proxies.data.[?(@.id==''{#ID}'')].first()'
+              master_item:
+                key: veeam.get.metrics
+              tags:
+                - tag: component
+                  value: proxies
+                - tag: component
+                  value: raw
+                - tag: proxy
+                  value: '{#NAME}'
+            - uuid: 0ed591db73d44ec29bb03fe55c91b06f
+              name: 'Proxy [{#NAME}] [{#TYPE}]: Server name'
+              type: DEPENDENT
+              key: 'veeam.proxy.server.name[{#ID}]'
+              delay: '0'
+              value_type: TEXT
+              trends: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.name
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: 'veeam.proxy.server.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: proxies
+                - tag: proxy
+                  value: '{#NAME}'
+            - uuid: 8078d6fec96247c5b13dff6f6828e80d
+              name: 'Proxy [{#NAME}] [{#TYPE}]: Server get data'
+              type: DEPENDENT
+              key: 'veeam.proxy.server.raw[{#ID}]'
+              delay: '0'
+              history: '0'
+              value_type: TEXT
+              trends: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.managedServers.data.[?(@.id==''{#HOSTID}'')].first()'
+              master_item:
+                key: veeam.get.metrics
+              tags:
+                - tag: component
+                  value: proxies
+                - tag: component
+                  value: raw
+                - tag: proxy
+                  value: '{#NAME}'
+            - uuid: 561b7e5b2bfc4742aa4807ab2a7abed3
+              name: 'Proxy [{#NAME}] [{#TYPE}]: Server type'
+              type: DEPENDENT
+              key: 'veeam.proxy.server.type[{#ID}]'
+              delay: '0'
+              value_type: TEXT
+              trends: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.type
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: 'veeam.proxy.server.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: proxies
+                - tag: proxy
+                  value: '{#NAME}'
+          master_item:
+            key: veeam.get.metrics
+          lld_macro_paths:
+            - lld_macro: '{#DESCRIPTION}'
+              path: $.description
+            - lld_macro: '{#HOSTID}'
+              path: $.server.hostId
+            - lld_macro: '{#ID}'
+              path: $.id
+            - lld_macro: '{#NAME}'
+              path: $.name
+            - lld_macro: '{#TYPE}'
+              path: $.type
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.proxies.data
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 6h
+        - uuid: 5815737ba041447ea06b1f783280e708
+          name: 'Repositories discovery'
+          type: DEPENDENT
+          key: veeam.repositories.discovery
+          delay: '0'
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#NAME}'
+                value: '{$REPOSITORIES.NAME.MATCHES}'
+                formulaid: A
+              - macro: '{#NAME}'
+                value: '{$REPOSITORIES.NAME.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: B
+              - macro: '{#TYPE}'
+                value: '{$REPOSITORIES.TYPE.MATCHES}'
+                formulaid: C
+              - macro: '{#TYPE}'
+                value: '{$REPOSITORIES.TYPE.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: D
+          description: 'Discovery of repositories and rolling backup-size totals.'
+          item_prototypes:
+            - uuid: 8c051d20c5e7433492f5842dcfaec363
+              name: 'Repository [{#NAME}] [{#TYPE}]: Get current data'
+              type: DEPENDENT
+              key: 'veeam.repositories.raw[{#ID}]'
+              delay: '0'
+              history: '0'
+              value_type: TEXT
+              trends: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.repositories_states.data.[?(@.id==''{#ID}'')].first()'
+              master_item:
+                key: veeam.get.metrics
+              tags:
+                - tag: component
+                  value: raw
+                - tag: component
+                  value: repositories
+                - tag: repository
+                  value: '{#NAME}'
+            - uuid: c8f17321ce3a4be8860f2127716ae317
+              name: 'Repository [{#NAME}] [{#TYPE}]: Backup files 31d'
+              type: DEPENDENT
+              key: 'veeam.repository.backup.files.31d[{#ID}]'
+              delay: '0'
+              description: 'Count of backup files seen on this repository in the rolling 31-day window.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.backupFiles31d
+              master_item:
+                key: 'veeam.repository.report.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: backup-report
+                - tag: repository
+                  value: '{#NAME}'
+            - uuid: be0139b4f7314b1ab9843399b52c398f
+              name: 'Repository [{#NAME}] [{#TYPE}]: Backup size 24h'
+              type: DEPENDENT
+              key: 'veeam.repository.backup.size.24h[{#ID}]'
+              delay: '0'
+              units: B
+              description: 'Rolling 24-hour backup-file size written to this repository.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.backupSize24h
+              master_item:
+                key: 'veeam.repository.report.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: backup-report
+                - tag: repository
+                  value: '{#NAME}'
+            - uuid: 5d3364748d4645889c4a9534a670f7cb
+              name: 'Repository [{#NAME}] [{#TYPE}]: Backup size 31d'
+              type: DEPENDENT
+              key: 'veeam.repository.backup.size.31d[{#ID}]'
+              delay: '0'
+              units: B
+              description: 'Rolling 31-day backup-file size written to this repository.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.backupSize31d
+              master_item:
+                key: 'veeam.repository.report.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: backup-report
+                - tag: repository
+                  value: '{#NAME}'
+            - uuid: 4b636c9e6844461d862f6f6aaf90c35c
+              name: 'Repository [{#NAME}] [{#TYPE}]: Capacity [{#PATH}]'
+              type: DEPENDENT
+              key: 'veeam.repository.capacity.gb[{#ID}]'
+              delay: '0'
+              value_type: FLOAT
+              units: '!GB'
+              description: 'Current repository capacity in GB, directly from repository states.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.capacityGB
+              master_item:
+                key: 'veeam.repositories.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: repositories
+                - tag: repository
+                  value: '{#NAME}'
+            - uuid: 6c22bb5bfb6b4da1bd051a6d82195baa
+              name: 'Repository [{#NAME}] [{#TYPE}]: Free space [{#PATH}]'
+              type: DEPENDENT
+              key: 'veeam.repository.free.gb[{#ID}]'
+              delay: '0'
+              value_type: FLOAT
+              units: '!GB'
+              description: 'Current free repository space in GB, directly from repository states.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.freeGB
+              master_item:
+                key: 'veeam.repositories.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: repositories
+                - tag: repository
+                  value: '{#NAME}'
+            - uuid: fdc8f0d59c4541249baf2b17ae3d3338
+              name: 'Repository [{#NAME}] [{#TYPE}]: Free percent [{#PATH}]'
+              type: DEPENDENT
+              key: 'veeam.repository.free.pct[{#ID}]'
+              delay: '0'
+              value_type: FLOAT
+              units: '%'
+              description: 'Current free repository space as percentage of capacity.'
+              preprocessing:
+                - type: JAVASCRIPT
+                  parameters:
+                    - |
+                      
+                      var o = JSON.parse(value),
+                          capacity = parseFloat(o.capacityGB || 0),
+                          free = parseFloat(o.freeGB || 0);
+                      
+                      if (capacity <= 0) {
+                          return 0;
+                      }
+                      
+                      return Math.round((free / capacity) * 10000) / 100;
+              master_item:
+                key: 'veeam.repositories.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: repositories
+                - tag: repository
+                  value: '{#NAME}'
+              trigger_prototypes:
+                - uuid: 01f93751a42645c2a217cfa54b552894
+                  expression: 'min(/Veeam Backup and Replication by HTTP v13/veeam.repository.free.pct[{#ID}],15m)<{$VEEAM.REPO.FREE.PCT.MIN}'
+                  name: 'Low free space on repository'
+                  event_name: 'Low free space on repository [{#NAME}]'
+                  opdata: 'Free: {ITEM.LASTVALUE1}%'
+                  priority: WARNING
+                  manual_close: 'YES'
+                  dependencies:
+                    - name: 'Critically low free space on repository'
+                      expression: 'min(/Veeam Backup and Replication by HTTP v13/veeam.repository.free.pct[{#ID}],15m)<{$VEEAM.REPO.FREE.PCT.CRIT}'
+                  tags:
+                    - tag: scope
+                      value: capacity
+                - uuid: 002f401edeb203bdbbee5956c99b8658
+                  expression: 'min(/Veeam Backup and Replication by HTTP v13/veeam.repository.free.pct[{#ID}],15m)<{$VEEAM.REPO.FREE.PCT.CRIT}'
+                  name: 'Critically low free space on repository'
+                  event_name: 'Critically low free space on repository [{#NAME}]'
+                  opdata: 'Free: {ITEM.LASTVALUE1}%'
+                  priority: HIGH
+                  manual_close: 'YES'
+                  tags:
+                    - tag: scope
+                      value: capacity
+            - uuid: 7684531768f0421c96403534a6739bfe
+              name: 'Repository [{#NAME}] [{#TYPE}]: Online state'
+              type: DEPENDENT
+              key: 'veeam.repository.online[{#ID}]'
+              delay: '0'
+              valuemap:
+                name: 'Veeam online state'
+              description: 'Repository online state converted to 1/0.'
+              preprocessing:
+                - type: JAVASCRIPT
+                  parameters:
+                    - |
+                      
+                      var o = JSON.parse(value);
+                      return o.isOnline ? 1 : 0;
+              master_item:
+                key: 'veeam.repositories.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: repositories
+                - tag: repository
+                  value: '{#NAME}'
+              trigger_prototypes:
+                - uuid: 518c23cc47e34da58e461d7769986699
+                  expression: 'last(/Veeam Backup and Replication by HTTP v13/veeam.repository.online[{#ID}])=0'
+                  name: 'Repository is offline'
+                  event_name: 'Repository [{#NAME}] is offline'
+                  priority: AVERAGE
+                  manual_close: 'YES'
+                  tags:
+                    - tag: scope
+                      value: availability
+            - uuid: 23886fe75fdc47d1ac2a423f5f7634ca
+              name: 'Repository [{#NAME}] [{#TYPE}]: Out-of-date state'
+              type: DEPENDENT
+              key: 'veeam.repository.outofdate[{#ID}]'
+              delay: '0'
+              valuemap:
+                name: 'Veeam up-to-date state'
+              description: 'Repository out-of-date state converted to 1/0.'
+              preprocessing:
+                - type: JAVASCRIPT
+                  parameters:
+                    - |
+                      
+                      var o = JSON.parse(value);
+                      return o.isOutOfDate ? 1 : 0;
+              master_item:
+                key: 'veeam.repositories.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: repositories
+                - tag: repository
+                  value: '{#NAME}'
+              trigger_prototypes:
+                - uuid: f1b6d70b6d5a47a1be593e9a20a9aeaa
+                  expression: 'last(/Veeam Backup and Replication by HTTP v13/veeam.repository.outofdate[{#ID}])=1'
+                  name: 'Repository components are out of date'
+                  event_name: 'Repository [{#NAME}] components are out of date'
+                  priority: WARNING
+                  manual_close: 'YES'
+                  tags:
+                    - tag: scope
+                      value: capacity
+            - uuid: 3e0e81053c3040fe82aebf628fa0d3f2
+              name: 'Repository [{#NAME}] [{#TYPE}]: Get rolling report data'
+              type: DEPENDENT
+              key: 'veeam.repository.report.raw[{#ID}]'
+              delay: '0'
+              history: '0'
+              value_type: TEXT
+              trends: '0'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.repositories.[?(@.id==''{#ID}'')].first()'
+              master_item:
+                key: veeam.get.backup.report
+              tags:
+                - tag: component
+                  value: backup-report
+                - tag: component
+                  value: raw
+                - tag: repository
+                  value: '{#NAME}'
+            - uuid: 3c5252cbf5c241f881d7b4a40894973e
+              name: 'Repository [{#NAME}] [{#TYPE}]: Used space [{#PATH}]'
+              type: DEPENDENT
+              key: 'veeam.repository.used.gb[{#ID}]'
+              delay: '0'
+              value_type: FLOAT
+              units: '!GB'
+              description: 'Current used repository space in GB, directly from repository states.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.usedSpaceGB
+              master_item:
+                key: 'veeam.repositories.raw[{#ID}]'
+              tags:
+                - tag: component
+                  value: repositories
+                - tag: repository
+                  value: '{#NAME}'
+          master_item:
+            key: veeam.get.metrics
+          lld_macro_paths:
+            - lld_macro: '{#DESCRIPTION}'
+              path: $.description
+            - lld_macro: '{#HOSTID}'
+              path: $.hostId
+            - lld_macro: '{#HOSTNAME}'
+              path: $.hostName
+            - lld_macro: '{#ID}'
+              path: $.id
+            - lld_macro: '{#NAME}'
+              path: $.name
+            - lld_macro: '{#PATH}'
+              path: $.path
+            - lld_macro: '{#TYPE}'
+              path: $.type
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.repositories_states.data
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 6h
+      tags:
+        - tag: class
+          value: software
+        - tag: target
+          value: veeam
+      macros:
+        - macro: '{$JOB.NAME.MATCHES}'
+          value: '.*'
+          description: 'Regex include filter used by jobs discovery.'
+        - macro: '{$JOB.NAME.NOT_MATCHES}'
+          value: ^$
+          description: 'Regex exclude filter used by jobs discovery.'
+        - macro: '{$JOB.STATUS.MATCHES}'
+          value: '.*'
+          description: 'Regex include filter used by jobs discovery.'
+        - macro: '{$JOB.STATUS.NOT_MATCHES}'
+          value: ^$
+          description: 'Regex exclude filter used by jobs discovery.'
+        - macro: '{$JOB.TYPE.MATCHES}'
+          value: '.*'
+          description: 'Regex include filter used by jobs discovery.'
+        - macro: '{$JOB.TYPE.NOT_MATCHES}'
+          value: ^$
+          description: 'Regex exclude filter used by jobs discovery.'
+        - macro: '{$PROXIES.NAME.MATCHES}'
+          value: '.*'
+          description: 'Regex include filter used by proxy discovery.'
+        - macro: '{$PROXIES.NAME.NOT_MATCHES}'
+          value: ^$
+          description: 'Regex exclude filter used by proxy discovery.'
+        - macro: '{$PROXIES.TYPE.MATCHES}'
+          value: '.*'
+          description: 'Regex include filter used by proxy discovery.'
+        - macro: '{$PROXIES.TYPE.NOT_MATCHES}'
+          value: ^$
+          description: 'Regex exclude filter used by proxy discovery.'
+        - macro: '{$REPOSITORIES.NAME.MATCHES}'
+          value: '.*'
+          description: 'Regex include filter used by repositories discovery.'
+        - macro: '{$REPOSITORIES.NAME.NOT_MATCHES}'
+          value: ^$
+          description: 'Regex exclude filter used by repositories discovery.'
+        - macro: '{$REPOSITORIES.TYPE.MATCHES}'
+          value: '.*'
+          description: 'Regex include filter used by repositories discovery.'
+        - macro: '{$REPOSITORIES.TYPE.NOT_MATCHES}'
+          value: ^$
+          description: 'Regex exclude filter used by repositories discovery.'
+        - macro: '{$VEEAM.API.URL}'
+          value: 'https://localhost:9419'
+          description: 'Veeam REST API endpoint in the format <scheme>://<host>:<port>.'
+        - macro: '{$VEEAM.API.VERSION}'
+          value: 1.3-rev1
+          description: 'REST API version header for VBR 13. Use 1.3-rev0 on 13.0.0 GA if needed.'
+        - macro: '{$VEEAM.BACKUP.REPORT.DAYS}'
+          value: '31'
+          description: 'Rolling backup reporting window in days.'
+        - macro: '{$VEEAM.BACKUP.REPORT.INTERVAL}'
+          value: 6h
+          description: 'Update interval for the rolling backup report master item.'
+        - macro: '{$VEEAM.BACKUP.REPORT.NODATA}'
+          value: 12h
+          description: 'Period with no rolling backup report data before the no-data trigger fires. Keep it above {$VEEAM.BACKUP.REPORT.INTERVAL}.'
+        - macro: '{$VEEAM.DATA.TIMEOUT}'
+          value: '30'
+          description: 'HTTP request timeout in seconds for the master script items.'
+        - macro: '{$VEEAM.HTTP.PROXY}'
+          description: 'Optional HTTP proxy for outbound API requests from the Zabbix server/proxy.'
+        - macro: '{$VEEAM.METRICS.INTERVAL}'
+          value: 5m
+          description: 'Update interval for infrastructure and job metrics.'
+        - macro: '{$VEEAM.METRICS.NODATA}'
+          value: 15m
+          description: 'Period with no infrastructure/jobs metrics data before the no-data trigger fires. Keep it above {$VEEAM.METRICS.INTERVAL}.'
+        - macro: '{$VEEAM.OBJECT.NAME.MATCHES}'
+          value: '.*'
+          description: 'Regex include filter used by protected-object discovery.'
+        - macro: '{$VEEAM.OBJECT.NAME.NOT_MATCHES}'
+          value: ^$
+          description: 'Regex exclude filter used by protected-object discovery.'
+        - macro: '{$VEEAM.OBJECT.PLATFORM.MATCHES}'
+          value: '.*'
+          description: 'Regex include filter used by protected-object discovery.'
+        - macro: '{$VEEAM.OBJECT.PLATFORM.NOT_MATCHES}'
+          value: ^$
+          description: 'Regex exclude filter used by protected-object discovery.'
+        - macro: '{$VEEAM.PAGE.LIMIT}'
+          value: '200'
+          description: 'REST API page size used by the script items.'
+        - macro: '{$VEEAM.PASSWORD}'
+          type: SECRET_TEXT
+          description: 'Password used to obtain a Veeam OAuth token.'
+        - macro: '{$VEEAM.REPO.FREE.PCT.CRIT}'
+          value: '5'
+          description: 'High-severity threshold for repository free space percent. Keep it below {$VEEAM.REPO.FREE.PCT.MIN}.'
+        - macro: '{$VEEAM.REPO.FREE.PCT.MIN}'
+          value: '10'
+          description: 'Warning threshold for repository free space percent.'
+        - macro: '{$VEEAM.USER}'
+          type: SECRET_TEXT
+          description: 'Username used to obtain a Veeam OAuth token.'
+      valuemaps:
+        - uuid: e89f1117e1d5eff5f0826eae2f4bd4a0
+          name: 'Veeam online state'
+          mappings:
+            - value: '0'
+              newvalue: Offline
+            - value: '1'
+              newvalue: Online
+        - uuid: 06df312230d785854bcce106ceea65ac
+          name: 'Veeam up-to-date state'
+          mappings:
+            - value: '0'
+              newvalue: 'Up to date'
+            - value: '1'
+              newvalue: 'Out of date'
+  triggers:
+    - uuid: 3fccb700fef8d44137b95150a6394c75
+      expression: 'last(/Veeam Backup and Replication by HTTP v13/veeam.backup.total.size.24h)=0 and last(/Veeam Backup and Replication by HTTP v13/veeam.backup.total.size.31d)>0'
+      name: 'No backups in the last 24 hours'
+      opdata: '24h: {ITEM.LASTVALUE1}, 31d: {ITEM.LASTVALUE2}'
+      priority: WARNING
+      description: 'No backup files were written in the last 24 hours even though the rolling 31-day window has backup data. Check job schedules and recent job results.'
+      manual_close: 'YES'
+      tags:
+        - tag: scope
+          value: availability
+    - uuid: 302976398d00435e84164cfd0de37064
+      expression: 'last(/Veeam Backup and Replication by HTTP v13/veeam.backup.total.attribution.coverage)<100 and last(/Veeam Backup and Replication by HTTP v13/veeam.backup.total.shared.size.31d)>0'
+      name: 'Some rolling backup size cannot be attributed to a protected object'
+      opdata: 'Coverage: {ITEM.LASTVALUE1}%'
+      priority: INFO
+      description: 'Some backup bytes are in shared or legacy chains and cannot be assigned safely to a single object. Check the shared/unassigned total.'
+      manual_close: 'YES'
+      tags:
+        - tag: scope
+          value: capacity

@@ -14,6 +14,11 @@ class HttpClient {
             throw new RuntimeException('HTTP URL is empty.');
         }
 
+        $scheme = strtolower((string) parse_url($url, PHP_URL_SCHEME));
+        if ($scheme !== 'http' && $scheme !== 'https') {
+            throw new RuntimeException('Only http and https URLs are allowed.');
+        }
+
         $timeout = max(1, (int) ($options['timeout'] ?? 10));
         $verify_peer = (bool) ($options['verify_peer'] ?? true);
         $headers = self::normalizeHeaders($options['headers'] ?? []);
@@ -93,6 +98,8 @@ class HttpClient {
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_CONNECTTIMEOUT => min(max(1, $timeout), 15),
             CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+            CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
             CURLOPT_SSL_VERIFYPEER => $verify_peer,
             CURLOPT_SSL_VERIFYHOST => $verify_peer ? 2 : 0
         ];

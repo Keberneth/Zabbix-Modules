@@ -61,7 +61,47 @@ class Storage {
             ')'
         );
 
+        self::ensureIndexes($pdo);
+
         $done = true;
+    }
+
+    /**
+     * Create the secondary indexes that sql/mysql.sql and sql/postgresql.sql declare so
+     * that auto-created tables match the shipped schema. MySQL does not support
+     * "CREATE INDEX IF NOT EXISTS", so a duplicate-index error (1061) is swallowed.
+     */
+    private static function ensureIndexes(PDO $pdo): void {
+        $driver = '';
+        try {
+            $driver = (string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+        }
+        catch (\Throwable $e) {
+            $driver = '';
+        }
+
+        $indexes = [
+            ['idx_module_healthcheck_run_checkid_started_at', self::RUN_TABLE, '(checkid, started_at)'],
+            ['idx_module_healthcheck_run_status_started_at', self::RUN_TABLE, '(status, started_at)'],
+            ['idx_module_healthcheck_run_started_at', self::RUN_TABLE, '(started_at)'],
+            ['idx_module_healthcheck_run_step_runid_order', self::STEP_TABLE, '(runid, step_order)'],
+            ['idx_module_healthcheck_run_step_checkid_started_at', self::STEP_TABLE, '(checkid, started_at)'],
+            ['idx_module_healthcheck_run_step_started_at', self::STEP_TABLE, '(started_at)']
+        ];
+
+        $supports_if_not_exists = ($driver === 'pgsql' || $driver === 'sqlite');
+
+        foreach ($indexes as [$name, $table, $columns]) {
+            $sql = 'CREATE INDEX '.($supports_if_not_exists ? 'IF NOT EXISTS ' : '')
+                .$name.' ON '.$table.' '.$columns;
+
+            try {
+                $pdo->exec($sql);
+            }
+            catch (\Throwable $e) {
+                // Index already exists (e.g. MySQL error 1061) — safe to ignore.
+            }
+        }
     }
 
     public static function insertRun(PDO $pdo, array $run): void {
@@ -175,6 +215,61 @@ class Storage {
         $row = $stmt->fetch();
 
         return $row ? self::hydrateRunRow($row) : null;
+    }
+
+    /**
+     * Return the latest run for each of the given check ids in a single grouped query
+     * (avoids an N+1 of getLatestRunByCheckId per check). Keyed by checkid.
+     *
+     * @return array<string, array>
+     */
+    public static function getLatestRunsByCheckIds(PDO $pdo, array $checkids): array {
+        self::ensureSchema($pdo);
+
+        $checkids = array_values(array_unique(array_filter(
+            array_map('strval', $checkids),
+            static function(string $value): bool {
+                return $value !== '';
+            }
+        )));
+
+        if ($checkids === []) {
+            return [];
+        }
+
+        $placeholders = [];
+        $params = [];
+
+        foreach ($checkids as $index => $checkid) {
+            $placeholder = ':cid_'.$index;
+            $placeholders[] = $placeholder;
+            $params[$placeholder] = $checkid;
+        }
+
+        $in = implode(', ', $placeholders);
+
+        $stmt = $pdo->prepare(
+            'SELECT r.* FROM '.self::RUN_TABLE.' r'.
+            ' INNER JOIN ('.
+                'SELECT checkid, MAX(started_at) AS max_started FROM '.self::RUN_TABLE.
+                ' WHERE checkid IN ('.$in.')'.
+                ' GROUP BY checkid'.
+            ') latest ON r.checkid = latest.checkid AND r.started_at = latest.max_started'
+        );
+        $stmt->execute($params);
+
+        $result = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $hydrated = self::hydrateRunRow($row);
+            $checkid = (string) ($hydrated['checkid'] ?? '');
+
+            // Guard against ties on started_at: keep the first row per checkid.
+            if ($checkid !== '' && !array_key_exists($checkid, $result)) {
+                $result[$checkid] = $hydrated;
+            }
+        }
+
+        return $result;
     }
 
     public static function getLatestRuns(PDO $pdo, int $limit = 50, string $checkid = ''): array {

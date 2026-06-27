@@ -15,7 +15,9 @@ Settings are stored in `local/conf/rebrand/config.json` and image files are serv
 | Footer text          | Bottom of every page                                  | —                |
 | Help URL             | "Help" link in the user menu                          | —                |
 
-Accepted image formats: SVG, PNG, JPG, GIF, ICO (favicon and compact icon only). Max file size: 2 MB.
+Accepted image formats: PNG, JPG, GIF, ICO (favicon and compact icon only). Max file size: 2 MB. SVG is intentionally not accepted, because an SVG can embed scripts that would run in the Zabbix origin when the file is served directly.
+
+> **Note on naming:** the module folder and menu item are called **Branding**, but the internal module id/name registered in Zabbix is **Rebrand** (folder `Branding` = module `Rebrand`). Storage paths use the `rebrand` name accordingly.
 
 ## Installation
 
@@ -70,14 +72,14 @@ If you're not on SELinux (e.g. Debian/Ubuntu), omit the `semanage`/`restorecon` 
 
 1. Log in to Zabbix as a Super Admin.
 2. Go to **Administration → General → Modules** and click **Scan directory**.
-3. Enable the **Rebrand** module.
-4. A new **Administration → Branding** menu item appears. Upload your assets there and click **Update**.
+3. Enable the **Rebrand** module (listed under its internal name; this is the **Branding** folder — see the naming note above).
+4. A new **Administration → Branding** menu item appears. Upload your assets there and click **Update**. Changes require a browser cache clear to take effect (the success message reminds you of this). Custom CSS in this page is theme-aware, so it renders correctly in both light and dark themes.
 
 ## Browser favicon (tab icon)
 
 The browser tab icon (`/favicon.ico` on the Zabbix domain) is served by the web server directly from the frontend root, and Zabbix's HTML references it with a hardcoded `<link rel="icon" href="favicon.ico">`. We don't patch Zabbix's HTML, so the way to override the tab icon is to **make `/usr/share/zabbix/favicon.ico` a symlink** pointing into the module's writable assets directory.
 
-The module always saves an uploaded favicon to `assets/logos/favicon.ico` (regardless of the original file's extension — browsers content-sniff, so PNG/SVG/ICO all render correctly from that path). Once the symlink is in place, every future upload automatically shows up as the browser tab icon.
+The module always saves an uploaded favicon to `assets/logos/favicon.ico` (regardless of the original file's extension — browsers content-sniff, so PNG/GIF/ICO all render correctly from that path). Once the symlink is in place, every future upload automatically shows up as the browser tab icon.
 
 Do this **after** uploading a favicon in the UI once (so that `assets/logos/favicon.ico` exists), then as root:
 

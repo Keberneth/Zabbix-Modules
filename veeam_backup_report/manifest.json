@@ -2,7 +2,7 @@
     "manifest_version": 2.0,
     "id": "veeam_backup_report",
     "name": "Veeam Backup Report",
-    "description": "Monthly backup size report module for the Veeam Backup and Replication by HTTP v13 template.",
+    "description": "Monthly backup size report module for the Veeam Backup and Replication by HTTP v13 template. Runs on single-server, multi-server (HA) and Docker Zabbix frontends.",
     "version": "1.0.0",
     "namespace": "VeeamBackupReport",
     "author": "Keberneth",

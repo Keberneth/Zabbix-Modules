@@ -13,11 +13,32 @@ use CController,
 class RunSync extends CController {
 
     public function init(): void {
-        $this->disableCsrfValidation();
+        // The runner (cron/systemd) cannot carry a CSRF token, so it authenticates
+        // with the shared secret instead. The interactive super-admin "Run now"
+        // button has no secret and MUST be CSRF-protected. Therefore disable CSRF
+        // validation ONLY when a valid shared secret is supplied; otherwise let the
+        // framework validate the _csrf_token the UI sends.
+        if ($this->hasValidSharedSecret()) {
+            $this->disableCsrfValidation();
+        }
     }
 
     protected function checkInput(): bool {
-        return true;
+        $fields = [
+            'force' => 'in 0,1',
+            'secret' => 'string'
+        ];
+
+        $ret = $this->validateInput($fields);
+
+        if (!$ret) {
+            $this->respond([
+                'ok' => false,
+                'error' => _('Invalid request parameters.')
+            ], 400);
+        }
+
+        return $ret;
     }
 
     protected function checkPermissions(): bool {
@@ -25,19 +46,12 @@ class RunSync extends CController {
             return true;
         }
 
-        $config = Config::sanitizeForRuntime(Config::get());
-
-        if (empty($config['runner']['enabled'])) {
-            return false;
-        }
-
-        $secret = $this->getProvidedSecret();
-        $expected = trim((string) ($config['runner']['shared_secret'] ?? ''));
-
-        return $secret !== '' && $expected !== '' && hash_equals($expected, $secret);
+        return $this->hasValidSharedSecret();
     }
 
     protected function doAction(): void {
+        set_time_limit(300);
+
         try {
             $config = Config::get();
             $is_super_admin = ($this->getUserType() == USER_TYPE_SUPER_ADMIN);
@@ -52,12 +66,42 @@ class RunSync extends CController {
                 'summary' => $summary
             ]);
         }
-        catch (\Throwable $e) {
+        catch (\InvalidArgumentException $e) {
             $this->respond([
                 'ok' => false,
-                'error' => Util::truncate($e->getMessage(), 2000)
+                'error' => $e->getMessage()
+            ], 400);
+        }
+        catch (\Throwable $e) {
+            error_log('NetBoxSync RunSync: '.$e->getMessage());
+            $this->respond([
+                'ok' => false,
+                'error' => _('An internal error occurred while running the sync. Check the server error log for details.')
             ], 500);
         }
+    }
+
+    /**
+     * True when the request carries a non-empty shared secret that matches the
+     * configured runner secret (constant-time compare). Used to gate both CSRF
+     * and the non-super-admin permission path.
+     */
+    private function hasValidSharedSecret(): bool {
+        try {
+            $config = Config::sanitizeForRuntime(Config::get());
+        }
+        catch (\Throwable $e) {
+            return false;
+        }
+
+        if (empty($config['runner']['enabled'])) {
+            return false;
+        }
+
+        $secret = $this->getProvidedSecret();
+        $expected = trim((string) ($config['runner']['shared_secret'] ?? ''));
+
+        return $secret !== '' && $expected !== '' && hash_equals($expected, $secret);
     }
 
     private function getProvidedSecret(): string {
@@ -81,9 +125,14 @@ class RunSync extends CController {
         http_response_code($http_status);
         header('Content-Type: application/json; charset=UTF-8');
 
+        $json = json_encode($payload, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if ($json === false) {
+            $json = '{"ok":false,"error":"Failed to encode response."}';
+        }
+
         $this->setResponse(
             (new CControllerResponseData([
-                'main_block' => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+                'main_block' => $json
             ]))->disableView()
         );
     }

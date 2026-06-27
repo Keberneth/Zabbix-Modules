@@ -4,13 +4,23 @@ declare(strict_types=1);
 /*
  * Optional local overrides for the Network Map module.
  *
- * Copy this file to config.local.php and adjust the values you need.
+ * This file ships as an EXAMPLE only. To customise a deployment, copy it to
+ * config.local.php in this same directory and edit the values you need:
+ *
+ *     cp config.local.php.example config.local.php
+ *
+ * config.local.php is intentionally git-ignored so per-environment paths and
+ * tuning never get committed back to the repository. If config.local.php is
+ * absent the built-in defaults (and any NETWORK_MAP_* environment variables)
+ * are used.
  */
 
 return [
     /*
-     * Writable cache directory for the web server user.
-    * Default if omitted: sys_get_temp_dir() . '/network-map'
+     * Writable cache directory for the web server / php-fpm user.
+     * Default if omitted: sys_get_temp_dir() . '/network-map'
+     * In Docker / multi-server installs point this at a per-host writable path
+     * (or a shared, writable volume) and make sure the web user owns it.
      */
     'cache_dir' => '/var/lib/zabbix/network-map-cache',
 
@@ -21,10 +31,11 @@ return [
     'history_window_hours' => 24,
 
     /*
-     * Maximum number of history rows read per matching item.
-     * Raise only if you know the item volume requires it.
+     * Maximum number of history rows processed per matching item.
+     * Raise only if you know the item volume requires it. The build also has a
+     * global hard ceiling of 200000 processed rows regardless of this value.
      */
-    'history_limit_per_item' => 100000,
+    'history_limit_per_item' => 50000,
 
     /*
      * Which Zabbix host field should be shown on the map for monitored nodes.

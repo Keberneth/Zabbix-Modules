@@ -5,7 +5,17 @@ namespace Modules\NetBoxSync\Lib;
 use RuntimeException;
 use Throwable;
 
+/**
+ * Core synchronization engine: iterates Zabbix hosts and applies the enabled
+ * built-in syncs and custom mappings against NetBox. Entry point is the static
+ * run(); per-sync handlers are syncVm..., syncDevice... and applyCustomMapping. The engine
+ * bulk-prefetches Zabbix item/interface data once per run (buildPrefetch) and
+ * caches cross-host NetBox lookups (platforms) to avoid N+1 round-trips.
+ */
 class SyncEngine {
+
+    /** Hard upper bound on hosts fetched/processed per run (memory + wall-clock guard). */
+    private const MAX_HOSTS_FETCH = 50000;
 
     private array $config;
     private StateStore $store;
@@ -15,6 +25,8 @@ class SyncEngine {
     private array $summary = [];
     private bool $force = false;
     private ?HostContext $current_host = null;
+    /** Run-wide NetBox platform-id cache (name does not vary per host). */
+    private array $platform_cache = [];
 
     public static function run(array $config, array $options = []): array {
         $engine = new self($config, $options);
@@ -65,6 +77,7 @@ class SyncEngine {
     }
 
     private function execute(): array {
+        set_time_limit(300);
         $started_at = microtime(true);
 
         try {
@@ -77,12 +90,23 @@ class SyncEngine {
 
             $this->ensureBuiltInCustomFields();
 
-            $hosts = $this->zabbix->getAllHosts();
             $max_hosts = (int) ($this->config['runner']['max_hosts_per_run'] ?? 0);
+            $fetch_limit = $max_hosts > 0 ? min($max_hosts, self::MAX_HOSTS_FETCH) : self::MAX_HOSTS_FETCH;
+
+            $hosts = $this->zabbix->getAllHosts($fetch_limit);
+
+            if (count($hosts) >= $fetch_limit) {
+                $this->note('Host fetch hit the '.$fetch_limit.'-host cap; some hosts may not have been processed this run.');
+            }
 
             $this->summary['hosts_total'] = count($hosts);
 
-            foreach ($hosts as $index => $host) {
+            // Bulk-prefetch Zabbix item/interface data for every target host so the
+            // standard syncs read prefilled maps instead of issuing one API call per
+            // host (the classic N+1). Falls back to lazy per-host lookups on failure.
+            $prefetch = $this->buildPrefetch($hosts);
+
+            foreach ($hosts as $host) {
                 if ($max_hosts > 0 && $this->summary['hosts_processed'] >= $max_hosts) {
                     $this->note('Reached max_hosts_per_run limit; remaining hosts skipped.');
                     break;
@@ -97,6 +121,10 @@ class SyncEngine {
                 }
 
                 $ctx = new HostContext($host, $this->zabbix, $this->config);
+
+                if ($prefetch !== null) {
+                    $ctx->seedPrefetch($this->hostBundle($prefetch, $hostid));
+                }
 
                 try {
                     $this->processHost($ctx);
@@ -144,6 +172,174 @@ class SyncEngine {
         }
 
         return $this->summary;
+    }
+
+    /**
+     * Resolve, in a handful of batched API calls, every Zabbix item/interface the
+     * configured syncs will need across ALL target hosts. Returns the raw maps
+     * (keyed by hostid) plus the requested selector lists, or null if the prefetch
+     * could not run (callers then fall back to lazy per-host lookups).
+     */
+    private function buildPrefetch(array $hosts): ?array {
+        try {
+            $hostids = [];
+            foreach ($hosts as $host) {
+                $hostid = (string) ($host['hostid'] ?? '');
+                if ($hostid !== '') {
+                    $hostids[] = $hostid;
+                }
+            }
+
+            if ($hostids === []) {
+                return null;
+            }
+
+            [$keys, $names] = $this->collectItemSelectors();
+            $searches = $this->collectSearchPatterns();
+
+            $search_results = [];
+            foreach ($searches as $search) {
+                $cache_key = HostContext::searchCacheKey($search['pattern'], $search['extra']);
+                $search_results[$cache_key] = $this->zabbix->searchItemsByKeyForHosts(
+                    $hostids, $search['pattern'], $search['extra']
+                );
+            }
+
+            return [
+                'keys' => $keys,
+                'names' => $names,
+                'key_map' => $this->zabbix->getItemsByExactKeys($hostids, $keys),
+                'name_map' => $this->zabbix->getItemsByExactNames($hostids, $names),
+                'iface_map' => $this->zabbix->getInterfacesForHosts($hostids),
+                'search_results' => $search_results
+            ];
+        }
+        catch (Throwable $e) {
+            $this->log('warning', 'Bulk prefetch failed; falling back to per-host lookups.', [
+                'error' => $e->getMessage()
+            ]);
+
+            return null;
+        }
+    }
+
+    /** Build the per-host seed bundle from the run-wide prefetch maps. */
+    private function hostBundle(array $prefetch, string $hostid): array {
+        $keys = array_fill_keys($prefetch['keys'], null);
+        foreach (($prefetch['key_map'][$hostid] ?? []) as $key => $item) {
+            $keys[(string) $key] = $item;
+        }
+
+        $names = array_fill_keys($prefetch['names'], null);
+        foreach (($prefetch['name_map'][$hostid] ?? []) as $name => $item) {
+            $names[(string) $name] = $item;
+        }
+
+        $searches = [];
+        foreach ($prefetch['search_results'] as $cache_key => $by_host) {
+            $searches[$cache_key] = $by_host[$hostid] ?? [];
+        }
+
+        return [
+            'keys' => $keys,
+            'names' => $names,
+            'searches' => $searches,
+            'agent_interface' => ZabbixApiClient::pickMainAgentInterface($prefetch['iface_map'][$hostid] ?? [])
+        ];
+    }
+
+    /**
+     * Derive the exact item keys and names referenced by the enabled config so the
+     * prefetch can request them in bulk. Over-collecting is harmless (lazy fallback
+     * covers anything missed); every requested selector is seeded per host so a
+     * "no such item" miss never triggers a per-host API call.
+     *
+     * @return array{0: string[], 1: string[]} [keys, names]
+     */
+    private function collectItemSelectors(): array {
+        $vm = $this->config['vm'] ?? [];
+        $keys = [
+            (string) ($vm['os_fallback_item_key'] ?? ''),
+            (string) ($vm['linux_cpu_item_key'] ?? ''),
+            (string) ($vm['windows_cpu_item_key'] ?? ''),
+            (string) ($vm['memory_item_key'] ?? ''),
+            (string) ($vm['sql_version_item_key'] ?? '')
+        ];
+        $names = [
+            (string) ($vm['os_pretty_name_item_name'] ?? ''),
+            (string) ($this->config['services']['windows_item_name'] ?? ''),
+            (string) ($this->config['services']['linux_item_name'] ?? '')
+        ];
+
+        $device = $this->config['device'] ?? [];
+        $device_pairs = [
+            ['name_source_mode', 'name_source_value'],
+            ['manufacturer_source_mode', 'manufacturer_source_value'],
+            ['model_source_mode', 'model_source_value'],
+            ['serial_source_mode', 'serial_source_value']
+        ];
+        foreach ($device_pairs as [$mode_key, $value_key]) {
+            $this->addSelector($keys, $names, (string) ($device[$mode_key] ?? ''), (string) ($device[$value_key] ?? ''));
+        }
+
+        foreach (($this->config['custom_mappings'] ?? []) as $mapping) {
+            if (!is_array($mapping)) {
+                continue;
+            }
+            $this->addSelector($keys, $names,
+                (string) ($mapping['source_mode'] ?? ''),
+                (string) ($mapping['source_value'] ?? '')
+            );
+            $this->addSelector($keys, $names,
+                (string) ($mapping['relation_manufacturer_source_mode'] ?? ''),
+                (string) ($mapping['relation_manufacturer_source_value'] ?? '')
+            );
+        }
+
+        $keys = array_values(array_unique(array_filter($keys, static fn($k) => $k !== '')));
+        $names = array_values(array_unique(array_filter($names, static fn($n) => $n !== '')));
+
+        return [$keys, $names];
+    }
+
+    private function addSelector(array &$keys, array &$names, string $mode, string $value): void {
+        if ($value === '') {
+            return;
+        }
+        if ($mode === 'item_key') {
+            $keys[] = $value;
+        }
+        elseif ($mode === 'item_name') {
+            $names[] = $value;
+        }
+    }
+
+    /**
+     * Key-search patterns (disks, interfaces) needed by the VM syncs. The interface
+     * search must carry the same selectTags extra as HostContext so the prefetch
+     * cache key matches.
+     *
+     * @return array<int, array{pattern: string, extra: array}>
+     */
+    private function collectSearchPatterns(): array {
+        $vm = $this->config['vm'] ?? [];
+        $patterns = [];
+
+        $windows = (string) ($vm['windows_disk_search'] ?? '');
+        $linux = (string) ($vm['linux_disk_search'] ?? '');
+        $interface = (string) ($vm['interface_search'] ?? '');
+
+        if ($windows !== '') {
+            $patterns[] = ['pattern' => $windows, 'extra' => []];
+        }
+        if ($linux !== '') {
+            $patterns[] = ['pattern' => $linux, 'extra' => []];
+        }
+        if ($interface !== '') {
+            $patterns[] = ['pattern' => $interface, 'extra' => ['selectTags' => 'extend']];
+        }
+
+        return $patterns;
     }
 
     private function processHost(HostContext $ctx): void {
@@ -338,15 +534,7 @@ class SyncEngine {
             }
         }
 
-        $platform_id = null;
-        if ($platform_name !== '') {
-            try {
-                $platform_id = $this->netbox->getPlatformIdByName($platform_name);
-            }
-            catch (Throwable $e) {
-                $platform_id = null;
-            }
-        }
+        $platform_id = $this->platformIdByName($platform_name);
 
         $resolved = $this->findExistingVmByCandidate($ctx);
         $vcpus = (int) ($cpu_memory['vcpus'] ?? 0);
@@ -1161,8 +1349,7 @@ class SyncEngine {
         $host_regex = trim((string) ($mapping['host_name_regex'] ?? ''));
 
         if ($host_regex !== '') {
-            $ok = @preg_match($host_regex, $ctx->hostName());
-            if ($ok !== 1) {
+            if (!$this->hostRegexMatches($host_regex, $ctx->hostName())) {
                 $this->summary['skipped']++;
                 return false;
             }
@@ -1679,6 +1866,51 @@ class SyncEngine {
         }
 
         return trim((string) $value);
+    }
+
+    /** Resolve a NetBox platform id by name, cached for the whole run. */
+    private function platformIdByName(string $name): ?int {
+        $name = trim($name);
+
+        if ($name === '') {
+            return null;
+        }
+
+        if (!array_key_exists($name, $this->platform_cache)) {
+            try {
+                $this->platform_cache[$name] = $this->netbox->getPlatformIdByName($name);
+            }
+            catch (Throwable $e) {
+                $this->platform_cache[$name] = null;
+            }
+        }
+
+        return $this->platform_cache[$name];
+    }
+
+    /**
+     * Evaluate an admin-supplied host_name regex under ReDoS guards: cap the
+     * pattern length, tighten PCRE backtrack/recursion limits, and reject any
+     * pattern that fails to compile (@preg_match(...,'') === false) before running
+     * it against the host name.
+     */
+    private function hostRegexMatches(string $regex, string $host): bool {
+        if ($regex === '') {
+            return true;
+        }
+
+        if (Util::strLen($regex) > 255) {
+            return false;
+        }
+
+        ini_set('pcre.backtrack_limit', '100000');
+        ini_set('pcre.recursion_limit', '10000');
+
+        if (@preg_match($regex, '') === false) {
+            return false;
+        }
+
+        return @preg_match($regex, $host) === 1;
     }
 
     private function recordEvent(string $type, array $event): void {

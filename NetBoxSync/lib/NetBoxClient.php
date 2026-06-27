@@ -4,6 +4,13 @@ namespace Modules\NetBoxSync\Lib;
 
 use RuntimeException;
 
+/**
+ * Thin NetBox REST client. Each public method maps to one NetBox endpoint
+ * (VMs, virtual disks/interfaces, IPs, prefixes, services, devices, device
+ * types, manufacturers, custom fields). request() is the single cURL chokepoint;
+ * its exception messages may embed the request URL and NetBox response body, so
+ * callers MUST log them server-side and return a generic message to clients.
+ */
 class NetBoxClient {
 
     private string $base_url;

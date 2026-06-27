@@ -42,6 +42,22 @@ class ReportDownload extends CController {
     }
 
     protected function doAction(): void {
+        set_time_limit(300);
+
+        try {
+            $this->streamReport();
+        }
+        catch (\InvalidArgumentException $e) {
+            error_log('VeeamBackupReport: '.$e->getMessage());
+            $this->respondError(400, _('The download request was invalid.'));
+        }
+        catch (\Throwable $e) {
+            error_log('VeeamBackupReport: '.$e->getMessage());
+            $this->respondError(500, _('An internal error occurred while generating the download.'));
+        }
+    }
+
+    private function streamReport(): void {
         $helper = new ReportDataHelper();
 
         $filter = ReportDataHelper::normalizeFilter([
@@ -208,13 +224,50 @@ class ReportDownload extends CController {
         }
 
         fwrite($fp, "\xEF\xBB\xBF");
-        fputcsv($fp, $header);
+        fputcsv($fp, array_map([$this, 'csvSafe'], $header));
 
         foreach ($rows as $row) {
-            fputcsv($fp, $row);
+            fputcsv($fp, array_map([$this, 'csvSafe'], $row));
         }
 
         fclose($fp);
+        exit;
+    }
+
+    /**
+     * Neutralize CSV formula injection: any cell that begins with a spreadsheet
+     * formula trigger (=, +, -, @) or a control character (tab, CR) is prefixed
+     * with an apostrophe so spreadsheet apps treat it as literal text.
+     */
+    private function csvSafe($value): string {
+        $value = (string) $value;
+
+        if ($value === '') {
+            return $value;
+        }
+
+        $first = $value[0];
+        // Always neutralise the unambiguous formula/control prefixes.
+        if ($first === '=' || $first === '@' || $first === "\t" || $first === "\r") {
+            return "'".$value;
+        }
+        // A leading +/- is only dangerous when the cell is not a plain number;
+        // negative metrics (e.g. -1024) must stay numeric for spreadsheets.
+        if (($first === '+' || $first === '-') && !is_numeric($value)) {
+            return "'".$value;
+        }
+
+        return $value;
+    }
+
+    private function respondError(int $code, string $message): void {
+        if (!headers_sent()) {
+            http_response_code($code);
+            header('Content-Type: text/plain; charset=UTF-8');
+            header('Cache-Control: no-cache, no-store, must-revalidate');
+        }
+
+        echo $message;
         exit;
     }
 }

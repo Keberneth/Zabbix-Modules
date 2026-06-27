@@ -58,10 +58,6 @@
     root.classList.add("knm-root");
     root.innerHTML = `
       <section class="knm-panel">
-        <div class="knm-panel-header">
-          <h2>Network map</h2>
-        </div>
-
         <div class="knm-form-grid">
           <label class="knm-form-field">
             <span>Host scope</span>
@@ -563,7 +559,7 @@
       }
     }
 
-        const root = state.root || getEl("network-map-root");
+    const date = new Date(value);
 
     if (!Number.isNaN(date.getTime())) {
       return date.toLocaleString();
@@ -590,15 +586,39 @@
     return `${Math.round(value / 3600)}h`;
   }
 
-  function setStatus(message, isError = false) {
+  function setStatus(message, kind = "info") {
     const status = getEl("knm-dataStatus");
 
     if (!status) {
       return;
     }
 
+    // Backwards-compatible: a boolean still means "error / not error".
+    if (kind === true) {
+      kind = "error";
+    } else if (kind === false) {
+      kind = "info";
+    }
+
     status.textContent = message;
-    status.classList.toggle("knm-status-error", !!isError);
+    status.classList.remove(
+      "knm-status-error",
+      "knm-banner",
+      "knm-banner-loading",
+      "knm-banner-error",
+      "knm-banner-warning",
+      "knm-banner-empty"
+    );
+
+    if (kind === "error") {
+      status.classList.add("knm-banner", "knm-banner-error", "knm-status-error");
+    } else if (kind === "warning") {
+      status.classList.add("knm-banner", "knm-banner-warning");
+    } else if (kind === "loading") {
+      status.classList.add("knm-banner", "knm-banner-loading");
+    } else if (kind === "empty") {
+      status.classList.add("knm-banner", "knm-banner-empty");
+    }
   }
 
   function buildStatusText(meta) {
@@ -631,14 +651,8 @@
       parts.push("Cache: fresh");
     }
 
-    if (meta.stale) {
-      parts.push("Using stale cache");
-    }
-
-    if (meta.warning) {
-      parts.push(`Warning: ${meta.warning}`);
-    }
-
+    // meta.stale / meta.warning / meta.limit_reached are surfaced as a
+    // dedicated warning banner by the caller instead of inline text.
     return parts.join(" | ");
   }
 
@@ -842,8 +856,25 @@
 
       populateHostSelect(payload.nodes);
 
-      const statusText = buildStatusText(payload.meta || {});
-      setStatus(statusText || "Network map loaded.");
+      const meta = payload.meta || {};
+      const statusText = buildStatusText(meta);
+      const suffix = statusText ? ` | ${statusText}` : "";
+
+      if (meta.stale) {
+        setStatus(
+          (meta.warning || "Showing stale cached data; the refresh failed.") + suffix,
+          "warning"
+        );
+      } else if (meta.limit_reached) {
+        setStatus(
+          "Row limit reached; the map may be truncated. Narrow the history window." + suffix,
+          "warning"
+        );
+      } else if (meta.warning) {
+        setStatus(meta.warning + suffix, "warning");
+      } else {
+        setStatus(statusText || "Network map loaded.");
+      }
 
       if (redraw) {
         applyFiltersAndDraw({ showNoEdgesAlert });
@@ -938,7 +969,7 @@
 
     if (refreshButton) {
       refreshButton.addEventListener("click", () => {
-        setStatus("Refreshing data…");
+        setStatus("Refreshing data…", "loading");
         fetchNetworkMap({
           force: true,
           redraw: true,
@@ -1081,7 +1112,7 @@
 
     state.initialized = true;
 
-    setStatus("Loading network map…");
+    setStatus("Loading network map…", "loading");
 
     fetchNetworkMap({
       force: false,

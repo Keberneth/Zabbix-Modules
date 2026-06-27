@@ -11,9 +11,20 @@ class RebrandConfigUpdate extends CController {
 
 	use RebrandStorageTrait;
 
-	public function init(): void {
-		$this->disableCsrfValidation();
-	}
+	/**
+	 * Server-side hard cap for the free-text footer. The textbox advertises 128
+	 * characters client-side; this enforces the same bound on the server so the
+	 * value written into brand.conf.php (and later echoed by CBrandHelper) is
+	 * bounded regardless of the client.
+	 */
+	private const MAX_FOOTER_LENGTH = 128;
+
+	/**
+	 * CSRF validation is intentionally left enabled (the framework default) for
+	 * this state-changing action: it writes local/conf/brand.conf.php and accepts
+	 * file uploads. The rebrand.config view emits the matching _csrf_token via
+	 * CCsrfTokenHelper::get('rebrand.config.update') so the framework can validate it.
+	 */
 
 	protected function checkInput(): bool {
 		$fields = [
@@ -27,6 +38,10 @@ class RebrandConfigUpdate extends CController {
 		];
 
 		$ret = $this->validateInput($fields);
+
+		if ($ret && mb_strlen($this->getInput('brand_footer', '')) > self::MAX_FOOTER_LENGTH) {
+			$ret = false;
+		}
 
 		if (!$ret) {
 			$response = new CControllerResponseRedirect(
@@ -45,6 +60,8 @@ class RebrandConfigUpdate extends CController {
 	}
 
 	protected function doAction(): void {
+		set_time_limit(300);
+
 		$redirect = new CUrl('zabbix.php');
 		$redirect->setArgument('action', 'rebrand.config');
 		$response = new CControllerResponseRedirect($redirect);

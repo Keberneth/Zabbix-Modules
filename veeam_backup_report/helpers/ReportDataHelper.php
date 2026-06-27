@@ -17,6 +17,28 @@ class ReportDataHelper {
     private const SOURCE_HISTORY = 'history';
     private const SOURCE_TRENDS = 'trends';
 
+    /** Auto mode switches to trends once the range exceeds this many days. */
+    private const AUTO_TRENDS_DAYS = 7;
+
+    /** Even explicit History mode falls back to trends past this many days to bound row volume. */
+    private const HISTORY_MAX_DAYS = 31;
+
+    /** Item-id chunk size for history/trend fetches. */
+    private const FETCH_CHUNK = 100;
+
+    /** Soft per-item row budget used to size the API 'limit' on each chunked fetch. */
+    private const MAX_ROWS_PER_ITEM = 50000;
+
+    /** Hard upper bound on rows transferred per API call. */
+    private const MAX_FETCH_ROWS = 2000000;
+
+    /** True when any history/trend fetch hit its row cap (results may be partial). */
+    private bool $limit_reached = false;
+
+    /** Repository top-N accounting for the "showing top N" notice. */
+    private int $repo_filtered = 0;
+    private int $repo_shown = 0;
+
     private const METRIC_24H = 'size24h';
     private const METRIC_31D = 'size31d';
 
@@ -211,6 +233,10 @@ class ReportDataHelper {
      * Main report builder.
      */
     public function buildReport(array $filter, int $time_from, int $time_to): array {
+        $this->limit_reached = false;
+        $this->repo_filtered = 0;
+        $this->repo_shown = 0;
+
         $host_options = $this->getAvailableHosts();
         $selected_hostids = $filter['hostids'] !== []
             ? array_values(array_intersect($filter['hostids'], array_keys($host_options)))
@@ -249,7 +275,8 @@ class ReportDataHelper {
             $time_from,
             $time_to,
             $report['source_used'],
-            $filter['repo_search']
+            $filter['repo_search'],
+            $filter['top']
         );
         $object_rows_info = $this->buildObjectRows(
             $classified['objects'],
@@ -278,6 +305,27 @@ class ReportDataHelper {
 
         if ($report['source_used'] === self::SOURCE_TRENDS) {
             $report['warnings'][] = _('Trend mode uses Zabbix hourly trend buckets. Daily end values are estimated from the last hourly average in the day, not from the exact last raw sample.');
+        }
+
+        if ($filter['source'] === self::SOURCE_HISTORY && $report['source_used'] === self::SOURCE_TRENDS) {
+            $report['warnings'][] = sprintf(
+                _('History was requested, but the selected range exceeds %1$d days. Trend data is used instead to keep the report responsive.'),
+                self::HISTORY_MAX_DAYS
+            );
+        }
+
+        if ($this->repo_filtered > $this->repo_shown) {
+            $report['warnings'][] = sprintf(
+                _('Only the top %1$d repositories are shown. Increase the limit to see more.'),
+                $filter['top']
+            );
+        }
+
+        if ($this->limit_reached) {
+            $report['warnings'][] = sprintf(
+                _('Some series hit the %1$s-row fetch cap and may be partial. Narrow the period or switch to trend mode.'),
+                number_format(self::MAX_FETCH_ROWS, 0, '.', ' ')
+            );
         }
 
         if ($filter['object_search'] !== '') {
@@ -467,18 +515,18 @@ class ReportDataHelper {
 <meta charset="UTF-8">
 <title><?php echo self::h($title); ?></title>
 <style>
-body { font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #111827; margin: 24px; }
-h1, h2, h3 { color: #0f172a; }
+body { font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #1f2b3a; margin: 24px; }
+h1, h2, h3 { color: #2a3441; }
 table { width: 100%; border-collapse: collapse; margin-bottom: 22px; }
-th, td { border: 1px solid #d1d5db; padding: 6px 8px; text-align: left; vertical-align: top; }
-th { background: #f3f4f6; }
+th, td { border: 1px solid #e7edf4; padding: 9px 10px; text-align: left; vertical-align: top; }
+th { background: #f7f9fb; color: #2a3441; }
 .summary-grid { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 22px; }
-.card { border: 1px solid #d1d5db; border-radius: 8px; padding: 12px; min-width: 220px; }
-.label { color: #6b7280; font-size: 12px; margin-bottom: 6px; }
-.value { font-size: 24px; font-weight: bold; }
-.sub { color: #4b5563; margin-top: 6px; }
-.note { background: #eff6ff; border: 1px solid #bfdbfe; padding: 10px 12px; border-radius: 8px; margin-bottom: 18px; }
-.warn { background: #fffbeb; border-color: #fcd34d; }
+.card { border: 1px solid #dfe4ec; border-radius: 4px; padding: 16px; min-width: 220px; }
+.label { color: #5c6b7a; font-size: 12px; margin-bottom: 6px; }
+.value { font-size: 24px; font-weight: bold; color: #1f2b3a; }
+.sub { color: #5c6b7a; margin-top: 6px; }
+.note { background: #f7f9fc; border: 1px solid #dfe4ec; color: #34485f; padding: 10px 12px; border-radius: 4px; margin-bottom: 18px; }
+.warn { background: #fff7e6; border-color: #f1d59c; color: #7a5a12; }
 </style>
 </head>
 <body>
@@ -670,11 +718,22 @@ th { background: #f3f4f6; }
      * Resolve the source mode.
      */
     private function resolveSource(string $requested, int $time_from, int $time_to): string {
-        if ($requested !== self::SOURCE_AUTO) {
-            return $requested;
+        $span = $time_to - $time_from;
+
+        if ($requested === self::SOURCE_TRENDS) {
+            return self::SOURCE_TRENDS;
         }
 
-        return ($time_to - $time_from) > 7 * 86400
+        if ($requested === self::SOURCE_HISTORY) {
+            // Even when History is explicitly requested, prefer trends for wide
+            // ranges so we never pull an unbounded raw-history result set.
+            return $span > self::HISTORY_MAX_DAYS * 86400
+                ? self::SOURCE_TRENDS
+                : self::SOURCE_HISTORY;
+        }
+
+        // Auto.
+        return $span > self::AUTO_TRENDS_DAYS * 86400
             ? self::SOURCE_TRENDS
             : self::SOURCE_HISTORY;
     }
@@ -787,24 +846,47 @@ th { background: #f3f4f6; }
      * Build the daily totals block from per-host global items.
      */
     private function buildDailyTotals(array $sources, int $time_from, int $time_to, string $source_mode): array {
-        $metric_items = [
-            self::METRIC_24H => [],
-            self::METRIC_31D => [],
-            'assigned31d' => [],
-            'shared31d' => []
-        ];
+        $fields = [self::METRIC_24H, self::METRIC_31D, 'assigned31d', 'shared31d'];
+
+        // Collect every metric item across all four fields into a single batch
+        // keyed by item-id, plus a field/host -> item-id map to reassemble later.
+        $all_items_by_id = [];
+        $field_host_itemid = [];
 
         foreach ($sources as $source) {
-            foreach (array_keys($metric_items) as $field) {
-                if (isset($source['items'][$field])) {
-                    $metric_items[$field][$source['hostid']] = $source['items'][$field];
+            foreach ($fields as $field) {
+                if (!isset($source['items'][$field])) {
+                    continue;
                 }
+
+                $item = $source['items'][$field];
+                $itemid = (string) $item['itemid'];
+                $all_items_by_id[$itemid] = $item;
+                $field_host_itemid[$field][$source['hostid']] = $itemid;
             }
         }
 
+        // One chunked History/Trend round-trip for all four metric fields.
+        $rows_by_itemid = $this->fetchNumericRows($all_items_by_id, $time_from, $time_to, $source_mode);
+
+        $series_by_itemid = [];
+        foreach ($all_items_by_id as $itemid => $item) {
+            $series_by_itemid[$itemid] = $this->buildItemDailySeries(
+                $rows_by_itemid[$itemid] ?? [],
+                $item,
+                $time_from,
+                $time_to,
+                $source_mode
+            );
+        }
+
+        // Reassemble the per-field, per-host series the rest of the method expects.
         $series = [];
-        foreach ($metric_items as $field => $items) {
-            $series[$field] = $this->fetchDailySeriesByEntity($items, $time_from, $time_to, $source_mode);
+        foreach ($fields as $field) {
+            $series[$field] = [];
+            foreach (($field_host_itemid[$field] ?? []) as $hostid => $itemid) {
+                $series[$field][$hostid] = $series_by_itemid[$itemid];
+            }
         }
 
         $days = [];
@@ -919,7 +1001,8 @@ th { background: #f3f4f6; }
         int $time_from,
         int $time_to,
         string $source_mode,
-        string $search
+        string $search,
+        int $top
     ): array {
         if ($repositories === []) {
             return [];
@@ -938,6 +1021,18 @@ th { background: #f3f4f6; }
 
             $filtered_entities[$entity_id] = $repository;
         }
+
+        $this->repo_filtered = count($filtered_entities);
+
+        // Pre-sort by current metric value and keep only the top-N before pulling
+        // any history/trend series, mirroring the protected-objects path.
+        uasort($filtered_entities, function(array $a, array $b) use ($metric): int {
+            return $this->sortDescByNumeric(
+                $this->itemLastNumeric($a['items'][$metric] ?? null),
+                $this->itemLastNumeric($b['items'][$metric] ?? null)
+            );
+        });
+        $filtered_entities = array_slice($filtered_entities, 0, $top, true);
 
         $metric_items = [];
         foreach ($filtered_entities as $entity_id => $repository) {
@@ -975,6 +1070,8 @@ th { background: #f3f4f6; }
         }
 
         usort($rows, fn(array $a, array $b): int => $this->sortDescByNumeric($a['metric_end'], $b['metric_end']));
+
+        $this->repo_shown = count($rows);
 
         return $rows;
     }
@@ -1163,33 +1260,46 @@ th { background: #f3f4f6; }
         $series_by_entity = [];
         foreach ($items_by_id as $itemid => $item) {
             $entity_id = $entity_by_itemid[$itemid];
-            $rows = $rows_by_itemid[$itemid] ?? [];
-            $daily_series = $source_mode === self::SOURCE_TRENDS
-                ? $this->aggregateTrendRowsByDay($rows)
-                : $this->aggregateHistoryRowsByDay($rows);
-
-            if ($daily_series === []) {
-                $last_clock = (int) ($item['lastclock'] ?? 0);
-                $last_value = $this->itemLastNumeric($item);
-
-                if ($last_clock >= $time_from && $last_clock <= $time_to && $last_value !== null) {
-                    $date = date('Y-m-d', $last_clock);
-                    $daily_series[$date] = [
-                        'date' => $date,
-                        'min' => $last_value,
-                        'max' => $last_value,
-                        'avg' => $last_value,
-                        'last' => $last_value,
-                        'last_clock' => $last_clock,
-                        'points' => 1
-                    ];
-                }
-            }
-
-            $series_by_entity[$entity_id] = $daily_series;
+            $series_by_entity[$entity_id] = $this->buildItemDailySeries(
+                $rows_by_itemid[$itemid] ?? [],
+                $item,
+                $time_from,
+                $time_to,
+                $source_mode
+            );
         }
 
         return $series_by_entity;
+    }
+
+    /**
+     * Aggregate one item's fetched rows into a daily series, falling back to the
+     * item's last value when no history/trend rows fall inside the range.
+     */
+    private function buildItemDailySeries(array $rows, array $item, int $time_from, int $time_to, string $source_mode): array {
+        $daily_series = $source_mode === self::SOURCE_TRENDS
+            ? $this->aggregateTrendRowsByDay($rows)
+            : $this->aggregateHistoryRowsByDay($rows);
+
+        if ($daily_series === []) {
+            $last_clock = (int) ($item['lastclock'] ?? 0);
+            $last_value = $this->itemLastNumeric($item);
+
+            if ($last_clock >= $time_from && $last_clock <= $time_to && $last_value !== null) {
+                $date = date('Y-m-d', $last_clock);
+                $daily_series[$date] = [
+                    'date' => $date,
+                    'min' => $last_value,
+                    'max' => $last_value,
+                    'avg' => $last_value,
+                    'last' => $last_value,
+                    'last_clock' => $last_clock,
+                    'points' => 1
+                ];
+            }
+        }
+
+        return $daily_series;
     }
 
     /**
@@ -1206,15 +1316,22 @@ th { background: #f3f4f6; }
         }
 
         if ($source_mode === self::SOURCE_TRENDS) {
-            foreach (array_chunk(array_keys($items_by_id), 100) as $chunk) {
+            foreach (array_chunk(array_keys($items_by_id), self::FETCH_CHUNK) as $chunk) {
+                $limit = $this->chunkRowLimit(count($chunk));
+
                 $rows = API::Trend()->get([
                     'output' => ['itemid', 'clock', 'num', 'value_min', 'value_avg', 'value_max'],
                     'itemids' => $chunk,
                     'time_from' => $time_from,
                     'time_till' => $time_to,
                     'sortfield' => 'clock',
-                    'sortorder' => 'ASC'
+                    'sortorder' => 'ASC',
+                    'limit' => $limit
                 ]);
+
+                if (count($rows) >= $limit) {
+                    $this->limit_reached = true;
+                }
 
                 foreach ($rows as $row) {
                     $itemid = (string) $row['itemid'];
@@ -1241,7 +1358,9 @@ th { background: #f3f4f6; }
                 continue;
             }
 
-            foreach (array_chunk($itemids, 100) as $chunk) {
+            foreach (array_chunk($itemids, self::FETCH_CHUNK) as $chunk) {
+                $limit = $this->chunkRowLimit(count($chunk));
+
                 $rows = API::History()->get([
                     'output' => ['itemid', 'clock', 'value'],
                     'history' => $history_type,
@@ -1249,8 +1368,13 @@ th { background: #f3f4f6; }
                     'time_from' => $time_from,
                     'time_till' => $time_to,
                     'sortfield' => 'clock',
-                    'sortorder' => 'ASC'
+                    'sortorder' => 'ASC',
+                    'limit' => $limit
                 ]);
+
+                if (count($rows) >= $limit) {
+                    $this->limit_reached = true;
+                }
 
                 foreach ($rows as $row) {
                     $itemid = (string) $row['itemid'];
@@ -1260,6 +1384,15 @@ th { background: #f3f4f6; }
         }
 
         return $rows_by_itemid;
+    }
+
+    /**
+     * Per-chunk API 'limit': scale by item count but never exceed the hard cap.
+     */
+    private function chunkRowLimit(int $chunk_size): int {
+        $limit = self::MAX_ROWS_PER_ITEM * max(1, $chunk_size);
+
+        return $limit > self::MAX_FETCH_ROWS ? self::MAX_FETCH_ROWS : $limit;
     }
 
     /**

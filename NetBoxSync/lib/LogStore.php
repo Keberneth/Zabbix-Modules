@@ -21,6 +21,21 @@ class LogStore {
     private const MAX_ROWS_SCAN = 20000;
     private const MAX_FILES = 366;
 
+    /** Fields exposed as multi-select facets (exact match). */
+    private const FACET_FIELDS = ['host', 'os', 'target_type', 'sync_id', 'field', 'disk_name'];
+
+    /** Value fields scanned by the free-text "q" box (never field names/keys). */
+    private const Q_FIELDS = [
+        'host', 'os', 'sync_id', 'target_type', 'target_name',
+        'field', 'old_value', 'new_value', 'message', 'disk_name'
+    ];
+
+    /** Columns that accept a per-column substring filter. */
+    private const COL_FIELDS = [
+        'timestamp', 'host', 'os', 'sync_id', 'target_type', 'target_name',
+        'field', 'old_value', 'new_value', 'message', 'disk_name', 'hostid'
+    ];
+
     private string $log_path;
     private string $events_path;
 
@@ -31,6 +46,16 @@ class LogStore {
 
     public function eventsPath(): string {
         return $this->events_path;
+    }
+
+    /** Facet field names exposed to the UI as multi-selects (exact match). */
+    public static function facetFields(): array {
+        return self::FACET_FIELDS;
+    }
+
+    /** Column names that accept a per-column substring filter. */
+    public static function columnFields(): array {
+        return self::COL_FIELDS;
     }
 
     public function isConfigured(): bool {
@@ -97,13 +122,26 @@ class LogStore {
         );
     }
 
-    public function query(array $filters = [], int $limit = 500, int $offset = 0): array {
+    /**
+     * Fetch a window of log rows for one tab (type) and, in the SAME file scan,
+     * tally the facet value lists. Facets are computed over the type-filtered set
+     * (independent of the exact/column/text filters) so the multi-selects keep
+     * offering every value available for the tab. Returns items, paging metadata
+     * and the formatted facets.
+     */
+    public function query(array $filters = [], int $limit = 250, int $offset = 0): array {
         $limit = max(1, min(2000, $limit));
         $offset = max(0, $offset);
 
         $files = $this->collectLogFiles($filters['since'] ?? '', $filters['until'] ?? '');
-        $matches = [];
+        $type = strtolower((string) ($filters['type'] ?? ''));
+
+        $facet_tally = array_fill_keys(self::FACET_FIELDS, []);
+        $matched = [];
+        $matched_count = 0;
+        $window = $offset + $limit + 1;
         $scanned = 0;
+        $capped = false;
 
         foreach ($files as $file) {
             $lines = @file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
@@ -114,6 +152,7 @@ class LogStore {
             for ($i = count($lines) - 1; $i >= 0; $i--) {
                 $scanned++;
                 if ($scanned > self::MAX_ROWS_SCAN) {
+                    $capped = true;
                     break 2;
                 }
 
@@ -122,37 +161,51 @@ class LogStore {
                     continue;
                 }
 
-                if (!$this->matches($decoded, $filters)) {
+                if ($type !== '' && strtolower((string) ($decoded['type'] ?? '')) !== $type) {
                     continue;
                 }
 
-                $matches[] = $decoded;
-                if (count($matches) >= $offset + $limit + 1) {
-                    break 2;
+                foreach (self::FACET_FIELDS as $field) {
+                    $value = (string) ($decoded[$field] ?? '');
+                    if ($value !== '') {
+                        $facet_tally[$field][$value] = ($facet_tally[$field][$value] ?? 0) + 1;
+                    }
+                }
+
+                if (!$this->matchesFilters($decoded, $filters)) {
+                    continue;
+                }
+
+                $matched_count++;
+                if (count($matched) < $window) {
+                    $matched[] = $decoded;
                 }
             }
         }
 
-        $total = count($matches);
-        $items = array_slice($matches, $offset, $limit);
+        $items = array_slice($matched, $offset, $limit);
 
         return [
             'items' => $items,
             'count' => count($items),
             'offset' => $offset,
             'limit' => $limit,
-            'has_more' => $total > $offset + $limit || $scanned > self::MAX_ROWS_SCAN
+            'has_more' => $matched_count > ($offset + $limit) || $capped,
+            'facets' => $this->formatFacets($facet_tally)
         ];
     }
 
-    public function facets(array $filters = [], array $fields = [
-        'host', 'os', 'target_type', 'sync_id', 'field', 'disk_name'
-    ]): array {
+    /**
+     * Count matching rows per type in a single scan so the tab badges can show
+     * exact totals without four extra full fetches. Ignores the type filter (it
+     * tallies every tab) but honours the since/until/exact/column/text filters.
+     * A capped flag signals the MAX_ROWS_SCAN ceiling was hit.
+     */
+    public function counts(array $filters = []): array {
         $files = $this->collectLogFiles($filters['since'] ?? '', $filters['until'] ?? '');
-        $type = strtolower((string) ($filters['type'] ?? ''));
-
-        $facets = array_fill_keys($fields, []);
+        $counts = array_fill_keys(self::TYPES, 0);
         $scanned = 0;
+        $capped = false;
 
         foreach ($files as $file) {
             $lines = @file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
@@ -163,6 +216,7 @@ class LogStore {
             foreach ($lines as $line) {
                 $scanned++;
                 if ($scanned > self::MAX_ROWS_SCAN) {
+                    $capped = true;
                     break 2;
                 }
 
@@ -171,22 +225,29 @@ class LogStore {
                     continue;
                 }
 
-                if ($type !== '' && strtolower((string) ($decoded['type'] ?? '')) !== $type) {
+                $type = strtolower((string) ($decoded['type'] ?? ''));
+                if (!array_key_exists($type, $counts)) {
                     continue;
                 }
 
-                foreach ($fields as $field) {
-                    $value = (string) ($decoded[$field] ?? '');
-                    if ($value === '') {
-                        continue;
-                    }
-
-                    $facets[$field][$value] = ($facets[$field][$value] ?? 0) + 1;
+                if (!$this->matchesFilters($decoded, $filters)) {
+                    continue;
                 }
+
+                $counts[$type]++;
             }
         }
 
-        foreach ($facets as $field => $values) {
+        return [
+            'counts' => $counts,
+            'capped' => $capped
+        ];
+    }
+
+    private function formatFacets(array $tally): array {
+        $facets = [];
+
+        foreach ($tally as $field => $values) {
             ksort($values, SORT_NATURAL | SORT_FLAG_CASE);
             $facets[$field] = array_map(
                 static function($value, $count) { return ['value' => (string) $value, 'count' => (int) $count]; },
@@ -254,75 +315,58 @@ class LogStore {
         return array_reverse($filtered);
     }
 
-    private function matches(array $event, array $filters): bool {
-        $type = strtolower((string) ($filters['type'] ?? ''));
-        if ($type !== '' && strtolower((string) ($event['type'] ?? '')) !== $type) {
-            return false;
+    /**
+     * Apply the non-type filters to a decoded row:
+     *  - exact[field] => values : case-insensitive equality, any-of (facets).
+     *  - col[field]   => needle : case-insensitive substring (per-column boxes).
+     *  - q            => text   : case-insensitive substring over VALUE fields
+     *                             only (never field names or the raw JSON keys).
+     * The type filter is handled by the caller before this runs.
+     */
+    private function matchesFilters(array $event, array $filters): bool {
+        foreach (($filters['exact'] ?? []) as $key => $values) {
+            if (!is_array($values) || $values === []) {
+                continue;
+            }
+            if (!$this->equalsAny((string) ($event[$key] ?? ''), $values)) {
+                return false;
+            }
         }
 
-        $filterable = ['host', 'target_type', 'target_name', 'sync_id', 'field', 'os', 'disk_name'];
-
-        foreach ($filterable as $key) {
-            if (!array_key_exists($key, $filters)) {
+        foreach (($filters['col'] ?? []) as $key => $needle) {
+            $needle = trim((string) $needle);
+            if ($needle === '') {
                 continue;
             }
-
-            $values = $this->normalizeFilterList($filters[$key]);
-            if ($values === []) {
-                continue;
-            }
-
-            if (!$this->containsAny((string) ($event[$key] ?? ''), $values)) {
+            if (stripos((string) ($event[$key] ?? ''), $needle) === false) {
                 return false;
             }
         }
 
         $text = trim((string) ($filters['q'] ?? ''));
-        if ($text !== '') {
-            $haystack = strtolower(json_encode($event, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
-            if (strpos($haystack, strtolower($text)) === false) {
-                return false;
-            }
+        if ($text !== '' && !$this->matchesText($event, $text)) {
+            return false;
         }
 
         return true;
     }
 
-    private function normalizeFilterList($input): array {
-        if (is_string($input)) {
-            $input = array_map('trim', explode(',', $input));
-        }
-
-        if (!is_array($input)) {
-            return [];
-        }
-
-        $values = [];
-        foreach ($input as $value) {
-            $value = trim((string) $value);
-            if ($value !== '') {
-                $values[] = $value;
-            }
-        }
-
-        return $values;
-    }
-
-    private function containsAny(string $current, array $needles): bool {
-        $current_lower = strtolower($current);
-
-        foreach ($needles as $needle) {
-            $needle_lower = strtolower((string) $needle);
-
-            if ($needle_lower === '') {
-                continue;
-            }
-
-            if ($current_lower === $needle_lower) {
+    private function equalsAny(string $current, array $values): bool {
+        foreach ($values as $value) {
+            if (strcasecmp($current, (string) $value) === 0) {
                 return true;
             }
+        }
 
-            if (strpos($current_lower, $needle_lower) !== false) {
+        return false;
+    }
+
+    private function matchesText(array $event, string $text): bool {
+        $needle = strtolower($text);
+
+        foreach (self::Q_FIELDS as $field) {
+            $value = strtolower((string) ($event[$field] ?? ''));
+            if ($value !== '' && strpos($value, $needle) !== false) {
                 return true;
             }
         }

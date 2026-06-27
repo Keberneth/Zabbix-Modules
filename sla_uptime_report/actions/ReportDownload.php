@@ -34,6 +34,8 @@ class ReportDownload extends CController {
 	}
 
 	protected function doAction(): void {
+		set_time_limit(300);
+
 		$filter = ReportDataHelper::normalizeFilter([
 			'mode' => $this->getInput('filter_mode', ReportDataHelper::getDefaultFilter()['mode']),
 			'month' => $this->getInput('filter_month', ReportDataHelper::getDefaultFilter()['month']),
@@ -50,58 +52,82 @@ class ReportDownload extends CController {
 		$helper = new ReportDataHelper();
 		$format = (string) $this->getInput('format', 'html');
 
-		switch ($format) {
-			case 'sla_csv':
-				$sla_heatmap = $helper->fetchSlaHeatmap($filter['slaids'], $time_to);
-				$this->outputCsv(
-					'sla_report_'.gmdate('Y-m', $time_to).'.csv',
-					['SLA ID', 'SLA name', 'Service ID', 'Service name', 'SLO', 'Month', 'SLI'],
-					$helper->flattenSlaRows($sla_heatmap)
-				);
-				break;
+		try {
+			switch ($format) {
+				case 'sla_csv':
+					$sla_heatmap = $helper->fetchSlaHeatmap($filter['slaids'], $time_to);
+					$this->outputCsv(
+						'sla_report_'.gmdate('Y-m', $time_to).'.csv',
+						['SLA ID', 'SLA name', 'Service ID', 'Service name', 'SLO', 'Month', 'SLI'],
+						$helper->flattenSlaRows($sla_heatmap)
+					);
+					break;
 
-			case 'availability_csv':
-				$availability = $helper->fetchAvailability(
-					$filter['hostgroupids'],
-					$time_from,
-					$time_to,
-					(bool) $filter['exclude_disabled']
-				);
-				$this->outputCsv(
-					'availability_report_'.gmdate('Y-m', $time_to).'.csv',
-					[
-						'Host group',
-						'Host',
-						'Availability',
-						'Availability pct',
-						'Uptime seconds',
-						'Downtime seconds',
-						'Window start UTC',
-						'Window end UTC'
-					],
-					$helper->flattenAvailabilityRows($availability, $time_from, $time_to)
-				);
-				break;
+				case 'availability_csv':
+					$availability = $helper->fetchAvailability(
+						$filter['hostgroupids'],
+						$time_from,
+						$time_to,
+						(bool) $filter['exclude_disabled']
+					);
+					$this->outputCsv(
+						'availability_report_'.gmdate('Y-m', $time_to).'.csv',
+						[
+							'Host group',
+							'Host',
+							'Availability',
+							'Availability pct',
+							'Uptime seconds',
+							'Downtime seconds',
+							'Window start UTC',
+							'Window end UTC'
+						],
+						$helper->flattenAvailabilityRows($availability, $time_from, $time_to)
+					);
+					break;
 
-			case 'html':
-			default:
-				$sla_heatmap = $helper->fetchSlaHeatmap($filter['slaids'], $time_to);
-				$availability = $helper->fetchAvailability(
-					$filter['hostgroupids'],
-					$time_from,
-					$time_to,
-					(bool) $filter['exclude_disabled']
-				);
+				case 'html':
+				default:
+					$sla_heatmap = $helper->fetchSlaHeatmap($filter['slaids'], $time_to);
+					$availability = $helper->fetchAvailability(
+						$filter['hostgroupids'],
+						$time_from,
+						$time_to,
+						(bool) $filter['exclude_disabled']
+					);
 
-				$filename = 'sla_uptime_report_'.gmdate('Y-m', $time_to).'.html';
+					$filename = 'sla_uptime_report_'.gmdate('Y-m', $time_to).'.html';
 
-				header('Content-Type: text/html; charset=UTF-8');
-				header('Content-Disposition: attachment; filename="'.$filename.'"');
-				header('Cache-Control: no-cache, no-store, must-revalidate');
+					header('Content-Type: text/html; charset=UTF-8');
+					header('Content-Disposition: attachment; filename="'.$filename.'"');
+					header('Cache-Control: no-cache, no-store, must-revalidate');
 
-				echo $this->buildHtmlReport($helper, $filter, $time_from, $time_to, $sla_heatmap, $availability);
-				exit;
+					echo $this->buildHtmlReport($helper, $filter, $time_from, $time_to, $sla_heatmap, $availability);
+					exit;
+			}
 		}
+		catch (\InvalidArgumentException $e) {
+			$this->respondError(400, $e->getMessage());
+		}
+		catch (\Throwable $e) {
+			error_log('SLA Uptime Report: '.$e->getMessage());
+			$this->respondError(500, _('An internal error occurred while building the export. See the server error log for details.'));
+		}
+	}
+
+	/**
+	 * Emit a plain-text error response and stop. The export action runs outside CHtmlPage, so on
+	 * failure we send a generic, escaped message (never raw API/DB internals) with a proper status.
+	 */
+	private function respondError(int $code, string $message): void {
+		if (!headers_sent()) {
+			http_response_code($code);
+			header('Content-Type: text/plain; charset=UTF-8');
+			header('Cache-Control: no-cache, no-store, must-revalidate');
+		}
+
+		echo $this->h($message);
+		exit;
 	}
 
 	private function outputCsv(string $filename, array $header, array $rows): void {
@@ -146,27 +172,29 @@ class ReportDownload extends CController {
 <meta charset="utf-8">
 <title>SLA &amp; Uptime Report</title>
 <style>
-body{font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.45;color:#0f172a;margin:24px}
-h1,h2,h3{margin:0 0 12px}
+/* Standalone export document — Convention B palette (DESIGN_SYSTEM.md §1b). Static light theme:
+   the file is downloaded and viewed outside Zabbix, so it is not subject to dark-theme chrome. */
+body{font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.45;color:#1f2b3a;margin:24px}
+h1,h2,h3{margin:0 0 12px;color:#2a3441}
 h1{font-size:24px}
 h2{font-size:18px;margin-top:28px}
 h3{font-size:15px;margin-top:20px}
-.meta{padding:12px 14px;border:1px solid #bfdbfe;background:#eff6ff;border-radius:8px;margin-bottom:18px}
+.meta{padding:12px 14px;border:1px solid #dfe4ec;background:#f7f9fc;border-radius:4px;margin-bottom:18px;color:#34485f}
 .meta div{margin:2px 0}
 .pills{margin:8px 0 10px}
-.pill{display:inline-block;margin:0 8px 8px 0;padding:4px 10px;border:1px solid #e2e8f0;border-radius:999px;background:#f8fafc}
-.ok{color:#16a34a}
-.warn{color:#d97706}
-.bad{color:#dc2626}
-.na{color:#94a3b8}
+.pill{display:inline-block;margin:0 8px 8px 0;padding:4px 10px;border:1px solid #dfe4ec;border-radius:999px;background:#ffffff;color:#1f2b3a}
+.ok{color:#2e8a4e}
+.warn{color:#c08a1f}
+.bad{color:#c14545}
+.na{color:#5c6b7a}
 table{border-collapse:collapse;width:100%;margin:8px 0 18px}
-th,td{border:1px solid #e2e8f0;padding:6px 8px;vertical-align:top}
-th{background:#f8fafc;text-align:left}
-.cell-ok{background:#dcfce7;color:#166534;font-weight:600;text-align:center}
-.cell-warn{background:#fef3c7;color:#92400e;font-weight:600;text-align:center}
-.cell-bad{background:#fee2e2;color:#991b1b;font-weight:600;text-align:center}
-.cell-na{background:#f1f5f9;color:#64748b;text-align:center}
-.small{color:#64748b;font-size:12px}
+th,td{border:1px solid #e7edf4;padding:9px 10px;vertical-align:top}
+th{background:#f7f9fb;text-align:left;color:#2a3441;font-weight:700}
+.cell-ok{background:#ecf9f1;color:#2e8a4e;font-weight:600;text-align:center}
+.cell-warn{background:#fff8dd;color:#c08a1f;font-weight:600;text-align:center}
+.cell-bad{background:#fff1f0;color:#c14545;font-weight:600;text-align:center}
+.cell-na{background:#f1f5f9;color:#5c6b7a;text-align:center}
+.small{color:#5c6b7a;font-size:12px}
 .dot{font-weight:700}
 </style>
 </head>
@@ -360,6 +388,11 @@ th{background:#f8fafc;text-align:left}
 		return (string) ob_get_clean();
 	}
 
+	/**
+	 * MANDATORY escaper. Because the export document is hand-built outside CHtmlPage, EVERY
+	 * interpolated value in buildHtmlReport() and respondError() must pass through h() — there is no
+	 * framework auto-escaping here.
+	 */
 	private function h(string $value): string {
 		return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 	}

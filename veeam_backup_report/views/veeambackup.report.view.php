@@ -34,11 +34,6 @@ $download_url = static function(string $format) use ($base_query): string {
 ob_start();
 ?>
 <div class="veeamreport">
-<script>
-(function(){var d=document.querySelector('link[href*="dark-theme"]');
-if(d){document.querySelector('.veeamreport').classList.add('veeamreport--dark');}
-})();
-</script>
     <div class="veeamreport-section">
         <h1 class="veeamreport-page-title"><?php echo $esc(_('Veeam Backup Report')); ?></h1>
         <p class="veeamreport-section-subtitle">
@@ -65,7 +60,6 @@ if(d){document.querySelector('.veeamreport').classList.add('veeamreport--dark');
 
     <form method="get" action="zabbix.php" class="veeamreport-filter-form">
         <input type="hidden" name="action" value="veeambackup.report.view">
-        <input type="hidden" name="filter_set" value="1">
 
         <div class="veeamreport-filter-grid">
             <div class="veeamreport-field">
@@ -79,22 +73,22 @@ if(d){document.querySelector('.veeamreport').classList.add('veeamreport--dark');
                 <div class="veeamreport-field-hint"><?php echo $esc(_('Choose one mode. The matching month/date field below is then used.')); ?></div>
             </div>
 
-            <div class="veeamreport-field">
+            <div class="veeamreport-field" data-veeam-modes="specific_month">
                 <label for="filter_month"><?php echo $esc(_('Month')); ?></label>
                 <input id="filter_month" type="month" name="filter_month" value="<?php echo $esc($filter['month']); ?>">
             </div>
 
-            <div class="veeamreport-field">
+            <div class="veeamreport-field" data-veeam-modes="custom_range">
                 <label for="filter_date_from"><?php echo $esc(_('Date from')); ?></label>
                 <input id="filter_date_from" type="date" name="filter_date_from" value="<?php echo $esc($filter['date_from']); ?>">
             </div>
 
-            <div class="veeamreport-field">
+            <div class="veeamreport-field" data-veeam-modes="custom_range">
                 <label for="filter_date_to"><?php echo $esc(_('Date to')); ?></label>
                 <input id="filter_date_to" type="date" name="filter_date_to" value="<?php echo $esc($filter['date_to']); ?>">
             </div>
 
-            <div class="veeamreport-field">
+            <div class="veeamreport-field" data-veeam-modes="days_back">
                 <label for="filter_days_back"><?php echo $esc(_('Days back')); ?></label>
                 <input id="filter_days_back" type="number" min="1" max="366" name="filter_days_back" value="<?php echo $esc($filter['days_back']); ?>">
             </div>
@@ -147,9 +141,27 @@ if(d){document.querySelector('.veeamreport').classList.add('veeamreport--dark');
         </div>
 
         <div class="veeamreport-form-actions">
-            <button type="submit" class="btn-alt"><?php echo $esc(_('Apply')); ?></button>
+            <button type="submit" class="veeamreport-btn-primary"><?php echo $esc(_('Apply')); ?></button>
         </div>
     </form>
+
+    <script>
+    (function(){
+        var modeSelect = document.getElementById('filter_mode');
+        if (!modeSelect) { return; }
+        var fields = document.querySelectorAll('.veeamreport-filter-form [data-veeam-modes]');
+        function applyMode(){
+            var mode = modeSelect.value;
+            for (var i = 0; i < fields.length; i++) {
+                var modes = (fields[i].getAttribute('data-veeam-modes') || '').split(',');
+                var visible = modes.indexOf(mode) !== -1;
+                fields[i].classList.toggle('veeamreport-field--hidden', !visible);
+            }
+        }
+        modeSelect.addEventListener('change', applyMode);
+        applyMode();
+    })();
+    </script>
 
     <div class="veeamreport-downloads">
         <a class="btn-alt" href="<?php echo $esc($download_url('html')); ?>"><?php echo $esc(_('Download HTML')); ?></a>

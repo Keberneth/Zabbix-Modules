@@ -1,0 +1,6 @@
+# Per-environment local overrides (copy config.local.php.example to create it).
+config.local.php
+
+# Local cache artifacts, if the cache directory is placed inside the module.
+cache/
+*.cache

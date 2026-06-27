@@ -17,7 +17,7 @@ class SettingsView extends CController {
     }
 
     protected function checkInput(): bool {
-        return true;
+        return $this->validateInput([]);
     }
 
     protected function checkPermissions(): bool {

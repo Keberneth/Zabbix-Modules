@@ -1,10 +1,15 @@
-/* SLA & Uptime Report */
+/* SLA & Uptime Report — Convention B (DESIGN_SYSTEM.md §1b/§3).
+   Every custom color/background/border rule below has a paired dark override under both
+   [theme='dark-theme'] and [theme='hc-dark']. Native Zabbix chrome (CFilter, CTableInfo) is left
+   to the framework theme; only the module's own .slareport-* surfaces are styled here. */
 
-.slareport-ok { color: #16a34a; }
-.slareport-warn { color: #d97706; }
-.slareport-bad { color: #dc2626; }
-.slareport-na-text { color: #94a3b8; }
+/* ---- Status text accents ---- */
+.slareport-ok { color: #2e8a4e; }
+.slareport-warn { color: #c08a1f; }
+.slareport-bad { color: #c14545; }
+.slareport-na-text { color: #5c6b7a; }
 
+/* ---- Sections / headings ---- */
 .slareport-section {
 	margin-top: 18px;
 }
@@ -12,23 +17,34 @@
 .slareport-section-title {
 	margin: 0 0 4px 0;
 	font-size: 18px;
-	font-weight: 600;
-	color: #0f172a;
+	font-weight: 700;
+	color: #2a3441;
 }
 
 .slareport-section-subtitle {
 	margin: 0 0 12px 0;
 	font-size: 12px;
-	color: #64748b;
+	color: #5c6b7a;
 }
 
+.slareport-block-title {
+	margin: 18px 0 8px 0;
+	font-size: 15px;
+	font-weight: 700;
+	color: #2a3441;
+	padding-bottom: 4px;
+	border-bottom: 1px solid #e7edf4;
+}
+
+/* ---- Info / note / error banners ---- */
 .slareport-info-bar {
-	padding: 10px 14px;
+	padding: 12px 14px;
 	margin: 10px 0 12px 0;
-	background: #eff6ff;
-	border: 1px solid #bfdbfe;
-	border-radius: 6px;
-	color: #1d4ed8;
+	background: #f7f9fc;
+	border: 1px solid #dfe4ec;
+	border-radius: 4px;
+	color: #34485f;
+	font-size: 13px;
 }
 
 .slareport-info-label {
@@ -36,9 +52,36 @@
 }
 
 .slareport-info-muted {
-	color: #64748b;
+	color: #5c6b7a;
 }
 
+.slareport-notes {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin: 0 0 12px 0;
+}
+
+.slareport-note {
+	padding: 12px 14px;
+	background: #fff7e6;
+	border: 1px solid #f1d59c;
+	border-radius: 4px;
+	color: #7a5a12;
+	font-size: 13px;
+}
+
+.slareport-error {
+	padding: 12px 14px;
+	margin: 10px 0 12px 0;
+	background: #fff1f1;
+	border: 1px solid #f0c8c8;
+	border-radius: 4px;
+	color: #7a1d1d;
+	font-size: 13px;
+}
+
+/* ---- Download buttons row ---- */
 .slareport-downloads {
 	display: flex;
 	flex-wrap: wrap;
@@ -46,27 +89,14 @@
 	margin-bottom: 12px;
 }
 
+/* ---- Filter field hints ---- */
 .slareport-field-hint {
 	margin-top: 4px;
 	font-size: 11px;
-	color: #64748b;
+	color: #5c6b7a;
 }
 
-.slareport-multiselect {
-	min-width: 320px;
-	min-height: 10em;
-	padding: 4px;
-}
-
-.slareport-block-title {
-	margin: 18px 0 8px 0;
-	font-size: 15px;
-	font-weight: 600;
-	color: #0f172a;
-	padding-bottom: 4px;
-	border-bottom: 2px solid #e2e8f0;
-}
-
+/* ---- Summary line + pills ---- */
 .slareport-summary-line {
 	display: flex;
 	flex-wrap: wrap;
@@ -74,9 +104,9 @@
 	align-items: center;
 	padding: 8px 10px;
 	margin-bottom: 10px;
-	background: #f8fafc;
-	border: 1px solid #e2e8f0;
-	border-radius: 6px;
+	background: #ffffff;
+	border: 1px solid #dfe4ec;
+	border-radius: 4px;
 }
 
 .slareport-pill {
@@ -85,17 +115,18 @@
 	padding: 2px 10px;
 	border-radius: 999px;
 	background: #ffffff;
-	border: 1px solid #e2e8f0;
+	border: 1px solid #dfe4ec;
 	font-size: 12px;
 	line-height: 20px;
-	color: #0f172a;
+	color: #1f2b3a;
 }
 
 .slareport-empty-note {
 	margin: 4px 0 10px 0;
-	color: #64748b;
+	color: #5c6b7a;
 }
 
+/* ---- Heatmap / availability cells ---- */
 .slareport-cell-ok,
 .slareport-cell-warn,
 .slareport-cell-bad,
@@ -109,25 +140,120 @@
 }
 
 .slareport-cell-ok {
-	background: #dcfce7;
-	color: #166534;
+	background: #e6f5ec;
+	color: #1f7a45;
 }
 
 .slareport-cell-warn {
-	background: #fef3c7;
-	color: #92400e;
+	background: #fff7e6;
+	color: #8a6516;
 }
 
 .slareport-cell-bad {
-	background: #fee2e2;
-	color: #991b1b;
+	background: #fdeceb;
+	color: #b03636;
 }
 
 .slareport-cell-na {
 	background: #f1f5f9;
-	color: #64748b;
+	color: #5c6b7a;
 }
 
-.bold {
+.slareport-bold {
 	font-weight: 700;
+}
+
+/* ======================================================================
+   DARK THEME OVERRIDES (Convention B: pair every custom color rule)
+   ====================================================================== */
+
+[theme='dark-theme'] .slareport-ok,
+[theme='hc-dark'] .slareport-ok { color: #6fce9a; }
+
+[theme='dark-theme'] .slareport-warn,
+[theme='hc-dark'] .slareport-warn { color: #f0c46a; }
+
+[theme='dark-theme'] .slareport-bad,
+[theme='hc-dark'] .slareport-bad { color: #ef8f8f; }
+
+[theme='dark-theme'] .slareport-na-text,
+[theme='hc-dark'] .slareport-na-text { color: #9fb0c3; }
+
+[theme='dark-theme'] .slareport-section-title,
+[theme='hc-dark'] .slareport-section-title { color: #eef3f7; }
+
+[theme='dark-theme'] .slareport-section-subtitle,
+[theme='hc-dark'] .slareport-section-subtitle { color: #bec8d3; }
+
+[theme='dark-theme'] .slareport-block-title,
+[theme='hc-dark'] .slareport-block-title {
+	color: #eef3f7;
+	border-bottom-color: #334152;
+}
+
+[theme='dark-theme'] .slareport-info-bar,
+[theme='hc-dark'] .slareport-info-bar {
+	background: #1a2230;
+	border-color: #3b4a5b;
+	color: #d7dfe7;
+}
+
+[theme='dark-theme'] .slareport-info-muted,
+[theme='hc-dark'] .slareport-info-muted { color: #9fb0c3; }
+
+[theme='dark-theme'] .slareport-note,
+[theme='hc-dark'] .slareport-note {
+	background: #2e2a1a;
+	border-color: #5e5326;
+	color: #f0d59c;
+}
+
+[theme='dark-theme'] .slareport-error,
+[theme='hc-dark'] .slareport-error {
+	background: #2e1c1c;
+	border-color: #6b3030;
+	color: #f0b8b8;
+}
+
+[theme='dark-theme'] .slareport-field-hint,
+[theme='hc-dark'] .slareport-field-hint { color: #bec8d3; }
+
+[theme='dark-theme'] .slareport-empty-note,
+[theme='hc-dark'] .slareport-empty-note { color: #bec8d3; }
+
+[theme='dark-theme'] .slareport-summary-line,
+[theme='hc-dark'] .slareport-summary-line {
+	background: #1f2733;
+	border-color: #3b4a5b;
+}
+
+[theme='dark-theme'] .slareport-pill,
+[theme='hc-dark'] .slareport-pill {
+	background: #111821;
+	border-color: #5b6b7f;
+	color: #eef3f7;
+}
+
+[theme='dark-theme'] .slareport-cell-ok,
+[theme='hc-dark'] .slareport-cell-ok {
+	background: #1c3b2b;
+	color: #7fd6a3;
+}
+
+[theme='dark-theme'] .slareport-cell-warn,
+[theme='hc-dark'] .slareport-cell-warn {
+	background: #3a3320;
+	color: #f0c46a;
+}
+
+[theme='dark-theme'] .slareport-cell-bad,
+[theme='hc-dark'] .slareport-cell-bad {
+	background: #3a2526;
+	color: #ef9a9a;
+}
+
+[theme='dark-theme'] .slareport-cell-na,
+[theme='hc-dark'] .slareport-cell-na {
+	background: #243042;
+	color: #9fb0c3;
 }

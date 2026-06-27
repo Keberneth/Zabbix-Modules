@@ -5,7 +5,7 @@
   "namespace": "MessageOfTheDay",
   "version": "1.0.0",
   "author": "Keberneth",
-  "description": "Displays a non-intrusive top banner with high/critical problem counts, software update status, and maintenance windows.",
+  "description": "Displays a non-intrusive top banner and overview page summarizing High/Critical problems, unacknowledged and longest-running incidents, recently resolved problems with MTTR, monitoring health, new hosts, and maintenance windows. Supports single-server, multi-server, and Docker deployments.",
   "actions": {
     "motd.view": {
       "class": "BannerView",

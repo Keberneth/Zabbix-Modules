@@ -24,6 +24,12 @@ The module is designed to work with the item keys from the v13 template that was
 
 The module **does not call the Veeam API directly**. It only reads data already collected and stored by Zabbix.
 
+## Deployment and access
+
+- **Multi-install support:** the module is a pure frontend module with no local state, so it runs unchanged on a **single-server** frontend, a **multi-server / high-availability** frontend pool, and **Docker / container** frontends. Deploy the directory to every frontend node (or bake it into your frontend image) and enable it once in *Administration → General → Modules*.
+- **Permissions:** the report page is visible to **any authenticated Zabbix user** (`USER_TYPE_ZABBIX_USER` and above). It only reads history/trends through the standard Zabbix API, so each user sees data for the hosts their permissions already allow.
+- **Theming:** the page follows the active Zabbix theme automatically, including the **dark** and **high-contrast dark** themes — no per-user configuration is required.
+
 ## What the module shows
 
 The report page contains:

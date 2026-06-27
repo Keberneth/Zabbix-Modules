@@ -17,7 +17,42 @@ class MotdDataProvider {
 	private const TIMEPERIOD_TYPE_WEEKLY = 3;
 	private const TIMEPERIOD_TYPE_MONTHLY = 4;
 
-	public function getData(): array {
+	/** Short server-side cache lifetime (seconds) for the aggregated payload. */
+	private const CACHE_TTL = 45;
+
+	/** Bound how many trigger ids are resolved per API round-trip. */
+	private const TRIGGER_CHUNK = 1000;
+
+	/** Cap the stale-item row scan used only to count distinct affected hosts. */
+	private const MAX_STALE_ITEM_SCAN = 2000;
+
+	/** Cap the unreachable host-interface scan on large installs. */
+	private const MAX_UNREACHABLE_INTERFACES = 5000;
+
+	/** Per-instance trigger metadata cache populated by a single batched lookup. */
+	private $trigger_cache = [];
+
+	/**
+	 * Return the aggregated banner/overview payload, served from a short file cache when fresh.
+	 *
+	 * @param string $cache_scope  Per-user scope key (user id) so users with different
+	 *                             permission-filtered visibility never share a cached payload.
+	 */
+	public function getData(string $cache_scope = 'global'): array {
+		$cached = $this->readCache($cache_scope);
+		if ($cached !== null) {
+			return $cached;
+		}
+
+		$data = $this->buildData();
+		$this->writeCache($cache_scope, $data);
+
+		return $data;
+	}
+
+	private function buildData(): array {
+		set_time_limit(300);
+
 		$timezone = $this->getTimezone();
 		$now = new \DateTimeImmutable('now', $timezone);
 		$today_start = $now->setTime(0, 0, 0);
@@ -32,6 +67,39 @@ class MotdDataProvider {
 		$health = $this->getMonitoringHealth();
 		$new_hosts = $this->getNewHosts24h($timezone, $now);
 		$maintenances = $this->getMaintenanceSummary($now, $today_start, $tomorrow_start, $week_end, $timezone);
+
+		// Resolve every referenced trigger (and its hosts) in a single batched lookup instead of
+		// one Trigger.get per problem section.
+		$this->primeTriggerCache([
+			$problems['_recent_raw'] ?? [],
+			$unacked['_recent_raw'] ?? [],
+			$longest['_recent_raw'] ?? [],
+			$resolved['_top_raw'] ?? []
+		]);
+
+		$problems['recent'] = $this->formatProblemRows($problems['_recent_raw'] ?? [], $timezone, $now);
+		unset($problems['_recent_raw']);
+
+		$unacked['recent'] = $this->formatProblemRows($unacked['_recent_raw'] ?? [], $timezone, $now);
+		unset($unacked['_recent_raw']);
+
+		$longest['recent'] = $this->formatProblemRows($longest['_recent_raw'] ?? [], $timezone, $now);
+		unset($longest['_recent_raw']);
+
+		$resolved_rows = $this->formatProblemRows($resolved['_top_raw'] ?? [], $timezone, $now);
+		foreach ($resolved_rows as $idx => &$row) {
+			$meta = $resolved['_top_meta'][$idx] ?? null;
+			if ($meta !== null) {
+				$row['resolved_at'] = $meta['resolved_at'];
+				$row['resolved_at_text'] = $this->formatTimestamp($meta['resolved_at'], $timezone);
+				$row['resolved_age_text'] = $this->formatAge($meta['resolved_at'], $now->getTimestamp());
+				$row['mttr'] = $meta['mttr'];
+				$row['mttr_text'] = $this->formatDuration($meta['mttr']);
+			}
+		}
+		unset($row);
+		$resolved['recent'] = $resolved_rows;
+		unset($resolved['_top_raw'], $resolved['_top_meta']);
 
 		$summary_line = $this->buildSummaryLine($problems, $unacked, $maintenances);
 		$banner_items = $this->buildBannerItems($problems, $unacked, $longest, $maintenances);
@@ -86,9 +154,102 @@ class MotdDataProvider {
 					$item['status'] ?? ''
 				];
 			}, $maintenances['week'])
-		], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: 'motd');
+		], JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: 'motd');
 
 		return $data;
+	}
+
+	private function cacheFile(string $scope): string {
+		return sys_get_temp_dir().'/zbx_motd_'.sha1($this->installSalt().'|'.$scope).'.json';
+	}
+
+	/**
+	 * Per-install salt so two Zabbix frontends sharing a host temp dir never read
+	 * each other's cached payloads (the scope itself is only a per-user id).
+	 */
+	private function installSalt(): string {
+		global $DB;
+
+		return (string) (($DB['DATABASE'] ?? '').'@'.($DB['SERVER'] ?? '').':'.($DB['PORT'] ?? ''));
+	}
+
+	private function readCache(string $scope): ?array {
+		$file = $this->cacheFile($scope);
+		if (!is_file($file)) {
+			return null;
+		}
+
+		$mtime = @filemtime($file);
+		if ($mtime === false || (time() - $mtime) > self::CACHE_TTL) {
+			return null;
+		}
+
+		$raw = @file_get_contents($file);
+		if ($raw === false || $raw === '') {
+			return null;
+		}
+
+		$decoded = json_decode($raw, true);
+
+		return is_array($decoded) ? $decoded : null;
+	}
+
+	private function writeCache(string $scope, array $data): void {
+		$json = json_encode($data, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+		if ($json === false) {
+			return;
+		}
+
+		$file = $this->cacheFile($scope);
+		$tmp = $file.'.'.getmypid().'.tmp';
+		if (@file_put_contents($tmp, $json, LOCK_EX) !== false) {
+			@rename($tmp, $file);
+		}
+		else {
+			@unlink($tmp);
+		}
+	}
+
+	/**
+	 * Populate $this->trigger_cache for every distinct objectid across the supplied row sets using
+	 * a single chunked Trigger.get, so the per-section formatters never hit the API individually.
+	 *
+	 * @param array $row_sets  List of raw problem/event row arrays (each row may carry an objectid).
+	 */
+	private function primeTriggerCache(array $row_sets): void {
+		$ids = [];
+		foreach ($row_sets as $rows) {
+			if (!is_array($rows)) {
+				continue;
+			}
+			foreach ($rows as $problem) {
+				$oid = (string) ($problem['objectid'] ?? '');
+				if ($oid !== '' && !array_key_exists($oid, $this->trigger_cache)) {
+					$ids[$oid] = true;
+				}
+			}
+		}
+
+		if (!$ids) {
+			return;
+		}
+
+		foreach (array_chunk(array_keys($ids), self::TRIGGER_CHUNK) as $chunk) {
+			try {
+				$triggers = API::Trigger()->get([
+					'output' => ['triggerid'],
+					'triggerids' => $chunk,
+					'selectHosts' => ['hostid', 'host', 'name'],
+					'preservekeys' => true
+				]);
+				foreach ($triggers as $tid => $trigger) {
+					$this->trigger_cache[(string) $tid] = $trigger;
+				}
+			}
+			catch (\Throwable $e) {
+				// Leave unresolved triggers uncached; their rows simply render without host names.
+			}
+		}
 	}
 
 	private function getProblemSummary(\DateTimeZone $timezone, \DateTimeImmutable $now): array {
@@ -144,14 +305,12 @@ class MotdDataProvider {
 			$recent = [];
 		}
 
-		$formatted_recent = $this->formatProblemRows($recent, $timezone, $now);
-
 		return [
 			'high_count' => $high_count,
 			'critical_count' => $critical_count,
 			'suppressed_count' => $suppressed_count,
 			'total' => $high_count + $critical_count,
-			'recent' => $formatted_recent,
+			'_recent_raw' => $recent,
 			'all_url' => $this->buildUrl('problem.view'),
 			'high_url' => $this->buildProblemFilterUrl([self::SEVERITY_HIGH]),
 			'critical_url' => $this->buildProblemFilterUrl([self::SEVERITY_CRITICAL]),
@@ -165,28 +324,6 @@ class MotdDataProvider {
 			return [];
 		}
 
-		$triggerids = [];
-		foreach ($problems as $problem) {
-			if (!empty($problem['objectid'])) {
-				$triggerids[] = $problem['objectid'];
-			}
-		}
-
-		$trigger_map = [];
-		if ($triggerids) {
-			try {
-				$trigger_map = API::Trigger()->get([
-					'output' => ['triggerid'],
-					'triggerids' => array_values(array_unique($triggerids)),
-					'selectHosts' => ['hostid', 'host', 'name'],
-					'preservekeys' => true
-				]);
-			}
-			catch (\Throwable $e) {
-				$trigger_map = [];
-			}
-		}
-
 		$formatted = [];
 		foreach ($problems as $problem) {
 			$severity = (int) ($problem['severity'] ?? 0);
@@ -194,8 +331,8 @@ class MotdDataProvider {
 			$triggerid = (string) ($problem['objectid'] ?? '');
 			$hosts = [];
 
-			if ($triggerid !== '' && array_key_exists($triggerid, $trigger_map)) {
-				foreach ($trigger_map[$triggerid]['hosts'] ?? [] as $host) {
+			if ($triggerid !== '' && array_key_exists($triggerid, $this->trigger_cache)) {
+				foreach ($this->trigger_cache[$triggerid]['hosts'] ?? [] as $host) {
 					$hosts[] = (string) ($host['name'] ?? $host['host'] ?? '');
 				}
 			}
@@ -257,7 +394,7 @@ class MotdDataProvider {
 
 		return [
 			'count' => $count,
-			'recent' => $this->formatProblemRows($items, $timezone, $now),
+			'_recent_raw' => $items,
 			'url' => $this->buildProblemUnackedUrl()
 		];
 	}
@@ -280,7 +417,7 @@ class MotdDataProvider {
 		}
 
 		return [
-			'recent' => $this->formatProblemRows($items, $timezone, $now)
+			'_recent_raw' => $items
 		];
 	}
 
@@ -360,21 +497,11 @@ class MotdDataProvider {
 		});
 
 		$top = array_slice($resolved, 0, 5);
-		$top_rows = $this->formatProblemRows(array_column($top, 'problem_event'), $timezone, $now);
-
-		foreach ($top_rows as $idx => &$row) {
-			$entry = $top[$idx];
-			$row['resolved_at'] = $entry['resolved_at'];
-			$row['resolved_at_text'] = $this->formatTimestamp($entry['resolved_at'], $timezone);
-			$row['resolved_age_text'] = $this->formatAge($entry['resolved_at'], $now->getTimestamp());
-			$row['mttr'] = $entry['mttr'];
-			$row['mttr_text'] = $this->formatDuration($entry['mttr']);
-		}
-		unset($row);
 
 		return [
 			'count' => $count,
-			'recent' => $top_rows,
+			'_top_raw' => array_column($top, 'problem_event'),
+			'_top_meta' => array_values($top),
 			'avg_mttr' => $mttr_count > 0 ? (int) round($mttr_sum / $mttr_count) : 0,
 			'avg_mttr_text' => $mttr_count > 0 ? $this->formatDuration((int) round($mttr_sum / $mttr_count)) : ''
 		];
@@ -383,6 +510,7 @@ class MotdDataProvider {
 	private function getMonitoringHealth(): array {
 		$stale_total = 0;
 		$stale_hosts = 0;
+		$stale_hosts_truncated = false;
 
 		try {
 			$stale_total = (int) API::Item()->get([
@@ -395,13 +523,15 @@ class MotdDataProvider {
 			$stale_total = 0;
 		}
 
-		if ($stale_total > 0 && $stale_total <= 20000) {
+		// The total is a cheap countOutput; the distinct-host figure needs hostids, so cap that scan
+		// hard and flag truncation rather than transferring tens of thousands of rows on every refresh.
+		if ($stale_total > 0) {
 			try {
 				$stale_items = API::Item()->get([
 					'output' => ['hostid'],
 					'filter' => ['state' => 1],
 					'monitored' => true,
-					'limit' => 20000
+					'limit' => self::MAX_STALE_ITEM_SCAN
 				]);
 				$host_ids = [];
 				foreach ($stale_items as $item) {
@@ -410,6 +540,7 @@ class MotdDataProvider {
 					}
 				}
 				$stale_hosts = count($host_ids);
+				$stale_hosts_truncated = count($stale_items) >= self::MAX_STALE_ITEM_SCAN;
 			}
 			catch (\Throwable $e) {
 				$stale_hosts = 0;
@@ -417,10 +548,12 @@ class MotdDataProvider {
 		}
 
 		$unreachable_hosts = 0;
+		$unreachable_hosts_truncated = false;
 		try {
 			$bad = API::HostInterface()->get([
 				'output' => ['hostid'],
-				'filter' => ['available' => 2]
+				'filter' => ['available' => 2],
+				'limit' => self::MAX_UNREACHABLE_INTERFACES
 			]);
 			$hostids = [];
 			foreach ($bad as $iface) {
@@ -429,6 +562,7 @@ class MotdDataProvider {
 				}
 			}
 			$unreachable_hosts = count($hostids);
+			$unreachable_hosts_truncated = count($bad) >= self::MAX_UNREACHABLE_INTERFACES;
 		}
 		catch (\Throwable $e) {
 			$unreachable_hosts = 0;
@@ -477,7 +611,9 @@ class MotdDataProvider {
 		return [
 			'stale_items_total' => $stale_total,
 			'stale_items_hosts' => $stale_hosts,
+			'stale_items_hosts_truncated' => $stale_hosts_truncated,
 			'unreachable_hosts' => $unreachable_hosts,
+			'unreachable_hosts_truncated' => $unreachable_hosts_truncated,
 			'unreachable_proxies' => $unreachable_proxies,
 			'queue_backlog' => $queue_backlog,
 			'stale_url' => $this->buildStaleItemsUrl(),
@@ -602,6 +738,22 @@ class MotdDataProvider {
 		];
 	}
 
+	/**
+	 * Expand a maintenance definition's recurring time periods into concrete occurrences that overlap
+	 * the [$range_start, $range_end) window, clamped to the maintenance active_since/active_till bounds.
+	 *
+	 * Mirrors Zabbix's timeperiod semantics:
+	 *  - ONETIME (0): a single window starting at start_date for `period` seconds.
+	 *  - DAILY (2): every `every` days from active_since, offset start_time seconds into the day.
+	 *  - WEEKLY (3): on the weekdays selected by the `dayofweek` bitmask (bit 0 = Monday … bit 6 = Sunday),
+	 *    every `every` weeks, offset start_time seconds.
+	 *  - MONTHLY (4): in the months selected by the `month` bitmask (bit 0 = January … bit 11 = December);
+	 *    when `dayofweek` is set it is the Nth weekday (every = 1..4, or 5 = last) of the month, otherwise
+	 *    it is calendar `day` (clamped to the month length), offset start_time seconds.
+	 *
+	 * A few days of look-back are scanned so a window that started before $range_start but is still
+	 * running (period spans midnight) is still surfaced.
+	 */
 	private function expandMaintenanceOccurrences(array $maintenance, \DateTimeImmutable $range_start, \DateTimeImmutable $range_end, \DateTimeZone $timezone): array {
 		$occurrences = [];
 

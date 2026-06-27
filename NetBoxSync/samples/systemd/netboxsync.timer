@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the Zabbix → NetBox synchronization on a schedule
+Documentation=https://github.com/Keberneth/Zabbix-Modules
+
+[Timer]
+# Every 15 minutes, 2 minutes after boot. Adjust to taste; the module also
+# enforces per-sync intervals, so a frequent timer just means "check what is due".
+OnBootSec=2min
+OnUnitActiveSec=15min
+Persistent=true
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

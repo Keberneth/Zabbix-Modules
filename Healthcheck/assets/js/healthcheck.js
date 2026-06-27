@@ -23,6 +23,18 @@
         return parsed;
     }
 
+    // Read a translated label provided by the view via data-i18n-* attributes, with a
+    // hard-coded English fallback so the JS still works if an attribute is missing.
+    function t(root, key, fallback) {
+        if (root) {
+            var value = root.getAttribute('data-i18n-' + key);
+            if (value !== null && value !== '') {
+                return value;
+            }
+        }
+        return fallback;
+    }
+
     function showPageStatus(root, message, isError) {
         if (!root) {
             return;
@@ -42,6 +54,41 @@
 
     function generateId(prefix) {
         return prefix + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+    }
+
+    // Copy text to the clipboard with graceful degradation: the async Clipboard API is
+    // only available in secure (https) contexts, so fall back to execCommand on http.
+    function copyText(text) {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function'
+            && window.isSecureContext) {
+            return navigator.clipboard.writeText(text);
+        }
+
+        return new Promise(function (resolve, reject) {
+            try {
+                var temp = document.createElement('textarea');
+                temp.value = text;
+                temp.setAttribute('readonly', '');
+                temp.style.position = 'absolute';
+                temp.style.left = '-9999px';
+                document.body.appendChild(temp);
+                temp.select();
+                temp.setSelectionRange(0, temp.value.length);
+
+                var ok = document.execCommand('copy');
+                document.body.removeChild(temp);
+
+                if (ok) {
+                    resolve();
+                }
+                else {
+                    reject(new Error('execCommand copy failed'));
+                }
+            }
+            catch (e) {
+                reject(e);
+            }
+        });
     }
 
     function initSettingsPage() {
@@ -78,9 +125,13 @@
 
                 if (target) {
                     var text = target.value || target.textContent;
-                    navigator.clipboard.writeText(text).then(function () {
-                        var original = copyButton.textContent;
-                        copyButton.textContent = 'Copied!';
+                    var original = copyButton.textContent;
+
+                    copyText(text).then(function () {
+                        copyButton.textContent = t(root, 'copied', 'Copied!');
+                        setTimeout(function () { copyButton.textContent = original; }, 1500);
+                    }).catch(function () {
+                        copyButton.textContent = t(root, 'copy-failed', 'Copy failed');
                         setTimeout(function () { copyButton.textContent = original; }, 1500);
                     });
                 }
@@ -103,7 +154,7 @@
             var submitBtn = form.querySelector('button[type="submit"]');
             if (submitBtn) {
                 submitBtn.disabled = true;
-                submitBtn.textContent = 'Saving…';
+                submitBtn.textContent = t(root, 'saving', 'Saving…');
             }
 
             fetch(form.action, {
@@ -113,7 +164,8 @@
             })
                 .then(function (response) {
                     return response.text().then(function (text) {
-                        return unwrapResponse(text) || {ok: false, error: 'Unexpected response from server.'};
+                        return unwrapResponse(text)
+                            || {ok: false, error: t(root, 'unexpected', 'Unexpected response from server.')};
                     });
                 })
                 .then(function (data) {
@@ -121,16 +173,16 @@
                         window.location.reload();
                     }
                     else {
-                        showPageStatus(root, data.error || data.message || 'Save failed.', true);
+                        showPageStatus(root, data.error || data.message || t(root, 'save-failed', 'Save failed.'), true);
                     }
                 })
                 .catch(function (error) {
-                    showPageStatus(root, 'Save failed: ' + error.message, true);
+                    showPageStatus(root, t(root, 'save-failed', 'Save failed.') + ' ' + error.message, true);
                 })
                 .finally(function () {
                     if (submitBtn) {
                         submitBtn.disabled = false;
-                        submitBtn.textContent = 'Save settings';
+                        submitBtn.textContent = t(root, 'save', 'Save settings');
                     }
                 });
         });
@@ -170,13 +222,13 @@
 
             var runUrl = root.getAttribute('data-run-url');
             if (!runUrl) {
-                showPageStatus(root, 'Run URL is missing.', true);
+                showPageStatus(root, t(root, 'run-url-missing', 'Run URL is missing.'), true);
                 return;
             }
 
             var originalText = button.textContent;
             button.disabled = true;
-            button.textContent = 'Running…';
+            button.textContent = t(root, 'running', 'Running…');
 
             var formData = new FormData();
             formData.append('force', button.getAttribute('data-force') || '1');
@@ -199,11 +251,16 @@
             })
                 .then(function (response) {
                     return response.text().then(function (text) {
-                        return unwrapResponse(text) || {ok: false, message: 'Unexpected response from server.'};
+                        return unwrapResponse(text)
+                            || {ok: false, message: t(root, 'unexpected', 'Unexpected response from server.')};
                     });
                 })
                 .then(function (data) {
-                    showPageStatus(root, data.message || (data.ok ? 'Run completed.' : 'Run failed.'), !data.ok);
+                    showPageStatus(
+                        root,
+                        data.message || (data.ok ? t(root, 'run-completed', 'Run completed.') : t(root, 'run-failed', 'Run failed.')),
+                        !data.ok
+                    );
 
                     if (data.ok) {
                         window.setTimeout(function () {
@@ -212,13 +269,47 @@
                     }
                 })
                 .catch(function (error) {
-                    showPageStatus(root, 'Run failed: ' + error.message, true);
+                    showPageStatus(root, t(root, 'run-failed', 'Run failed.') + ' ' + error.message, true);
                 })
                 .finally(function () {
                     button.disabled = false;
                     button.textContent = originalText;
                 });
         });
+    }
+
+    // Replace the former <meta http-equiv="refresh"> with a JS-driven reload that skips
+    // the cycle while a run/save status banner is showing, so AJAX feedback is never wiped.
+    function initHeartbeatAutoRefresh() {
+        var root = document.getElementById('healthcheck-heartbeat-root');
+
+        if (!root) {
+            return;
+        }
+
+        var seconds = parseInt(root.getAttribute('data-refresh-seconds'), 10);
+        if (!seconds || seconds < 10) {
+            seconds = 30;
+        }
+
+        var toggle = document.getElementById('hc-autorefresh-toggle');
+
+        function tick() {
+            window.setTimeout(function () {
+                var enabled = !toggle || toggle.checked;
+                var bannerShowing = !!root.querySelector('.hc-page-status');
+
+                if (enabled && !bannerShowing) {
+                    window.location.reload();
+                    return;
+                }
+
+                // Skipped this cycle (disabled or a banner is visible) — try again later.
+                tick();
+            }, seconds * 1000);
+        }
+
+        tick();
     }
 
     function initSchedulerCommands() {
@@ -245,7 +336,7 @@
 
             cronEl.value = [
                 '# Install or update the cron job for user "' + user + '"',
-                '# (safe to re-run \u2014 replaces any previous healthcheck-runner entry)',
+                '# (safe to re-run — replaces any previous healthcheck-runner entry)',
                 'sudo crontab -u ' + user + ' -l 2>/dev/null | grep -v healthcheck-runner | { cat; echo \'' + cronLine + '\'; } | sudo crontab -u ' + user + ' -',
                 '',
                 '# Verify',
@@ -306,16 +397,17 @@
         buildCommands(select.value);
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function () {
-            initSettingsPage();
-            initRunButtons();
-            initSchedulerCommands();
-        });
-    }
-    else {
+    function initAll() {
         initSettingsPage();
         initRunButtons();
+        initHeartbeatAutoRefresh();
         initSchedulerCommands();
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initAll);
+    }
+    else {
+        initAll();
     }
 }());

@@ -4,12 +4,24 @@ declare(strict_types=1);
 namespace Modules\NetworkMap\Lib;
 
 final class MapBuilder {
+    /** Hard ceiling on history rows processed per build (timeout/OOM guard). */
+    private const MAX_HISTORY_ROWS = 200000;
+
+    /** Number of item ids per batched API::History()->get() call. */
+    private const HISTORY_BATCH = 50;
+
     private Cache $cache;
 
     public function __construct(?Cache $cache = null) {
         $this->cache = $cache ?? new Cache();
     }
 
+    /**
+     * Return the network-map payload for the given user, serving a fresh disk
+     * cache when available and otherwise rebuilding it. On a rebuild failure a
+     * stale cache entry (if any) is returned with a generic 'stale' warning;
+     * the real cause is logged server-side, never exposed to the client.
+     */
     public function getMap(bool $force_refresh, string $user_id, ?int $history_hours = null): array {
         $effective_hours = $history_hours ?? (int) Config::get('history_window_hours', 24);
         $cache_key = 'map-user-' . preg_replace('/[^A-Za-z0-9._-]/', '_', $user_id ?: '0')
@@ -41,6 +53,9 @@ final class MapBuilder {
             return $payload;
         }
         catch (\Throwable $e) {
+            // Log the real cause server-side; never leak it to the browser.
+            error_log('NetworkMap: map rebuild failed: ' . $e->getMessage());
+
             $stale = $this->cache->readAny($cache_key);
 
             if (is_array($stale)) {
@@ -48,7 +63,6 @@ final class MapBuilder {
                     'cached' => true,
                     'stale' => true,
                     'warning' => 'Refresh failed, stale cached data returned.',
-                    'refresh_error' => $e->getMessage(),
                     'cache_age_seconds' => $this->cache->age($cache_key) ?? null
                 ]);
 
@@ -59,7 +73,17 @@ final class MapBuilder {
         }
     }
 
+    /**
+     * Build the nodes/edges/meta payload by scanning recent connection history.
+     *
+     * History is fetched in batched bulk calls (one per value_type, chunked by
+     * HISTORY_BATCH item ids) rather than one call per item, and the total
+     * number of processed rows is capped at MAX_HISTORY_ROWS to bound memory
+     * and execution time on large estates (meta['limit_reached'] flags a hit).
+     */
     private function build(int $history_hours = 24): array {
+        set_time_limit(300);
+
         $generated_at = time();
         $time_till = $generated_at;
         $time_from = $generated_at - ($history_hours * 3600);
@@ -71,22 +95,70 @@ final class MapBuilder {
 
         $items = $this->getNetworkItems();
 
+        // Pre-resolve each item's local host node and group item ids by
+        // value_type so history can be pulled in bulk batches instead of one
+        // API round-trip per item (the original N+1 bottleneck).
+        $item_host_node = [];
+        $items_by_type = [];
+
         foreach ($items as $item) {
             $itemid = (string) ($item['itemid'] ?? '');
-            $value_type = isset($item['value_type']) ? (int) $item['value_type'] : (defined('ITEM_VALUE_TYPE_TEXT') ? ITEM_VALUE_TYPE_TEXT : 4);
 
             if ($itemid === '') {
                 continue;
             }
 
-            $local_host_node = $this->getItemHostNode($item, $host_nodes);
+            $value_type = isset($item['value_type'])
+                ? (int) $item['value_type']
+                : (defined('ITEM_VALUE_TYPE_TEXT') ? ITEM_VALUE_TYPE_TEXT : 4);
 
-            foreach ($this->getHistory($itemid, $value_type, $time_from, $time_till) as $history_entry) {
-                $payload = Helpers::decodeJsonObject((string) ($history_entry['value'] ?? ''));
+            $item_host_node[$itemid] = $this->getItemHostNode($item, $host_nodes);
+            $items_by_type[$value_type][] = $itemid;
+        }
 
-                if (!is_array($payload)) {
-                    continue;
+        $per_item_limit = (int) Config::get('history_limit_per_item', 50000);
+        $processed_rows = 0;
+        $per_item_rows = [];
+        $limit_reached = false;
+
+        foreach ($items_by_type as $value_type => $itemids) {
+            if ($limit_reached) {
+                break;
+            }
+
+            foreach (array_chunk($itemids, self::HISTORY_BATCH) as $chunk) {
+                if ($limit_reached) {
+                    break;
                 }
+
+                foreach ($this->getHistory($chunk, (int) $value_type, $time_from, $time_till) as $history_entry) {
+                    $itemid = (string) ($history_entry['itemid'] ?? '');
+
+                    if ($itemid === '' || !array_key_exists($itemid, $item_host_node)) {
+                        continue;
+                    }
+
+                    // Per-item processed-row ceiling: a single chatty item must
+                    // not crowd out the rest of the estate.
+                    $per_item_rows[$itemid] = ($per_item_rows[$itemid] ?? 0) + 1;
+                    if ($per_item_rows[$itemid] > $per_item_limit) {
+                        continue;
+                    }
+
+                    // Global processed-row ceiling (timeout/OOM guard).
+                    if ($processed_rows >= self::MAX_HISTORY_ROWS) {
+                        $limit_reached = true;
+                        break;
+                    }
+                    $processed_rows++;
+
+                    $local_host_node = $item_host_node[$itemid];
+
+                    $payload = Helpers::decodeJsonObject((string) ($history_entry['value'] ?? ''));
+
+                    if (!is_array($payload)) {
+                        continue;
+                    }
 
                 $incoming = Helpers::normalizeConnectionList(
                     $payload['incomingconnections']
@@ -183,6 +255,7 @@ final class MapBuilder {
                         ];
                     }
                 }
+                }
             }
         }
 
@@ -269,7 +342,9 @@ final class MapBuilder {
             'nodes_count' => count($nodes),
             'edges_count' => count($edges),
             'host_label_source' => (string) Config::get('host_label_source', 'visible'),
-            'permissions_filtered' => true
+            'permissions_filtered' => true,
+            'limit_reached' => $limit_reached,
+            'rows_processed' => $processed_rows
         ];
 
         if ($items === []) {
@@ -283,6 +358,12 @@ final class MapBuilder {
         ];
     }
 
+    /**
+     * Build the host lookup maps used to resolve connection endpoints.
+     *
+     * @return array{0:array<string,array<string,mixed>>,1:array<string,array<string,mixed>>}
+     *     [ip => host-node] for IP resolution and [technical_name => host-node].
+     */
     private function getNodeMaps(): array {
         $status_monitored = defined('HOST_STATUS_MONITORED') ? HOST_STATUS_MONITORED : 0;
 
@@ -477,18 +558,32 @@ final class MapBuilder {
         return is_array($items) ? $items : [];
     }
 
-    private function getHistory(string $itemid, int $history_type, int $time_from, int $time_till): array {
+    /**
+     * Fetch raw history rows for a batch of item ids sharing one value_type.
+     *
+     * Only itemid/clock/value are requested (lean output, enough to route each
+     * row back to its item and decode it) and the call is bounded by
+     * MAX_HISTORY_ROWS so a single batch can never exceed the global ceiling.
+     *
+     * @param string[] $itemids
+     * @return array<int,array<string,mixed>>
+     */
+    private function getHistory(array $itemids, int $history_type, int $time_from, int $time_till): array {
+        if ($itemids === []) {
+            return [];
+        }
+
         $history_type = $history_type >= 0 ? $history_type : (defined('ITEM_VALUE_TYPE_TEXT') ? ITEM_VALUE_TYPE_TEXT : 4);
 
         $history = \API::History()->get([
-            'output' => 'extend',
+            'output' => ['itemid', 'clock', 'value'],
             'history' => $history_type,
-            'itemids' => [$itemid],
+            'itemids' => array_values($itemids),
             'time_from' => $time_from,
             'time_till' => $time_till,
             'sortfield' => 'clock',
             'sortorder' => 'ASC',
-            'limit' => (int) Config::get('history_limit_per_item', 100000)
+            'limit' => self::MAX_HISTORY_ROWS
         ]);
 
         return is_array($history) ? $history : [];

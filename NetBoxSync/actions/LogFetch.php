@@ -13,11 +13,39 @@ use CController,
 class LogFetch extends CController {
 
     public function init(): void {
+        // Read-only JSON data endpoint.
         $this->disableCsrfValidation();
     }
 
     protected function checkInput(): bool {
-        return true;
+        $fields = [
+            'mode' => 'string',
+            'type' => 'string',
+            'limit' => 'int32',
+            'offset' => 'int32',
+            'since' => 'string',
+            'until' => 'string',
+            'q' => 'string',
+            'host' => 'array',
+            'os' => 'array',
+            'target_type' => 'array',
+            'target_name' => 'array',
+            'sync_id' => 'array',
+            'field' => 'array',
+            'disk_name' => 'array',
+            'col' => 'array'
+        ];
+
+        $ret = $this->validateInput($fields);
+
+        if (!$ret) {
+            $this->respond([
+                'ok' => false,
+                'error' => _('Invalid request parameters.')
+            ], 400);
+        }
+
+        return $ret;
     }
 
     protected function checkPermissions(): bool {
@@ -33,10 +61,13 @@ class LogFetch extends CController {
             $mode = strtolower((string) ($_REQUEST['mode'] ?? 'items'));
             $filters = $this->buildFilters($_REQUEST);
 
-            if ($mode === 'facets') {
+            if ($mode === 'counts') {
+                $result = $store->counts($filters);
+
                 $this->respond([
                     'ok' => true,
-                    'facets' => $store->facets($filters)
+                    'counts' => $result['counts'],
+                    'capped' => $result['capped']
                 ]);
                 return;
             }
@@ -52,48 +83,68 @@ class LogFetch extends CController {
                 'offset' => $result['offset'],
                 'limit' => $result['limit'],
                 'has_more' => $result['has_more'],
-                'facets' => $store->facets($filters)
+                'facets' => $result['facets']
             ]);
         }
-        catch (\Throwable $e) {
+        catch (\InvalidArgumentException $e) {
             $this->respond([
                 'ok' => false,
-                'error' => Util::truncate($e->getMessage(), 2000)
+                'error' => $e->getMessage()
+            ], 400);
+        }
+        catch (\Throwable $e) {
+            error_log('NetBoxSync LogFetch: '.$e->getMessage());
+            $this->respond([
+                'ok' => false,
+                'error' => _('An internal error occurred while reading the log. Check the server error log for details.')
             ], 500);
         }
     }
 
+    /**
+     * Translate the request into the LogStore filter shape:
+     *   - exact[field] => [values]  (multi-select facets, exact match)
+     *   - col[field]   => needle    (per-column substring boxes)
+     *   - q / since / until / type  (scalars)
+     */
     private function buildFilters(array $request): array {
         $filters = [
-            'type' => (string) ($request['type'] ?? ''),
+            'type' => strtolower(trim((string) ($request['type'] ?? ''))),
             'since' => (string) ($request['since'] ?? ''),
             'until' => (string) ($request['until'] ?? ''),
-            'q' => (string) ($request['q'] ?? '')
+            'q' => trim((string) ($request['q'] ?? '')),
+            'exact' => [],
+            'col' => []
         ];
 
-        foreach (['host', 'target_type', 'target_name', 'sync_id', 'field', 'os', 'disk_name'] as $key) {
-            if (!isset($request[$key])) {
+        foreach (LogStore::facetFields() as $key) {
+            if (!isset($request[$key]) || !is_array($request[$key])) {
                 continue;
             }
 
-            $value = $request[$key];
-            if (is_string($value)) {
-                $value = trim($value);
-                if ($value === '') {
+            $clean = [];
+            foreach ($request[$key] as $item) {
+                $item = trim((string) $item);
+                if ($item !== '') {
+                    $clean[] = $item;
+                }
+            }
+
+            if ($clean !== []) {
+                $filters['exact'][$key] = $clean;
+            }
+        }
+
+        if (isset($request['col']) && is_array($request['col'])) {
+            $allowed = array_flip(LogStore::columnFields());
+            foreach ($request['col'] as $key => $value) {
+                $key = (string) $key;
+                if (!isset($allowed[$key]) || !is_string($value)) {
                     continue;
                 }
-                $filters[$key] = $value;
-            }
-            elseif (is_array($value)) {
-                $clean = [];
-                foreach ($value as $item) {
-                    $item = trim((string) $item);
-                    if ($item !== '') {
-                        $clean[] = $item;
-                    }
-                }
-                if ($clean !== []) {
-                    $filters[$key] = $clean;
+                $value = trim($value);
+                if ($value !== '') {
+                    $filters['col'][$key] = $value;
                 }
             }
         }
@@ -105,9 +156,14 @@ class LogFetch extends CController {
         http_response_code($http_status);
         header('Content-Type: application/json; charset=UTF-8');
 
+        $json = json_encode($payload, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if ($json === false) {
+            $json = '{"ok":false,"error":"Failed to encode response."}';
+        }
+
         $this->setResponse(
             (new CControllerResponseData([
-                'main_block' => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+                'main_block' => $json
             ]))->disableView()
         );
     }

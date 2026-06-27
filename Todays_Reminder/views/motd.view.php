@@ -76,7 +76,7 @@ ob_start();
 		</div>
 		<div class="motd-page__header-actions">
 			<?php if (($problems['all_url'] ?? '') !== ''): ?>
-				<a class="btn-alt" href="<?= $h($problems['all_url']) ?>"><?= $h(_('Open Problems')) ?></a>
+				<a class="motd-page__btn" href="<?= $h($problems['all_url']) ?>"><?= $h(_('Open Problems')) ?></a>
 			<?php endif; ?>
 		</div>
 	</div>

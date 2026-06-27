@@ -116,7 +116,13 @@ Removed / Errors.
 
 ## 9. Add a scheduler
 
-Use cron or a systemd timer; examples live in `samples/`. The runner URL is:
+Use cron or a systemd timer. Ready-to-use examples ship in `samples/`:
+
+- `samples/systemd/netboxsync.service` and `samples/systemd/netboxsync.timer`
+- `samples/netboxsync-run.sh` — a small curl wrapper used by both the service
+  and the cron example below.
+
+The runner URL is:
 
 ```
 https://<zabbix>/zabbix.php?action=netboxsync.run
@@ -124,6 +130,12 @@ https://<zabbix>/zabbix.php?action=netboxsync.run
 
 Calls must include the shared secret header
 `X-NetBox-Sync-Secret: <shared_secret>`.
+
+Cron alternative (keeps the secret out of the process list):
+
+```bash
+*/15 * * * * . /etc/sysconfig/zabbix-netbox-sync; sh /usr/share/zabbix/modules/NetBoxSync/samples/netboxsync-run.sh
+```
 
 ### 9a. systemd timer (recommended)
 

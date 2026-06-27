@@ -5,7 +5,7 @@
   "namespace": "Healthcheck",
   "version": "1.0.0",
   "author": "Keberneth",
-  "description": "Zabbix frontend module for scheduled health checks, heartbeat visibility, and run history.",
+  "description": "Zabbix frontend module for scheduled health checks, heartbeat visibility, and run history. Works on single-server, multi-server, and Docker deployments.",
   "actions": {
     "healthcheck.heartbeat": {
       "class": "HeartbeatView",

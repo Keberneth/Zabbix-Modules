@@ -7,6 +7,7 @@
     var REFRESH_MS = 60000;
 
     var refreshTimer = null;
+    var lastFingerprint = '';
 
     function init() {
         if (window.location && window.location.search.indexOf('action=motd.banner.data') !== -1) {
@@ -34,7 +35,12 @@
     }
 
     function fetchAndRender() {
-        fetch(DATA_URL + '&_=' + Date.now(), {
+        var url = DATA_URL + '&_=' + Date.now();
+        if (lastFingerprint) {
+            url += '&fingerprint=' + encodeURIComponent(lastFingerprint);
+        }
+
+        fetch(url, {
             method: 'GET',
             credentials: 'same-origin',
             headers: {
@@ -43,10 +49,21 @@
         })
             .then(handleJsonResponse)
             .then(function (response) {
-                if (!response || response.ok !== true || !response.data || typeof response.data !== 'object') {
+                if (!response || response.ok !== true) {
                     return;
                 }
 
+                // Server signalled the payload is unchanged: keep the existing DOM (and its
+                // collapse state) instead of re-rendering, avoiding flicker and churn.
+                if (response.not_modified === true && document.getElementById(ROOT_ID)) {
+                    return;
+                }
+
+                if (!response.data || typeof response.data !== 'object') {
+                    return;
+                }
+
+                lastFingerprint = String(response.data.fingerprint || '');
                 render(response.data);
             })
             .catch(function () {
