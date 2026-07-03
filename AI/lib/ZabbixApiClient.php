@@ -3241,9 +3241,11 @@ class ZabbixApiClient {
     /**
      * Normalise a match-tag array into [{tag, operator, value}].
      * Operator is clamped to {0 = equals, 2 = contains} (no other values exist).
-     * Used for service.problem_tags and sla.service_tags.
+     * Used for service.problem_tags and sla.service_tags. Public so the
+     * executor can run its SLA-scope guards on the same normalised form that
+     * is sent to the API.
      */
-    private function normalizeMatchTags(array $tags): array {
+    public function normalizeMatchTags(array $tags): array {
         $out = [];
         foreach ($tags as $t) {
             if (!is_array($t)) {
@@ -3282,38 +3284,62 @@ class ZabbixApiClient {
     }
 
     /**
-     * Create a leaf IT service that maps problems via problem_tags (AND logic:
-     * a problem must carry ALL listed tags) and carries plain service tags that
-     * an SLA selects on (OR logic). Returns the created service summary.
+     * Create an IT service, optionally linked into a parent/child hierarchy.
      *
-     * @param array $problem_tags [{tag, operator, value}] — AND-combined matchers.
-     * @param array $service_tags [{tag, value}] — the SLA selection handle.
+     * A LEAF service maps problems via problem_tags (AND logic: a problem must
+     * carry ALL listed tags) and carries plain service tags that an SLA selects
+     * on (OR logic). A PARENT/GROUP service may omit problem_tags and instead
+     * aggregates the existing services in $child_serviceids.
+     *
+     * @param array $problem_tags     [{tag, operator, value}] — AND-combined matchers.
+     * @param array $service_tags     [{tag, value}] — the SLA selection handle.
+     * @param array $parent_serviceids Existing services this one is attached under.
+     * @param array $child_serviceids  Existing services attached as children.
      */
-    public function createSlaService(string $name, array $problem_tags, array $service_tags, int $algorithm = 1, int $sortorder = 0): array {
+    public function createSlaService(string $name, array $problem_tags, array $service_tags, int $algorithm = 1, int $sortorder = 0, array $parent_serviceids = [], array $child_serviceids = []): array {
         $name = trim($name);
         if ($name === '') {
             throw new RuntimeException('Service name is required.');
         }
 
         $problems = $this->normalizeMatchTags($problem_tags);
-        if (!$problems) {
-            throw new RuntimeException('At least one problem_tag is required so the service can map problems.');
+        if (!$problems && !$child_serviceids) {
+            throw new RuntimeException('At least one problem_tag is required so the service can map problems (only a parent service with child_serviceids may omit them).');
+        }
+        if ($problems && $child_serviceids) {
+            throw new RuntimeException('Zabbix does not allow a service to have both problem_tags and children — a LEAF maps problems, a PARENT aggregates children.');
         }
 
         $plain = $this->normalizePlainTags($service_tags);
 
         if (!in_array($algorithm, [0, 1, 2], true)) {
-            $algorithm = 1;
+            $algorithm = $child_serviceids ? 2 : 1;
         }
 
         $payload = [
             'name' => Util::truncate($name, 128),
             'algorithm' => $algorithm,
-            'sortorder' => max(0, min(999, $sortorder)),
-            'problem_tags' => $problems
+            'sortorder' => max(0, min(999, $sortorder))
         ];
+        if ($problems) {
+            $payload['problem_tags'] = $problems;
+        }
         if ($plain) {
             $payload['tags'] = $plain;
+        }
+        if ($parent_serviceids) {
+            $parents = [];
+            foreach ($parent_serviceids as $pid) {
+                $parents[] = ['serviceid' => (string) $pid];
+            }
+            $payload['parents'] = $parents;
+        }
+        if ($child_serviceids) {
+            $children = [];
+            foreach ($child_serviceids as $cid) {
+                $children[] = ['serviceid' => (string) $cid];
+            }
+            $payload['children'] = $children;
         }
 
         $result = $this->call('service.create', $payload);
@@ -3323,7 +3349,9 @@ class ZabbixApiClient {
             'name' => $name,
             'algorithm' => $algorithm,
             'problem_tags' => $problems,
-            'service_tags' => $plain
+            'service_tags' => $plain,
+            'parent_serviceids' => array_values($parent_serviceids),
+            'child_serviceids' => array_values($child_serviceids)
         ];
     }
 
@@ -3377,6 +3405,130 @@ class ZabbixApiClient {
             'service_tags' => $tags,
             'effective_date' => $effective_date
         ];
+    }
+
+    /**
+     * Detailed IT-service listing used by the SLA scoping tools.
+     *
+     * $match_tags — [{tag, operator, value}] SLA-style matchers, OR-combined
+     * exactly like sla.service_tags: a service matches when ANY matcher
+     * matches one of its service tags. $keyword — case-insensitive substring
+     * filter on the service name. Both filters optional; when both are given
+     * a service must satisfy both. Throws on API failure so SLA guards can
+     * fail closed instead of guessing.
+     */
+    public function getServicesDetailed(array $match_tags = [], string $keyword = '', int $limit = 5000): array {
+        $matchers = $this->normalizeMatchTags($match_tags);
+        $keyword = trim($keyword);
+
+        $cap = min(max($limit, 1), 5000);
+        $services = $this->call('service.get', [
+            'output' => ['serviceid', 'name', 'algorithm', 'sortorder'],
+            'selectTags' => ['tag', 'value'],
+            'selectProblemTags' => ['tag', 'operator', 'value'],
+            'selectParents' => ['serviceid', 'name'],
+            'selectChildren' => ['serviceid', 'name'],
+            'sortfield' => 'name',
+            'limit' => $cap
+        ]);
+
+        // Tag-scope resolution must fail closed when the window is (possibly)
+        // incomplete: a matching service beyond the cap would silently break
+        // the uniqueness guards. A plain keyword search stays usable (it may
+        // just be incomplete past the cap).
+        if ($matchers && count($services) >= $cap) {
+            throw new RuntimeException('The installation has '.$cap.'+ IT services — tag scope cannot be resolved reliably client-side. Verify the SLA scope manually in the Zabbix UI.');
+        }
+        $out = [];
+
+        foreach ($services as $s) {
+            if ($keyword !== '' && stripos((string) ($s['name'] ?? ''), $keyword) === false) {
+                continue;
+            }
+            if ($matchers && !$this->serviceMatchesSlaTags((array) ($s['tags'] ?? []), $matchers)) {
+                continue;
+            }
+            $out[] = $s;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Emulate Zabbix SLA service-tag matching (OR logic): true when ANY
+     * matcher matches ANY of the service's tags. Mirrors the SQL Zabbix 7
+     * uses for sla.service_tags: tag names compare exactly; operator 0
+     * (equals) compares values exactly (an empty matcher value matches only
+     * an empty tag value); operator 2 (contains) is a case-insensitive
+     * substring match (an empty matcher value matches any value, like
+     * LIKE '%%').
+     */
+    private function serviceMatchesSlaTags(array $service_tags, array $matchers): bool {
+        foreach ($matchers as $m) {
+            foreach ($service_tags as $t) {
+                if ((string) ($t['tag'] ?? '') !== $m['tag']) {
+                    continue;
+                }
+                $value = (string) ($t['value'] ?? '');
+                if ((int) $m['operator'] === 2) {
+                    if ($m['value'] === '' || mb_stripos($value, $m['value']) !== false) {
+                        return true;
+                    }
+                }
+                elseif ($value === $m['value']) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Exact-name service lookup. Zabbix does NOT enforce unique service
+     * names, so this returns ALL services carrying the name (capped) so
+     * callers can detect ambiguity. Each entry has serviceid, name and tags.
+     */
+    public function getServicesByExactName(string $name, int $limit = 5): array {
+        $name = trim($name);
+        if ($name === '') {
+            return [];
+        }
+
+        return $this->call('service.get', [
+            'output' => ['serviceid', 'name'],
+            'selectTags' => ['tag', 'value'],
+            'filter' => ['name' => $name],
+            'limit' => min(max($limit, 1), 50)
+        ]);
+    }
+
+    /**
+     * Resolve service IDs to names; used to validate parent/child links before
+     * service.create. Returns [serviceid => name] for the IDs that exist.
+     */
+    public function getServiceNamesByIds(array $serviceids): array {
+        $ids = [];
+        foreach ($serviceids as $id) {
+            $id = trim((string) $id);
+            if ($id !== '' && preg_match('/^\d+$/', $id)) {
+                $ids[] = $id;
+            }
+        }
+        if (!$ids) {
+            return [];
+        }
+
+        $services = $this->call('service.get', [
+            'output' => ['serviceid', 'name'],
+            'serviceids' => $ids
+        ]);
+
+        $map = [];
+        foreach ($services as $s) {
+            $map[(string) $s['serviceid']] = (string) ($s['name'] ?? '');
+        }
+
+        return $map;
     }
 
     /**
