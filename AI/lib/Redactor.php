@@ -11,6 +11,26 @@ class Redactor {
         'corp', 'home', 'intra', 'example', 'test', 'invalid', 'se', 'no', 'dk', 'fi', 'de', 'fr', 'uk', 'us'
     ];
 
+    /**
+     * Token-edge lookarounds shared by every hostname-like scan (inventory,
+     * services, hostname heuristic and the strict-mode leak check — they must
+     * stay identical or strict mode can false-block). A candidate is rejected
+     * when it is glued to a letter/digit/underscore/hyphen, or when a dot
+     * connects it to another alphanumeric ("db-01" inside "myprd-db-01x",
+     * "amd64fre" inside "17763.1.amd64fre.rs5"). A dot followed by whitespace
+     * or end of text is sentence punctuation, so "check LHBDC103." still masks.
+     */
+    private const BOUNDARY_BEFORE = '(?<![A-Za-z0-9_\-])(?<![A-Za-z0-9]\.)';
+    private const BOUNDARY_AFTER = '(?![A-Za-z0-9_\-])(?!\.[A-Za-z0-9])';
+
+    /**
+     * Two-label names ending in one of these are almost always file names in
+     * monitoring text (backup.sh, README.md, node.js), not domains under the
+     * matching ccTLD (.sh/.py/.md exist but are rare in ops chat). Names with
+     * more labels (www.example.md) are still treated as domains.
+     */
+    private const CODE_FILE_EXTENSIONS = ['sh', 'py', 'md', 'js', 'ts', 'go', 'rb', 'cs', 'vb', 'tf', 'gz', 'xz'];
+
     private array $config;
     private array $state;
     private bool $persistent;
@@ -158,8 +178,11 @@ class Redactor {
         $text = $this->applyUrlRedaction($text);
         $text = $this->applyIpV4Redaction($text);
         $text = $this->applyIpV6Redaction($text);
-        $text = $this->applyFqdnRedaction($text);
+        // Hostnames before FQDNs so that an FQDN whose first label is a
+        // hostname masked in this same message reuses that host's alias
+        // (aliasForFqdn), keeping host and FQDN correlated for the AI.
         $text = $this->applyHostnameRedaction($text);
+        $text = $this->applyFqdnRedaction($text);
 
         $this->assertNoKnownLeaks($text);
         $this->assertCustomRulesApplied();
@@ -302,10 +325,7 @@ class Redactor {
             return preg_quote($p, '~');
         }, $phrases);
 
-        // (?<![A-Za-z0-9_.-]) and (?![A-Za-z0-9_.-]) treat dot/underscore/hyphen
-        // as part of the surrounding token, so "myprd-db-01x" is NOT matched
-        // when only "db-01" is in the inventory.
-        $pattern = '~(?<![A-Za-z0-9_.\-])(?:'.implode('|', $escaped).')(?![A-Za-z0-9_.\-])~iu';
+        $pattern = '~'.self::BOUNDARY_BEFORE.'(?:'.implode('|', $escaped).')'.self::BOUNDARY_AFTER.'~iu';
 
         return preg_replace_callback($pattern, function(array $m): string {
             $matched = $m[0];
@@ -326,22 +346,49 @@ class Redactor {
             }
 
             $canonical = $this->zbx_inventory_canonical[$canonical_lower] ?? $canonical_lower;
+            $alias = $this->sessionInventoryAlias($canonical, $alias);
 
             // Register restore mapping for the canonical (idempotent).
             if (!isset($this->state['reverse'][$alias])) {
                 $this->state['reverse'][$alias] = $canonical;
             }
-            // Persist only the full canonical spelling — substrings would
-            // bloat the per-session state file across requests and they are
-            // already rebuilt from the inventory cache on every load.
-            if ($matched_lower === $canonical_lower && !isset($this->state['forward'][$canonical])) {
+            if (!isset($this->state['forward'][$canonical])) {
                 $this->state['forward'][$canonical] = $alias;
                 $this->state['meta'][$canonical] = ['type' => 'hostname', 'alias' => $alias];
+            }
+            // Persist the matched phrase too (visible name or identifier
+            // subtoken): a later request in this session must keep masking it
+            // even if the Zabbix API is unavailable and the inventory cannot
+            // be reloaded. Only phrases actually seen are stored, so the
+            // per-session state stays small.
+            if ($matched !== $canonical && !isset($this->state['forward'][$matched])) {
+                $this->state['forward'][$matched] = $alias;
+                $this->state['meta'][$matched] = ['type' => 'hostname', 'alias' => $alias];
             }
 
             $this->bumpStat('hostnames');
             return $alias;
         }, $text);
+    }
+
+    /**
+     * Session-safe alias for an inventory host. If the cache-assigned alias is
+     * already used by this session for a DIFFERENT value (e.g. the hostname
+     * heuristic allocated ai-host-011 before an 11th host was added to
+     * Zabbix), a uniquified variant is pinned to this session instead, so two
+     * hosts never share one alias within a conversation.
+     */
+    private function sessionInventoryAlias(string $canonical, string $inventory_alias): string {
+        if (isset($this->state['forward'][$canonical])) {
+            return $this->state['forward'][$canonical];
+        }
+
+        $current = $this->state['reverse'][$inventory_alias] ?? null;
+        if ($current !== null && $current !== $canonical) {
+            return $this->ensureUniqueAlias($inventory_alias);
+        }
+
+        return $inventory_alias;
     }
 
     /**
@@ -361,7 +408,7 @@ class Redactor {
             return preg_quote($n, '~');
         }, $names);
 
-        $pattern = '~(?<![A-Za-z0-9_.\-])(?:'.implode('|', $escaped).')(?![A-Za-z0-9_.\-])~iu';
+        $pattern = '~'.self::BOUNDARY_BEFORE.'(?:'.implode('|', $escaped).')'.self::BOUNDARY_AFTER.'~iu';
 
         $replaced = preg_replace_callback($pattern, function(array $m): string {
             $matched = $m[0];
@@ -657,19 +704,70 @@ class Redactor {
         return $details;
     }
 
+    /**
+     * Re-apply prior session mappings with type-appropriate boundaries. A raw
+     * substring pass (strtr) corrupts longer tokens that merely contain a
+     * mapped value — "WEB011" became "ai-host-0041" once "WEB01" was mapped,
+     * and "110.140.48.38" became "1192.0.2.1" once "10.140.48.38" was mapped.
+     * A boundary miss here is safe: the per-category passes re-detect the value
+     * and registerMapping() dedupes onto the same stable alias.
+     */
     private function applyExistingForwardMappings(string $text): string {
         if (empty($this->state['forward'])) {
             return $text;
         }
 
-        $originals = array_keys($this->state['forward']);
-        $originals = Util::sortByLengthDesc($originals);
-        $replace = [];
+        $originals = Util::sortByLengthDesc(array_keys($this->state['forward']));
+
         foreach ($originals as $original) {
-            $replace[$original] = $this->state['forward'][$original];
+            $original = (string) $original;
+            $alias = (string) ($this->state['forward'][$original] ?? '');
+
+            if ($original === '' || $alias === '' || $original === $alias) {
+                continue;
+            }
+
+            $type = $this->state['meta'][$original]['type'] ?? '';
+
+            // Custom rules are substring-matched by their own pass, so their
+            // re-application keeps the same substring semantics.
+            if ($type === 'custom') {
+                $text = str_replace($original, $alias, $text);
+                continue;
+            }
+
+            // OS originals contain spaces and prefix each other ("Windows"
+            // inside "Windows Server 2019"); re-applying them here would
+            // preempt the OS pass's longest match and leak the version part.
+            // applyOsRedaction always re-detects and dedupes onto the same
+            // alias, so skipping is safe.
+            if ($type === 'os') {
+                continue;
+            }
+
+            $quoted = preg_quote($original, '~');
+
+            if ($type === 'ipv4' || $type === 'ipv6') {
+                $pattern = ($type === 'ipv4')
+                    ? '~(?<![0-9.])'.$quoted.'(?![0-9.])~'
+                    : '~(?<![A-Fa-f0-9:.])'.$quoted.'(?![A-Fa-f0-9:.])~i';
+            }
+            else {
+                // hostname / service / os / fqdn: match case-insensitively so a
+                // case variant maps to the same alias instead of a new one.
+                $pattern = '~'.self::BOUNDARY_BEFORE.$quoted.self::BOUNDARY_AFTER.'~iu';
+            }
+
+            $replaced = @preg_replace_callback($pattern, static function() use ($alias): string {
+                return $alias;
+            }, $text);
+
+            if (is_string($replaced)) {
+                $text = $replaced;
+            }
         }
 
-        return strtr($text, $replace);
+        return $text;
     }
 
     private function applyCustomRules(string $text): string {
@@ -718,8 +816,13 @@ class Redactor {
                             $alias = $replace;
                         }
                         else {
+                            // The kept subdomain labels may themselves be
+                            // sensitive ("db-prod-01.corp.example.com" must not
+                            // reach the AI as "db-prod-01.masked.example"), so
+                            // known hosts and identifier-like labels are
+                            // aliased before the suffix is swapped.
                             $prefix = substr($original, 0, -strlen(ltrim($match, '.')));
-                            $alias = $prefix.$replace;
+                            $alias = $this->maskFqdnPrefixLabels($prefix).$replace;
                         }
 
                         $alias = $this->registerMapping($original, $alias, 'custom');
@@ -788,19 +891,35 @@ class Redactor {
             return $text;
         }
 
-        $patterns = [
-            '~\bWindows(?:\s+Server)?(?:\s+\d{2,4}(?:[A-Za-z0-9._-]*)?)?\b~iu' => 'windows-family',
-            '~\b(?:Red Hat Enterprise Linux|RHEL|Ubuntu|Debian|CentOS|Rocky Linux|AlmaLinux|Fedora|SUSE(?: Linux)?(?: Enterprise)?|Oracle Linux|Amazon Linux)(?:\s+\d+(?:[A-Za-z0-9._-]*)?)?\b~iu' => 'linux-family',
-            '~\bLinux\b~iu' => 'linux-family',
-            '~\b(?:FortiOS|PAN-OS|IOS XE|NX-OS|Junos|ArubaOS|RouterOS|EOS)\b~iu' => 'network-os-family',
-            '~\b(?:VMware ESXi|ESXi|Proxmox VE)\b~iu' => 'hypervisor-family'
+        // BOUNDARY lookarounds (not \b) so the case-insensitive patterns never
+        // re-match inside the module's own aliases ("windows" inside
+        // "ai-windows-family-001" would nest into garbage). The backslash
+        // guards keep path components ("C:\Windows\System32") intact — a
+        // family alias would reveal the same information while corrupting the
+        // path.
+        $bodies = [
+            'Windows(?:\s+Server)?(?:\s+\d{2,4}(?:[A-Za-z0-9._-]*)?)?' => 'windows-family',
+            '(?:Red Hat Enterprise Linux|RHEL|Ubuntu|Debian|CentOS|Rocky Linux|AlmaLinux|Fedora|SUSE(?: Linux)?(?: Enterprise)?|Oracle Linux|Amazon Linux)(?:\s+\d+(?:[A-Za-z0-9._-]*)?)?' => 'linux-family',
+            'Linux' => 'linux-family',
+            '(?:FortiOS|PAN-OS|IOS XE|NX-OS|Junos|ArubaOS|RouterOS|EOS)' => 'network-os-family',
+            '(?:VMware ESXi|ESXi|Proxmox VE)' => 'hypervisor-family'
         ];
+
+        $patterns = [];
+        foreach ($bodies as $body => $family) {
+            $patterns['~'.self::BOUNDARY_BEFORE.'(?<!\\\\)'.$body.self::BOUNDARY_AFTER.'(?!\\\\)~iu'] = $family;
+        }
 
         foreach ($patterns as $pattern => $family) {
             $text = preg_replace_callback($pattern, function(array $m) use ($mode, $family) {
                 $original = $m[0];
                 if ($this->isAliasValue($original)) {
                     return $original;
+                }
+
+                if (isset($this->state['forward'][$original])) {
+                    $this->bumpStat('os');
+                    return $this->state['forward'][$original];
                 }
 
                 if ($mode === 'full_alias') {
@@ -875,12 +994,27 @@ class Redactor {
             return $text;
         }
 
+        // The lookarounds refuse to bite a 4-octet chunk out of a longer
+        // dotted numeric string, so SNMP OIDs (1.3.6.1.2.1.1.5.0) and 5-part
+        // versions are left intact instead of becoming fake RFC5737 addresses.
         return preg_replace_callback(
-            '~\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b~',
+            '~(?<![0-9A-Za-z_.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b(?!\.?\d)~',
             function(array $m) {
                 $original = $m[0];
                 if ($this->isAliasValue($original)) {
                     return $original;
+                }
+
+                // RFC 5737 documentation addresses are non-sensitive by
+                // definition and are the module's own alias space — masking
+                // them would only chain aliases.
+                if (preg_match('/^(?:192\.0\.2|198\.51\.100|203\.0\.113)\./', $original)) {
+                    return $original;
+                }
+
+                if (isset($this->state['forward'][$original])) {
+                    $this->bumpStat('ipv4');
+                    return $this->state['forward'][$original];
                 }
 
                 $alias = $this->registerMapping($original, $this->nextIpv4Alias(), 'ipv4');
@@ -896,21 +1030,62 @@ class Redactor {
             return $text;
         }
 
+        // The lookbehind rejects a start glued to any alphanumeric (a leading
+        // hex char could belong to a word: "SRC:fd00::5" must match at fd00,
+        // not at "C:fd00::5" which is itself valid IPv6), but NOT one after a
+        // colon — otherwise a label prefix ("IP:2a02::...") makes the address
+        // unmatchable and it leaks. The trailing (?!\.[0-9]) refuses to split
+        // an IPv4-mapped form ("::ffff:1.2.3.4") whose "::ffff:1" prefix would
+        // otherwise validate on its own. Punctuation colons swallowed by the
+        // greedy match are peeled off in the callback.
         return preg_replace_callback(
-            '~(?<![A-Fa-f0-9:])(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9]{0,4}(?![A-Fa-f0-9:])~',
+            '~(?<![A-Za-z0-9])(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9]{0,4}(?![A-Fa-f0-9:])(?!\.[0-9])~',
             function(array $m) {
                 $original = $m[0];
                 if ($original === '' || $this->isAliasValue($original)) {
                     return $original;
                 }
 
-                if (@filter_var($original, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) === false) {
+                // The match may include a leading label colon ("IP:2a02::…")
+                // or a trailing punctuation colon ("… 2001:db8::5: timeout"),
+                // which makes validation fail and used to leak the address.
+                // Peel colons from both ends until the remainder validates.
+                $candidate = $original;
+                $lead = '';
+                while ($candidate !== '' && $candidate[0] === ':' && strpos($candidate, '::') !== 0
+                        && @filter_var($candidate, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) === false) {
+                    $lead .= ':';
+                    $candidate = substr($candidate, 1);
+                }
+                while ($candidate !== '' && substr($candidate, -1) === ':'
+                        && @filter_var($candidate, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) === false) {
+                    $candidate = substr($candidate, 0, -1);
+                }
+
+                if ($candidate === '' || @filter_var($candidate, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) === false) {
                     return $original;
                 }
 
-                $alias = $this->registerMapping($original, $this->nextIpv6Alias(), 'ipv6');
+                if ($this->isAliasValue($candidate)) {
+                    return $original;
+                }
+
+                // RFC 3849 documentation prefix — non-sensitive by definition
+                // and the module's own alias space.
+                if (preg_match('/^2001:db8(?::|$)/i', $candidate)) {
+                    return $original;
+                }
+
+                $suffix = substr($original, strlen($lead) + strlen($candidate));
+
+                if (isset($this->state['forward'][$candidate])) {
+                    $this->bumpStat('ipv6');
+                    return $lead.$this->state['forward'][$candidate].$suffix;
+                }
+
+                $alias = $this->registerMapping($candidate, $this->nextIpv6Alias(), 'ipv6');
                 $this->bumpStat('ipv6');
-                return $alias;
+                return $lead.$alias.$suffix;
             },
             $text
         );
@@ -929,12 +1104,128 @@ class Redactor {
                     return $original;
                 }
 
-                $alias = $this->registerMapping($original, $this->generateSequentialAlias('fqdn', 'ai-domain-', '.example'), 'fqdn');
-                $this->bumpStat('fqdns');
+                $alias = $this->aliasForFqdn($original);
+                if ($alias !== $original) {
+                    $this->bumpStat('fqdns');
+                }
                 return $alias;
             },
             $text
         );
+    }
+
+    /**
+     * Alias an FQDN. When its first label is a known host — from the Zabbix
+     * inventory (including identifier subtokens and visible names) or a
+     * hostname already mapped in this session — the FQDN becomes
+     * "<host-alias>.example" instead of an unrelated ai-domain-NNN.example, so
+     * the AI can tell that lhbdc103.lh.example.net is the FQDN of LHBDC103
+     * (ai-host-010 => ai-host-010.example). Unrelated FQDNs keep the
+     * ai-domain-NNN.example form.
+     *
+     * FQDN keys are lowercased (DNS is case-insensitive) so case variants of
+     * the same name share one alias.
+     */
+    private function aliasForFqdn(string $fqdn): string {
+        $key = strtolower(trim($fqdn));
+
+        if ($key === '') {
+            return $fqdn;
+        }
+
+        // Never re-mask an alias the module itself generated (e.g. pasted back
+        // into a fresh session where it is not in the reverse map yet).
+        if (preg_match('/^ai-(?:host|domain)-[a-z0-9-]+\.example$/', $key)) {
+            return $fqdn;
+        }
+
+        if (isset($this->state['forward'][$key])) {
+            return $this->state['forward'][$key];
+        }
+
+        $host_alias = $this->hostAliasForFqdn($key);
+        $desired = ($host_alias !== null)
+            ? $host_alias.'.example'
+            : $this->generateSequentialAlias('fqdn', 'ai-domain-', '.example');
+
+        return $this->registerMapping($key, $desired, 'fqdn', '.example');
+    }
+
+    /**
+     * Resolve the host alias to correlate an FQDN with, or null when the first
+     * label is not a known host.
+     */
+    private function hostAliasForFqdn(string $fqdn_lower): ?string {
+        $first_label = (string) strstr($fqdn_lower, '.', true);
+
+        return ($first_label === '') ? null : $this->knownHostAlias($first_label);
+    }
+
+    /**
+     * Alias for a single hostname label when it is a known host — from the
+     * Zabbix inventory (including identifier subtokens and visible names) or a
+     * hostname already mapped in this session. For inventory hosts the bare
+     * hostname mapping is registered as well, so a reply that mentions the
+     * bare "ai-host-NNN" alias restores even if the hostname itself never
+     * appeared in the chat.
+     */
+    private function knownHostAlias(string $label_lower): ?string {
+        $canonical_lower = $this->zbx_inventory_phrases[$label_lower] ?? null;
+        if ($canonical_lower !== null) {
+            $alias = $this->zbx_inventory_aliases[$canonical_lower] ?? null;
+            if ($alias !== null) {
+                $canonical = $this->zbx_inventory_canonical[$canonical_lower] ?? $canonical_lower;
+                $alias = $this->sessionInventoryAlias($canonical, $alias);
+                if (!isset($this->state['reverse'][$alias])) {
+                    $this->state['reverse'][$alias] = $canonical;
+                }
+                if (!isset($this->state['forward'][$canonical])) {
+                    $this->state['forward'][$canonical] = $alias;
+                    $this->state['meta'][$canonical] = ['type' => 'hostname', 'alias' => $alias];
+                }
+                return $alias;
+            }
+        }
+
+        foreach (($this->state['forward'] ?? []) as $original => $alias) {
+            if (($this->state['meta'][$original]['type'] ?? '') === 'hostname'
+                    && strtolower((string) $original) === $label_lower) {
+                return (string) $alias;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Mask the subdomain labels a domain_suffix custom rule keeps in front of
+     * its replacement. Known hosts reuse their stable alias (preserving the
+     * host/FQDN correlation); other identifier-like labels get a fresh
+     * ai-host-NNN alias; generic labels such as "www" pass through.
+     */
+    private function maskFqdnPrefixLabels(string $prefix): string {
+        $labels = explode('.', $prefix);
+
+        foreach ($labels as &$label) {
+            if ($label === '') {
+                continue;
+            }
+
+            $alias = $this->knownHostAlias(strtolower($label));
+
+            if ($alias === null && $this->isLikelyHostname($label)) {
+                $alias = isset($this->state['forward'][$label])
+                    ? $this->state['forward'][$label]
+                    : $this->registerMapping($label, $this->generateSequentialAlias('hostname', 'ai-host-'), 'hostname');
+            }
+
+            if ($alias !== null && $alias !== '') {
+                $label = $alias;
+            }
+        }
+        unset($label);
+
+        return implode('.', $labels);
     }
 
     private function applyHostnameRedaction(string $text): string {
@@ -942,18 +1233,27 @@ class Redactor {
             return $text;
         }
 
-        // The boundary lookarounds reject tokens that are glued to a '.', '_' or
-        // '-' on either side, so a fragment embedded in a dotted version/build
-        // string (e.g. "amd64fre" inside "17763.1.amd64fre.rs5_release") is never
-        // treated as a standalone hostname. Internal hyphens are still allowed,
-        // so "db-prod-01" matches as one token.
+        // The BOUNDARY lookarounds reject tokens glued to '_'/'-'/alphanumerics
+        // or dot-connected to another alphanumeric, so a fragment embedded in a
+        // dotted version/build string (e.g. "amd64fre" inside
+        // "17763.1.amd64fre.rs5_release") is never treated as a standalone
+        // hostname, while a sentence-ending dot ("check db-prod-01.") is.
+        // Internal hyphens are still allowed, so "db-prod-01" is one token.
+        // Backslash-adjacent tokens are Windows path components
+        // ("C:\Windows\System32"), not hostnames — known hosts in UNC paths
+        // are still caught by the inventory pass, which has no such guard.
         return preg_replace_callback(
-            '~(?<![A-Za-z0-9._-])[A-Za-z][A-Za-z0-9_-]{2,62}(?![A-Za-z0-9._-])~u',
+            '~'.self::BOUNDARY_BEFORE.'(?<!\\\\)[A-Za-z][A-Za-z0-9_-]{2,62}'.self::BOUNDARY_AFTER.'(?!\\\\)~u',
             function(array $m) {
                 $original = $m[0];
 
                 if ($this->isAliasValue($original) || !$this->isLikelyHostname($original)) {
                     return $original;
+                }
+
+                if (isset($this->state['forward'][$original])) {
+                    $this->bumpStat('hostnames');
+                    return $this->state['forward'][$original];
                 }
 
                 $alias = $this->registerMapping($original, $this->generateSequentialAlias('hostname', 'ai-host-'), 'hostname');
@@ -965,20 +1265,53 @@ class Redactor {
     }
 
     private function aliasHostLikeValue(string $value): string {
+        // Never alias an alias — e.g. the same URL sent again after the
+        // forward-mapping pass already rewrote its host. Re-aliasing would
+        // chain mappings and restoreText would show an alias to the user.
+        if ($this->isAliasValue($value)) {
+            return $value;
+        }
+
+        // Per-type stats are bumped here as well so the redaction log's
+        // counters match the mapping_details rows a URL produces.
         if (@filter_var($value, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
-            return $this->registerMapping($value, $this->nextIpv4Alias(), 'ipv4');
+            if (preg_match('/^(?:192\.0\.2|198\.51\.100|203\.0\.113)\./', $value)) {
+                return $value;
+            }
+
+            $alias = isset($this->state['forward'][$value])
+                ? $this->state['forward'][$value]
+                : $this->registerMapping($value, $this->nextIpv4Alias(), 'ipv4');
+            $this->bumpStat('ipv4');
+            return $alias;
         }
 
         if (@filter_var($value, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
-            return $this->registerMapping($value, $this->nextIpv6Alias(), 'ipv6');
+            if (preg_match('/^2001:db8(?::|$)/i', $value)) {
+                return $value;
+            }
+
+            $alias = isset($this->state['forward'][$value])
+                ? $this->state['forward'][$value]
+                : $this->registerMapping($value, $this->nextIpv6Alias(), 'ipv6');
+            $this->bumpStat('ipv6');
+            return $alias;
         }
 
         if ($this->isLikelyDomain($value)) {
-            return $this->registerMapping($value, $this->generateSequentialAlias('fqdn', 'ai-domain-', '.example'), 'fqdn');
+            $alias = $this->aliasForFqdn($value);
+            if ($alias !== $value) {
+                $this->bumpStat('fqdns');
+            }
+            return $alias;
         }
 
         if ($this->isLikelyHostname($value)) {
-            return $this->registerMapping($value, $this->generateSequentialAlias('hostname', 'ai-host-'), 'hostname');
+            $alias = isset($this->state['forward'][$value])
+                ? $this->state['forward'][$value]
+                : $this->registerMapping($value, $this->generateSequentialAlias('hostname', 'ai-host-'), 'hostname');
+            $this->bumpStat('hostnames');
+            return $alias;
         }
 
         return $value;
@@ -1007,6 +1340,10 @@ class Redactor {
 
         $tld = (string) end($parts);
         if (!preg_match('/^[a-z]{2,24}$/', $tld)) {
+            return false;
+        }
+
+        if (count($parts) === 2 && in_array($tld, self::CODE_FILE_EXTENSIONS, true)) {
             return false;
         }
 
@@ -1049,14 +1386,23 @@ class Redactor {
 
         $deny = [
             'rhel7', 'rhel8', 'rhel9', 'ubuntu20', 'ubuntu22', 'windows10', 'windows11', 'gpt4', 'gpt41',
-            'http2', 'tls12', 'tls13', 'sha256', 'sha512'
+            'http2', 'tls12', 'tls13', 'sha256', 'sha512',
+            // Common technical tokens that would otherwise become phantom
+            // ai-host aliases and confuse the AI's answer.
+            'md5', 'sha1', 'sha-1', 'sha-256', 'sha-512', 'utf-8', 'utf8', 'utf-16', 'utf16',
+            'x64', 'x86', 'amd64', 'arm64', 'i386', 'i686', 'ipv4', 'ipv6', 'log4j', 'http3',
+            'p50', 'p90', 'p95', 'p99', 'gpt-4', 'gpt-5', 'gpt5', 'oauth2',
+            // RFC 3849 documentation prefix label: it appears inside the
+            // module's own IPv6 aliases (2001:db8::N), which must not be
+            // re-masked into "2001:ai-host-NNN::N".
+            'db8'
         ];
 
         if (in_array($lower, $deny, true)) {
             return false;
         }
 
-        if (preg_match('/^ai-(?:host|domain|os|windows-family|linux-family|network-os-family|hypervisor-family)-/i', $value)) {
+        if (preg_match('/^ai-(?:host|domain|os|service|windows-family|linux-family|network-os-family|hypervisor-family)-/i', $value)) {
             return false;
         }
 
@@ -1079,7 +1425,18 @@ class Redactor {
             return $this->state['forward'][$original];
         }
 
-        $alias = $this->ensureUniqueAlias($desired_alias, $suffix);
+        // Case variants of case-insensitive value types must share one alias
+        // ("WEBSRV-99" and "websrv-99" are the same machine; DNS names,
+        // service names, OS strings and IPv6 are all case-insensitive).
+        // Custom rules and IPv4 stay exact.
+        if (in_array($type, ['hostname', 'fqdn', 'service', 'os', 'ipv6'], true)) {
+            $existing = $this->findForwardCaseInsensitive($original, $type);
+            if ($existing !== null) {
+                return $existing;
+            }
+        }
+
+        $alias = $this->ensureUniqueAlias($desired_alias, $suffix, $type);
 
         $this->state['forward'][$original] = $alias;
         $this->state['reverse'][$alias] = $original;
@@ -1089,8 +1446,30 @@ class Redactor {
         return $alias;
     }
 
-    private function ensureUniqueAlias(string $alias, string $suffix = ''): string {
-        if (!$this->isAliasValue($alias)) {
+    private function findForwardCaseInsensitive(string $original, string $type): ?string {
+        $lower = strtolower($original);
+
+        foreach (($this->state['forward'] ?? []) as $key => $alias) {
+            if (($this->state['meta'][$key]['type'] ?? '') === $type && strtolower((string) $key) === $lower) {
+                return (string) $alias;
+            }
+        }
+
+        return null;
+    }
+
+    private function ensureUniqueAlias(string $alias, string $suffix = '', string $type = ''): string {
+        if (!$this->isAliasTaken($alias)) {
+            return $alias;
+        }
+
+        // IP aliases must stay valid addresses — advance the counter instead
+        // of appending "-2".
+        if ($type === 'ipv4' || $type === 'ipv6') {
+            do {
+                $alias = ($type === 'ipv4') ? $this->nextIpv4Alias() : $this->nextIpv6Alias();
+            } while ($this->isAliasTaken($alias));
+
             return $alias;
         }
 
@@ -1104,9 +1483,19 @@ class Redactor {
         do {
             $candidate = $base.'-'.$counter.$suffix;
             $counter++;
-        } while ($this->isAliasValue($candidate));
+        } while ($this->isAliasTaken($candidate));
 
         return $candidate;
+    }
+
+    /**
+     * An alias is unusable both when it is already an alias and when it equals
+     * a tracked ORIGINAL (e.g. a pasted documentation IP that was itself
+     * masked): reusing it would make restoreText ambiguous and trip the
+     * strict-mode leak check on the request.
+     */
+    private function isAliasTaken(string $alias): bool {
+        return isset($this->state['reverse'][$alias]) || isset($this->state['forward'][$alias]);
     }
 
     private function isAliasValue(string $value): bool {
@@ -1190,11 +1579,11 @@ class Redactor {
             $type = $this->state['meta'][$original]['type'] ?? '';
 
             if ($type === 'hostname' || $type === 'hostname_partial' || $type === 'service') {
-                // Hostname and service tokens are matched with word boundaries,
-                // so substring hits inside unrelated identifiers don't count
-                // as leaks (e.g. "redb-01x" vs the host "db-01", or the service
-                // "Web" appearing inside "Website").
-                $pattern = '~(?<![A-Za-z0-9_.\-])'.preg_quote($original, '~').'(?![A-Za-z0-9_.\-])~iu';
+                // Hostname and service tokens are matched with the same
+                // boundaries as the masking passes, so substring hits inside
+                // unrelated identifiers don't count as leaks (e.g. "redb-01x"
+                // vs the host "db-01", or the service "Web" inside "Website").
+                $pattern = '~'.self::BOUNDARY_BEFORE.preg_quote($original, '~').self::BOUNDARY_AFTER.'~iu';
                 if (@preg_match($pattern, $text) === 1) {
                     throw new RuntimeException('Security redaction blocked a request because a known sensitive value remained after masking. Review the custom rules or disable strict mode if you need best-effort behavior.');
                 }

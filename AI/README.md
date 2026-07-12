@@ -45,6 +45,7 @@ A self-contained Zabbix frontend module that adds:
 ### Chat and AI Security
 - **Replaces sensitive values (hostnames, IPs, domains, URLs, OS names) with safe aliases before sending data to the AI provider. When the AI responds, aliases are restored locally so you see the real values.**
 - Example: prd-web-001 becomes ai-host-001 outbound. The AI works with the alias. When the reply comes back, ai-host-001 is replaced with prd-web-001 before you see it.
+- An FQDN that belongs to a known host keeps the correlation: prd-web-001.corp.example.net becomes ai-host-001.example (same alias number as the host), while unrelated domains become ai-domain-001.example.
 - More information and setup is found in Security / redaction settings in the module
 
 ### AI-powered Zabbix actions
