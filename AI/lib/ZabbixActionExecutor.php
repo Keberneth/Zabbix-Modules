@@ -32,15 +32,35 @@ class ZabbixActionExecutor {
     ];
 
     /**
-     * Tag names that are shared across environments/hosts by convention and
-     * therefore can never act as a unique SLA selection handle on their own.
-     * SLA service_tags are OR-matched, so selecting on one of these silently
-     * widens the SLA to every service that carries it (dev+test+prod blend).
+     * Category-style tag names that are shared across environments/hosts by
+     * convention (including Zabbix's stock scope=availability/performance).
+     * They classify problems but never pin a specific host or instance, so
+     * problem_tags built ONLY from these blend every environment/host that
+     * emits them (dev+test+prod) into one service.
      */
-    private const BROAD_TAG_NAMES = [
+    private const CATEGORY_TAG_NAMES = [
         'service', 'application', 'app', 'component', 'env', 'environment',
-        'host', 'hostname', 'server', 'class', 'type', 'team', 'group', 'target'
+        'class', 'type', 'team', 'group', 'target', 'scope'
     ];
+
+    /**
+     * Tag names that identify a specific host. Unlike category tags they DO
+     * narrow problem_tags to one machine (host=web01), but on their own they
+     * map EVERY problem on that host — valid only for host-availability SLAs.
+     */
+    private const HOST_ID_TAG_NAMES = ['host', 'hostname', 'server'];
+
+    /**
+     * True for tag NAMES that can never act as a unique SLA selection handle:
+     * SLA service_tags are OR-matched, so selecting on a conventional shared
+     * name silently widens the SLA to every service that carries it.
+     */
+    private static function isBroadTagName(string $name): bool {
+        $name = strtolower($name);
+
+        return in_array($name, self::CATEGORY_TAG_NAMES, true)
+            || in_array($name, self::HOST_ID_TAG_NAMES, true);
+    }
 
     /**
      * If $output starts with the raw-output sentinel, return the stripped text.
@@ -1150,11 +1170,11 @@ class ZabbixActionExecutor {
                 'category' => 'bulk'
             ],
             'analyze_sla_scope' => [
-                'description' => 'Inspect the tags available for scoping an SLA on a target. Returns the host tags, linked-template tags, and trigger tags for the given hosts/group (optionally filtered by a keyword such as the service name), plus a tag-frequency tally and uniqueness guidance. ALWAYS call this before create_sla_service so you can pick a tag (or AND-combination) that uniquely identifies the target and does NOT blend other environments/instances.',
+                'description' => 'Inspect the tags available for scoping an SLA on a target. Returns the host tags, linked-template tags, trigger tags and item tags for the given hosts/group (optionally filtered by a keyword such as the service name), plus a tag-frequency tally and uniqueness guidance — problems inherit tags from ALL four levels. ALWAYS call this before create_sla_service so you can pick a tag (or AND-combination) that uniquely identifies the target and does NOT blend other environments/instances.',
                 'params' => [
                     'hostnames' => '(array of strings, optional) Hosts to analyze.',
                     'group_name' => '(string, optional) Host group to analyze (its hosts are inspected).',
-                    'keyword' => '(string, optional) Filter triggers by name, e.g. the service name "filezilla" or "ftp".'
+                    'keyword' => '(string, optional) Filter triggers AND items by name, e.g. the service name "filezilla" or "ftp". Item tags are only reported for items whose name matches it.'
                 ],
                 'rw' => 'read',
                 'category' => ''
@@ -1169,17 +1189,17 @@ class ZabbixActionExecutor {
                 'category' => ''
             ],
             'create_sla_service' => [
-                'description' => 'Create a Zabbix IT service, optionally linked into a parent/child hierarchy. A LEAF service maps problems via problem_tags (AND logic: a problem must carry ALL listed tags — combine e.g. service=filezilla AND env=prod AND host=prod-app-01 to scope uniquely). A PARENT/GROUP service aggregates existing services via child_serviceids instead — Zabbix forbids a service having BOTH problem_tags and children, so create the leaves first, then the parent. Every service gets a UNIQUE sla_scope service tag — the handle an SLA selects on, dot-notation <application>.<environment>.<host|cluster|all>. Build order: analyze_sla_scope → create leaf service(s) → optional parent → get_services to verify → create_sla.',
+                'description' => 'Create a Zabbix IT service, optionally linked into a parent/child hierarchy. A LEAF service maps problems via problem_tags (AND logic: a problem must carry ALL listed tags — combine e.g. service=filezilla AND env=prod AND host=prod-app-01 to scope uniquely). A PARENT/GROUP service aggregates existing services via child_serviceids instead — Zabbix forbids a service having BOTH problem_tags and children, so create the leaves first, then the parent, and CHOOSE the parent\'s algorithm explicitly (1 = redundant HA/failover cluster, 2 = any child down counts; see algorithm). Every service gets EXACTLY ONE unique sla_scope service tag — the handle an SLA selects on, dot-notation <application>.<environment>.<host|cluster|all>. Build order: analyze_sla_scope → create leaf service(s) → optional parent → get_services to verify → create_sla.',
                 'params' => [
                     'name' => '(string, required, max 128 chars) Service name, e.g. "FileZilla Server - PROD - prod-app-01". Fails if a service with this name already exists (reuse it instead).',
-                    'problem_tags' => '(array, required for LEAF services, forbidden with child_serviceids) AND-combined problem matchers. Each entry: {"tag":"service","operator":0,"value":"filezilla"}. operator 0=equals, 2=contains. Include EVERY tag needed to make the match unique to this target (e.g. also env=prod and host=prod-app-01). A broad tag alone (service=filezilla) blends dev/test/prod and is rejected unless allow_broad_problem_tags=true.',
-                    'service_tags' => '(array, optional) Plain service tags, each {"tag":"sla_scope","value":"filezilla.prod.prod-app-01"}. MUST include a tag NAMED sla_scope whose value no other service carries (enforced); descriptive tags (service, env, host) may be added alongside. If omitted, sla_scope=<slug-of-name> is derived.',
-                    'algorithm' => '(int, optional) Status rule: 1=most critical if all children have problems, 2=most critical of child services. Default 1 for leaves, 2 for parents. 0 (set status to OK) is REJECTED — such a service ignores problems and its SLA would always read 100%.',
+                    'problem_tags' => '(array, required for LEAF services, forbidden with child_serviceids) AND-combined problem matchers. Each entry: {"tag":"service","operator":0,"value":"filezilla"}. operator 0=equals, 2=contains. Include EVERY tag needed to make the match unique to this target (e.g. also env=prod and host=prod-app-01). Combinations made ONLY of broad category tags (service=filezilla alone, or service+env) blend dev/test/prod and are rejected unless allow_broad_problem_tags=true — include a host-identifying tag (host=web01) or a dedicated unique tag. Host-identifying tags ALONE are allowed but map EVERY problem on that host (host-availability SLA only).',
+                    'service_tags' => '(array, optional) Plain service tags, each {"tag":"sla_scope","value":"filezilla.prod.prod-app-01"}. MUST include exactly ONE tag NAMED sla_scope whose value no other service carries (both enforced); descriptive tags (service, env, host) may be added alongside. If omitted, sla_scope=<slug-of-name> is derived.',
+                    'algorithm' => '(int, REQUIRED for parents with child_serviceids; optional for leaves, default 1) Status rule: 1 = most critical if ALL children have problems (redundant HA/failover cluster — the service is UP while at least one node is up, so a single-node outage is NOT downtime), 2 = most critical of child services (any child problem propagates and counts as downtime). Ask the operator which matches the topology before creating a parent. 0 (set status to OK) is REJECTED — such a service ignores problems and its SLA would always read 100%.',
                     'sortorder' => '(int, optional, default 0) Display order 0-999.',
                     'parent_service' => '(string, optional) Serviceid (preferred) or exact name of an EXISTING service to attach this one under. Ambiguous names (Zabbix allows duplicates) are refused — pass the serviceid.',
                     'child_serviceids' => '(array of numeric serviceids, optional) EXISTING services to attach as children — this makes the new service a parent/group (e.g. a PROD cluster grouping prod-app-01 + prod-app-02). Cannot be combined with problem_tags.',
                     'allow_shared_service_tag' => '(bool, optional, default false) Set true ONLY when the operator explicitly confirmed that this service should share its scope tag with the listed existing services (one SLA deliberately covering several services).',
-                    'allow_broad_problem_tags' => '(bool, optional, default false) Set true ONLY after the operator explicitly confirmed an all-environments/all-hosts scope for a single broad problem tag.'
+                    'allow_broad_problem_tags' => '(bool, optional, default false) Set true ONLY after the operator explicitly confirmed a broad multi-host/multi-environment scope for problem_tags built ONLY of category tags (service/env/scope/…) or a "contains" host matcher. Not needed when the combination already contains a host-identifying EQUALS tag or a dedicated unique tag.'
                 ],
                 'rw' => 'write',
                 'category' => 'sla'
@@ -1191,8 +1211,8 @@ class ZabbixActionExecutor {
                     'slo' => '(number, required) Target availability %, 0-100 (e.g. 99.9).',
                     'period' => '(string, required) Reporting period: daily, weekly, monthly, quarterly, or annually.',
                     'service_tags' => '(array, required) Exactly ONE unique scope tag: [{"tag":"sla_scope","operator":0,"value":"filezilla.prod"}]. Never rely on several tags as an AND — SLA matching is OR.',
-                    'timezone' => '(string, optional) PHP timezone, e.g. "Europe/Stockholm". Defaults to the server timezone.',
-                    'effective_date' => '(string, optional) Date the SLA starts calculating, YYYY-MM-DD. Defaults to today.',
+                    'timezone' => '(string, optional) Valid PHP/IANA timezone identifier, e.g. "Europe/Stockholm". Invalid identifiers are rejected. Defaults to the server timezone.',
+                    'effective_date' => '(string, optional) Date the SLA starts calculating, strictly YYYY-MM-DD (e.g. 2026-07-12). Any other format is rejected. Defaults to today.',
                     'status' => '(int, optional, default 1) 1=enabled, 0=disabled.',
                     'description' => '(string, optional) Free text.',
                     'allow_multiple_matching_services' => '(bool, optional, default false) Set true ONLY after the operator explicitly confirmed a deliberately broad SLA and your confirm_message lists EVERY matched service by name.'
@@ -4934,9 +4954,11 @@ class ZabbixActionExecutor {
         $availability = [];   // triggers meaning "the service/host is DOWN/unavailable"
         $down_kw = ['unavailable', 'is down', ' down', 'not running', 'not available', 'is not available', 'stopped', 'failed to', 'cannot connect', 'connection failed', 'no data', 'unreachable', 'offline'];
         if ($triggers) {
-            $lines[] = '';
-            $lines[] = 'Triggers'.($keyword !== '' ? ' matching "'.$keyword.'"' : '').' ('.count($triggers).'):';
-            foreach (array_slice($triggers, 0, 60) as $t) {
+            // Classify and tally EVERY fetched trigger first — the listing is
+            // capped below, but an analysis computed only over the displayed
+            // slice would misreport tag uniqueness.
+            $classified = [];
+            foreach ($triggers as $t) {
                 $record($t['tags'] ?? []);
                 $scope = '';
                 foreach (($t['tags'] ?? []) as $tt) {
@@ -4957,27 +4979,79 @@ class ZabbixActionExecutor {
                 if ($is_avail) {
                     $availability[] = $t;
                 }
+                $classified[] = [$t, $is_avail];
+            }
+
+            $lines[] = '';
+            $lines[] = 'Triggers'.($keyword !== '' ? ' matching "'.$keyword.'"' : '').' ('.count($triggers).'):';
+            foreach (array_slice($classified, 0, 60) as [$t, $is_avail]) {
                 $tagstr = !empty($t['tags']) ? '  tags: '.$fmt($t['tags']) : '  (no tags)';
                 $lines[] = '- [ID '.$t['triggerid'].'] '.($is_avail ? '[AVAILABILITY] ' : '').$t['host'].': '.$t['description'].$tagstr;
             }
             if (count($triggers) > 60) {
-                $lines[] = '… and '.(count($triggers) - 60).' more.';
+                $lines[] = '… and '.(count($triggers) - 60).' more (still included in the availability list and tag tally below).';
             }
 
             if ($availability) {
                 $lines[] = '';
                 $lines[] = 'Availability signals (these mean the service/host is DOWN — an AVAILABILITY SLA should be scoped to THESE, never to performance/notice triggers):';
-                foreach ($availability as $t) {
+                foreach (array_slice($availability, 0, 40) as $t) {
                     $tagstr = !empty($t['tags']) ? '  tags: '.$fmt($t['tags']) : '  (no tags)';
                     $lines[] = '- [ID '.$t['triggerid'].'] '.$t['host'].': '.$t['description'].$tagstr;
                 }
+                if (count($availability) > 40) {
+                    $lines[] = '… and '.(count($availability) - 40).' more availability triggers.';
+                }
             }
+        }
+        if (!empty($data['triggers_truncated'])) {
+            $lines[] = '';
+            $lines[] = 'WARNING: more matching triggers exist than the 200 analyzed — the tag tally and availability list are INCOMPLETE. Narrow the analysis with a keyword or fewer hosts before trusting tag uniqueness.';
+        }
+
+        // Problems inherit item tags too, so an item tag is a valid
+        // (sometimes the only) unique discriminator for problem_tags.
+        $items = $data['items'] ?? [];
+        if ($items) {
+            $item_examples = [];
+            foreach ($items as $it) {
+                $record($it['tags'] ?? []);
+                foreach (($it['tags'] ?? []) as $tt) {
+                    $k = ($tt['tag'] ?? '').'='.($tt['value'] ?? '');
+                    if (!isset($item_examples[$k])) {
+                        $item_examples[$k] = $it['host'].': '.$it['name'];
+                    }
+                }
+            }
+            if ($item_examples) {
+                $lines[] = '';
+                $lines[] = 'Item-level tags'.($keyword !== '' ? ' on items matching "'.$keyword.'"' : '').' (problems inherit these too; tag=value — example item):';
+                $shown = 0;
+                foreach ($item_examples as $k => $ex) {
+                    if (++$shown > 30) {
+                        $lines[] = '… and '.(count($item_examples) - 30).' more distinct item tags (all counted in the tally).';
+                        break;
+                    }
+                    $lines[] = '  '.$k.' — '.$ex;
+                }
+            }
+        }
+        if (!empty($data['items_truncated'])) {
+            $lines[] = 'WARNING: more items exist than the 500 fetched — item-tag coverage is incomplete. Narrow with a keyword.';
         }
 
         $lines[] = '';
-        $lines[] = 'Distinct tags observed (tag=value : occurrences):';
+        $lines[] = 'Distinct tags observed across host/template/trigger/item level (tag=value : occurrences):';
         arsort($tally);
+        $tally_shown = 0;
         foreach ($tally as $k => $c) {
+            // Per-instance item tags (filesystem=/…, interface=…) can produce
+            // thousands of distinct pairs across a host group; an unbounded
+            // listing would blow the model context.
+            if (++$tally_shown > 80) {
+                $lines[] = '  … and '.(count($tally) - 80).' more distinct tag=value pairs — narrow the analysis with a keyword to see them.';
+                break;
+            }
             $lines[] = '  '.$k.' : '.$c;
         }
 
@@ -4999,6 +5073,31 @@ class ZabbixActionExecutor {
     }
 
     /**
+     * The reason (if any) a raw match-tag list carries an operator that
+     * normalizeMatchTags would silently coerce to 0 (equals). The SLA create
+     * paths must reject such input instead: a "contains" intent expressed as
+     * the wrong literal would otherwise become a stricter equals match that
+     * maps zero problems, and the SLA would silently report 100%.
+     */
+    private static function matchTagOperatorIssue(array $tags): ?string {
+        foreach ($tags as $t) {
+            if (!is_array($t) || !array_key_exists('operator', $t)
+                    || $t['operator'] === null || $t['operator'] === '') {
+                continue;   // missing operator defaults to 0 (equals)
+            }
+            $op = $t['operator'];
+            $valid = (is_int($op) && in_array($op, [0, 2], true))
+                || (is_string($op) && in_array(trim($op), ['0', '2'], true));
+            if (!$valid) {
+                return 'operator must be 0 (equals) or 2 (contains); got '.json_encode($op)
+                    .' on tag "'.(is_scalar($t['tag'] ?? '') ? (string) ($t['tag'] ?? '') : '?').'"';
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * The reason (if any) create_sla would reject these normalised SLA
      * service_tags regardless of how many services they match. Shared with
      * the get_services verdict so the preview never certifies tags that
@@ -5012,7 +5111,7 @@ class ZabbixActionExecutor {
             if ((int) $t['operator'] === 2) {
                 return 'create_sla will reject operator 2 (contains) — use operator 0 (equals) with the exact sla_scope value';
             }
-            if (in_array(strtolower($t['tag']), self::BROAD_TAG_NAMES, true)) {
+            if (self::isBroadTagName($t['tag'])) {
                 return '"'.$t['tag'].'" is a broad shared tag name that create_sla will reject — select on the service\'s unique sla_scope tag instead (see its service tags above)';
             }
         }
@@ -5045,9 +5144,14 @@ class ZabbixActionExecutor {
             return 'Error: provide service_tags (to preview which services an SLA would match) and/or keyword (to search services by name).';
         }
 
-        // Reject entries the normaliser would silently drop — otherwise a
-        // malformed matcher degrades to an unfiltered listing that is then
-        // mislabelled as the SLA's match set.
+        // Reject entries the normaliser would silently drop or coerce —
+        // otherwise a malformed matcher degrades to an unfiltered listing (or
+        // a stricter equals match) that is then mislabelled as the SLA's
+        // match set.
+        $op_issue = self::matchTagOperatorIssue($service_tags);
+        if ($op_issue !== null) {
+            return 'Error: '.$op_issue.'.';
+        }
         $matchers = $api->normalizeMatchTags($service_tags);
         if ($service_tags && count($matchers) !== count($service_tags)) {
             return 'Error: every service_tags entry must be an object like {"tag":"sla_scope","operator":0,"value":"filezilla.prod"} (operator 0=equals, 2=contains).';
@@ -5147,13 +5251,30 @@ class ZabbixActionExecutor {
         if ($matchers) {
             $lines[] = '';
             $shape_issue = self::slaTagShapeIssue($matchers);
+            // create_sla also refuses matched algorithm-0 services; the
+            // verdict must never certify a scope it would reject.
+            $algo0 = [];
+            foreach ($services as $s) {
+                if ((int) ($s['algorithm'] ?? 1) === 0) {
+                    $algo0[] = '"'.($s['name'] ?? '').'" (ID '.($s['serviceid'] ?? '?').')';
+                }
+            }
             if (count($services) === 1) {
-                $lines[] = $shape_issue === null
-                    ? 'Verdict: exactly ONE service matches — safe to use these service_tags in create_sla.'
-                    : 'Verdict: exactly ONE service matches, BUT '.$shape_issue.'.';
+                if ($shape_issue !== null) {
+                    $lines[] = 'Verdict: exactly ONE service matches, BUT '.$shape_issue.'.';
+                }
+                elseif ($algo0) {
+                    $lines[] = 'Verdict: exactly ONE service matches, BUT its status rule is "set status to OK" (algorithm 0) — it never reflects problems, its SLI is pinned at 100%, and create_sla will refuse it. Change the status calculation rule to "most critical" (1 or 2) in Zabbix first.';
+                }
+                else {
+                    $lines[] = 'Verdict: exactly ONE service matches — safe to use these service_tags in create_sla.';
+                }
             }
             else {
                 $lines[] = 'Verdict: MORE THAN ONE service matches these tags — an SLA with them aggregates ALL '.count($services).' (OR logic). Narrow to a unique sla_scope tag, unless the operator explicitly wants one grouped SLA over all listed services (then create_sla needs allow_multiple_matching_services=true and the confirmation must name them all).';
+                if ($algo0) {
+                    $lines[] = 'Note: '.implode(', ', $algo0).' use "set status to OK" (algorithm 0) — their SLI would permanently report 100%, and create_sla refuses them without allow_multiple_matching_services=true.';
+                }
             }
         }
 
@@ -5187,6 +5308,9 @@ class ZabbixActionExecutor {
             }
             $child_ids[] = $cid;
         }
+        // Zabbix rejects a repeated child serviceid outright; duplicates
+        // never change the aggregation.
+        $child_ids = array_values(array_unique($child_ids));
 
         if (!$problem_tags && !$child_ids) {
             return 'Error: a LEAF service needs problem_tags (AND-combined tags that map problems to it); a PARENT/GROUP service needs child_serviceids instead. Provide one of them.';
@@ -5195,30 +5319,83 @@ class ZabbixActionExecutor {
             return 'Error: Zabbix does not allow a service to have BOTH problem_tags and children. Create LEAF services with problem_tags first, then the PARENT with child_serviceids only (the parent\'s status comes from its children).';
         }
 
+        $op_issue = self::matchTagOperatorIssue($problem_tags);
+        if ($op_issue !== null) {
+            return 'Error: '.$op_issue.'.';
+        }
+
         $normalized_pt = $api->normalizeMatchTags($problem_tags);
         if (count($normalized_pt) !== count($problem_tags)) {
             return 'Error: every problem_tags entry must be an object like {"tag":"service","operator":0,"value":"filezilla"} (operator 0=equals, 2=contains).';
         }
 
-        // Guard: problem tags on a single broad tag NAME (e.g. service=filezilla
-        // alone) map problems from EVERY environment/host that emits it,
-        // blending dev/test/prod into one SLA. Count distinct names so
-        // duplicate/subsumed entries on the same name cannot dodge the guard.
-        $pt_names = [];
+        // Drop exact-duplicate matchers: Zabbix rejects a repeated
+        // (tag, operator, value) triple outright, and duplicates never
+        // change AND-matching semantics.
+        $dedup = [];
         foreach ($normalized_pt as $t) {
-            $pt_names[strtolower($t['tag'])] = true;
+            $dedup[$t['tag'].chr(31).$t['operator'].chr(31).$t['value']] = $t;
         }
-        if (count($pt_names) === 1
-                && in_array(array_key_first($pt_names), self::BROAD_TAG_NAMES, true)
-                && !self::truthyParam($params, 'allow_broad_problem_tags')) {
-            return 'Error: the problem tag '.$normalized_pt[0]['tag'].'='.$normalized_pt[0]['value'].' is too broad on its own — every environment/host that emits it (dev, test AND prod) would map into this one service. '
-                .'problem_tags are AND-combined, so add the narrowing tags as well (e.g. env=prod and host=prod-app-01), or tag the exact availability trigger(s) with a unique tag via add_trigger_tag and use that. '
-                .'Only if the operator explicitly confirmed an all-environments scope, retry with allow_broad_problem_tags=true.';
+        $normalized_pt = array_values($dedup);
+
+        // Guard: problem tags built ONLY from broad category names (e.g.
+        // service=filezilla, or service=x AND env=prod) map problems from
+        // EVERY host that emits them, blending dev/test/prod into one
+        // service. The combination must contain something that pins the
+        // target: a host-identifying EQUALS tag (host=web01 — a "contains"
+        // host matcher can blend many hosts and never narrows) or a
+        // dedicated unique tag. A host-ONLY combination is legitimate for a
+        // host-availability SLA and gets a warning below instead.
+        $has_narrowing = !$normalized_pt;
+        $host_only = (bool) $normalized_pt;
+        $host_eq_values = [];   // host-identifying equals matchers: name => distinct values
+        foreach ($normalized_pt as $t) {
+            $pt_name = strtolower($t['tag']);
+            $is_host = in_array($pt_name, self::HOST_ID_TAG_NAMES, true);
+            $is_category = in_array($pt_name, self::CATEGORY_TAG_NAMES, true);
+            if (!$is_host && !$is_category) {
+                $has_narrowing = true;   // dedicated/custom tag
+            }
+            if ($is_host && (int) $t['operator'] === 0) {
+                $has_narrowing = true;
+                $host_eq_values[$pt_name][$t['value']] = true;
+            }
+            if (!$is_host) {
+                $host_only = false;
+            }
         }
 
-        $algorithm = isset($params['algorithm']) ? (int) $params['algorithm'] : ($child_ids ? 2 : 1);
+        // Two different equals values for the same host-identity tag can
+        // never AND-match: a problem originates from ONE host, so the
+        // service would map nothing and its SLA would sit at 100% forever.
+        foreach ($host_eq_values as $hn => $vals) {
+            if (count($vals) > 1) {
+                return 'Error: problem_tags contain '.count($vals).' different equals values for "'.$hn.'" ("'.implode('", "', array_keys($vals)).'") — problem_tags are AND-combined and a problem originates from ONE host, so this combination matches NOTHING and the SLA would permanently report 100%. To cover several hosts, create one leaf service per host and group them under a parent (child_serviceids).';
+            }
+        }
+
+        if (!$has_narrowing && !self::truthyParam($params, 'allow_broad_problem_tags')) {
+            $parts = [];
+            foreach ($normalized_pt as $t) {
+                $parts[] = $t['tag'].((int) $t['operator'] === 2 ? ' contains ' : '=').$t['value'];
+            }
+            return 'Error: the problem tag(s) '.implode(' AND ', $parts).' do not pin a specific target — broad category tags (service/env/scope/…) are shared by every environment/host that emits them (dev, test AND prod), and a host tag narrows only as an EQUALS matcher (operator 0), never as "contains". '
+                .'problem_tags are AND-combined, so add a host-identifying equals tag (e.g. host=prod-app-01), or tag the exact availability trigger(s) with a unique tag via add_trigger_tag and use that. '
+                .'Only if the operator explicitly confirmed a broad all-hosts/all-environments scope, retry with allow_broad_problem_tags=true.';
+        }
+
+        if ($child_ids && !isset($params['algorithm'])) {
+            return 'Error: a parent/group service needs an EXPLICIT algorithm choice — ask the operator which one matches the topology: '
+                .'1 = "most critical if ALL children have problems" (redundant HA/failover cluster — the service stays UP while at least one node is up, so a single-node outage is NOT downtime) or '
+                .'2 = "most critical of child services" (independent nodes — ANY child problem propagates to the parent and counts as downtime). '
+                .'For an HA cluster, algorithm 2 would record every failover as an SLA breach.';
+        }
+        $algorithm = isset($params['algorithm']) ? (int) $params['algorithm'] : 1;
         if ($algorithm === 0) {
             return 'Error: algorithm 0 ("set status to OK") makes the service ignore its problems and children entirely — an SLA on it would always report 100%. Use 1 (most critical if all children have problems) or 2 (most critical of child services).';
+        }
+        if (!in_array($algorithm, [1, 2], true)) {
+            return 'Error: algorithm must be 1 (most critical if ALL children have problems — HA/redundant cluster) or 2 (most critical of child services — any child problem counts).';
         }
 
         // Refuse duplicate names — reuse the existing service instead of
@@ -5307,34 +5484,50 @@ class ZabbixActionExecutor {
             $service_tags = [['tag' => 'sla_scope', 'value' => $slug !== '' ? $slug : 'service']];
         }
 
-        // The SLA selection handle is the sla_scope tag, and it must be
-        // unique: if another service already carries the same value, a future
-        // SLA on it would OR-match both. Only sla_scope entries are checked —
-        // descriptive tags (service, env, host, owner, …) are expected to be
-        // shared and are ignored here.
-        $scope_matchers = [];
+        // Clean the plain service tags: trim names AND values (a whitespace-
+        // padded sla_scope value would dodge the uniqueness check yet render
+        // identically everywhere, and later exact-match SLA selection would
+        // miss it) and drop exact duplicates, which Zabbix rejects outright.
+        $clean_tags = [];
         foreach ($service_tags as $t) {
             if (!is_array($t)) {
                 continue;
             }
             $tag_name = trim((string) ($t['tag'] ?? ''));
-            if (strtolower($tag_name) !== 'sla_scope') {
+            if ($tag_name === '') {
+                continue;
+            }
+            $tag_value = trim((string) ($t['value'] ?? ''));
+            $clean_tags[$tag_name.chr(31).$tag_value] = ['tag' => $tag_name, 'value' => $tag_value];
+        }
+        $service_tags = array_values($clean_tags);
+
+        // The SLA selection handle is the sla_scope tag: exactly ONE per
+        // service, and it must be unique — if another service already carries
+        // the same value, a future SLA on it would OR-match both. Only
+        // sla_scope entries are checked here; descriptive tags (service, env,
+        // host, owner, …) are expected to be shared and are ignored.
+        $scope_matchers = [];
+        foreach ($service_tags as $t) {
+            if (strtolower($t['tag']) !== 'sla_scope') {
                 continue;
             }
             // Zabbix tag matching is case-sensitive; a case-variant handle
             // could never be selected by an sla_scope SLA and would dodge
             // the uniqueness check.
-            if ($tag_name !== 'sla_scope') {
-                return 'Error: the SLA handle tag must be named exactly "sla_scope" (lowercase), not "'.$tag_name.'" — Zabbix tag matching is case-sensitive.';
+            if ($t['tag'] !== 'sla_scope') {
+                return 'Error: the SLA handle tag must be named exactly "sla_scope" (lowercase), not "'.$t['tag'].'" — Zabbix tag matching is case-sensitive.';
             }
-            $value = (string) ($t['value'] ?? '');
-            if (trim($value) === '') {
+            if ($t['value'] === '') {
                 return 'Error: the sla_scope tag needs a value, e.g. {"tag":"sla_scope","value":"filezilla.prod.prod-app-01"} (<application>.<environment>.<host|cluster|all>).';
             }
-            $scope_matchers[] = ['tag' => $tag_name, 'operator' => 0, 'value' => $value];
+            $scope_matchers[] = ['tag' => 'sla_scope', 'operator' => 0, 'value' => $t['value']];
         }
         if (!$scope_matchers) {
             return 'Error: service_tags must include the unique SLA handle {"tag":"sla_scope","value":"<application>.<environment>.<host|cluster|all>"} — this is the only tag an SLA should select on. Descriptive tags (service, env, host, …) may be added alongside, but they cannot be the handle because SLA matching is OR-based and they are shared across services.';
+        }
+        if (count($scope_matchers) > 1) {
+            return 'Error: service_tags must contain exactly ONE sla_scope entry — the single SLA selection handle for this service; got '.count($scope_matchers).'. Extra identity belongs in descriptive tags (service, env, host, …), not in additional sla_scope values.';
         }
         if (!self::truthyParam($params, 'allow_shared_service_tag')) {
             try {
@@ -5351,9 +5544,19 @@ class ZabbixActionExecutor {
 
         $sortorder = isset($params['sortorder']) ? (int) $params['sortorder'] : 0;
 
-        $result = $api->createSlaService($name, $problem_tags, $service_tags, $algorithm, $sortorder, $parent_ids, $child_ids);
+        try {
+            $result = $api->createSlaService($name, $normalized_pt, $service_tags, $algorithm, $sortorder, $parent_ids, $child_ids);
+        }
+        catch (\Throwable $e) {
+            return 'Error: service.create failed: '.$e->getMessage();
+        }
 
-        return self::formatSlaServiceResult($result, $parent_label, $child_names);
+        $out = self::formatSlaServiceResult($result, $parent_label, $child_names);
+        if ($host_only) {
+            $out .= "\nWARNING: these problem_tags identify a HOST, not a service — EVERY problem on that host (CPU, disk, any application) will count against this service. That is correct for a host-availability SLA; for a service SLA scope to the service's own availability trigger tags instead.";
+        }
+
+        return $out;
     }
 
     private static function formatSlaServiceResult(array $r, string $parent_label = '', array $child_names = []): string {
@@ -5397,6 +5600,12 @@ class ZabbixActionExecutor {
         if ($name === '') {
             return 'Error: name is required.';
         }
+        // sla.create stores at most 255 chars; a longer name would be
+        // silently mangled and then reported back as a name that does not
+        // exist in Zabbix.
+        if (Util::truncate($name, 255) !== $name) {
+            return 'Error: SLA name must be at most 255 characters.';
+        }
 
         if (!array_key_exists('slo', $params) || !is_numeric($params['slo'])) {
             return 'Error: slo (target % 0-100) is required.';
@@ -5416,10 +5625,23 @@ class ZabbixActionExecutor {
             return 'Error: service_tags is required — the SLA selects services by these tags. Use the unique sla_scope tag of the service you created.';
         }
 
+        $op_issue = self::matchTagOperatorIssue($service_tags);
+        if ($op_issue !== null) {
+            return 'Error: '.$op_issue.'.';
+        }
+
         $tags = $api->normalizeMatchTags($service_tags);
         if (count($tags) !== count($service_tags)) {
             return 'Error: every service_tags entry must be an object like {"tag":"sla_scope","operator":0,"value":"filezilla.prod"} (operator 0=equals, 2=contains).';
         }
+
+        // Exact-duplicate matchers collapse to one — they must not trip the
+        // multiple-tags guard, whose OR warning would mislead here.
+        $dedup = [];
+        foreach ($tags as $t) {
+            $dedup[$t['tag'].chr(31).$t['operator'].chr(31).$t['value']] = $t;
+        }
+        $tags = array_values($dedup);
 
         $allow_broad = self::truthyParam($params, 'allow_multiple_matching_services');
 
@@ -5448,7 +5670,7 @@ class ZabbixActionExecutor {
         // when they happen to match only one service today.
         if (!$allow_broad) {
             foreach ($tags as $t) {
-                if (in_array(strtolower($t['tag']), self::BROAD_TAG_NAMES, true)) {
+                if (self::isBroadTagName($t['tag'])) {
                     return 'Error: "'.$t['tag'].'" is a broad shared tag name — services in other environments (dev/test/prod) typically carry it too, and any future service with it silently joins this SLA. Select on a dedicated unique tag instead, e.g. sla_scope=<application>.<environment>.<host> (put it on the target service with create_sla_service). Retry with allow_multiple_matching_services=true only if the operator explicitly confirmed a broad SLA.';
                 }
             }
@@ -5484,11 +5706,28 @@ class ZabbixActionExecutor {
         }
 
         $timezone = trim((string) ($params['timezone'] ?? ''));
+        if ($timezone !== '' && !in_array($timezone, timezone_identifiers_list(), true)) {
+            return 'Error: timezone "'.$timezone.'" is not a valid IANA/PHP timezone identifier (e.g. Europe/Stockholm, UTC). Omit it to use the server default.';
+        }
         $status = isset($params['status']) ? (int) $params['status'] : 1;
         $description = (string) ($params['description'] ?? '');
-        $effective_date = self::parseSlaDate($params['effective_date'] ?? null);
 
-        $result = $api->createSla($name, $slo, $period, $service_tags, $timezone, $effective_date, $status, $description);
+        $effective_date = self::parseSlaDate($params['effective_date'] ?? null);
+        if ($effective_date === false) {
+            $raw = $params['effective_date'] ?? '';
+            return 'Error: effective_date must be a calendar date formatted YYYY-MM-DD (e.g. 2026-07-12); got "'.(is_scalar($raw) ? trim((string) $raw) : gettype($raw)).'". Refusing to guess — a mis-parsed date would pull the wrong reporting periods into the SLI.';
+        }
+        if ($effective_date === null) {
+            // Zabbix stores sla.effective_date as a date timestamp in UTC.
+            $effective_date = (new \DateTime('today', new \DateTimeZone('UTC')))->getTimestamp();
+        }
+
+        try {
+            $result = $api->createSla($name, $slo, $period, $tags, $timezone, $effective_date, $status, $description);
+        }
+        catch (\Throwable $e) {
+            return 'Error: sla.create failed: '.$e->getMessage();
+        }
 
         $out = self::formatSlaResult($result, $matched);
         if ($algo0) {
@@ -5513,15 +5752,30 @@ class ZabbixActionExecutor {
         return $map[$s] ?? null;
     }
 
-    private static function parseSlaDate($val): ?int {
+    /**
+     * Strict effective-date parsing: YYYY-MM-DD only, interpreted as
+     * midnight UTC (Zabbix stores sla.effective_date as a date timestamp in
+     * UTC and its reporting-period alignment assumes that). Returns the
+     * timestamp, null when no date was provided (caller defaults to today),
+     * or false for anything unparseable — silently substituting "today" (or
+     * reading a compact numeric date as a raw epoch) would start the SLA
+     * with the wrong reporting history.
+     */
+    private static function parseSlaDate($val): int|false|null {
         if ($val === null || $val === '' || $val === []) {
-            return strtotime('today') ?: time();
+            return null;
         }
-        if (is_int($val) || (is_string($val) && preg_match('/^\d{9,}$/', (string) $val))) {
-            return (int) $val;
+        if (!is_scalar($val)) {
+            return false;
         }
-        $ts = strtotime((string) $val);
-        return $ts !== false ? $ts : (strtotime('today') ?: time());
+        $s = trim((string) $val);
+        if (!preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $s, $m)
+                || !checkdate((int) $m[2], (int) $m[3], (int) $m[1])) {
+            return false;
+        }
+        $dt = \DateTime::createFromFormat('!Y-m-d', $s, new \DateTimeZone('UTC'));
+
+        return $dt !== false ? $dt->getTimestamp() : false;
     }
 
     private static function formatSlaResult(array $r, array $matched_services = []): string {

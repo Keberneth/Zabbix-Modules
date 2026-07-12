@@ -3259,7 +3259,10 @@ class ZabbixApiClient {
             if (!in_array($op, [0, 2], true)) {
                 $op = 0;
             }
-            $out[] = ['tag' => $name, 'operator' => $op, 'value' => (string) ($t['value'] ?? '')];
+            // Matcher values are trimmed like stored tag values: the Zabbix
+            // server trims event tag values at creation, so a padded matcher
+            // could never equals-match anything real.
+            $out[] = ['tag' => $name, 'operator' => $op, 'value' => trim((string) ($t['value'] ?? ''))];
         }
         return $out;
     }
@@ -3278,7 +3281,9 @@ class ZabbixApiClient {
             if ($name === '') {
                 continue;
             }
-            $out[] = ['tag' => $name, 'value' => (string) ($t['value'] ?? '')];
+            // Values are trimmed too: padded values render identically to
+            // their trimmed twins everywhere but break exact-match selection.
+            $out[] = ['tag' => $name, 'value' => trim((string) ($t['value'] ?? ''))];
         }
         return $out;
     }
@@ -3364,6 +3369,11 @@ class ZabbixApiClient {
         if ($name === '') {
             throw new RuntimeException('SLA name is required.');
         }
+        // The API stores at most 255 chars; truncating silently would store a
+        // mangled name while this method reports the original back as created.
+        if (Util::truncate($name, 255) !== $name) {
+            throw new RuntimeException('SLA name must be at most 255 characters.');
+        }
         if ($slo < 0 || $slo > 100) {
             throw new RuntimeException('slo must be between 0 and 100.');
         }
@@ -3379,7 +3389,7 @@ class ZabbixApiClient {
         $timezone = trim($timezone) !== '' ? trim($timezone) : (date_default_timezone_get() ?: 'UTC');
 
         $payload = [
-            'name' => Util::truncate($name, 255),
+            'name' => $name,
             'slo' => $slo,
             'period' => $period,
             'timezone' => $timezone,
@@ -3691,18 +3701,47 @@ class ZabbixApiClient {
             }
         }
 
+        // Fetch one row past the cap so truncation is DETECTED, not silent —
+        // an incomplete tag tally otherwise misreports uniqueness. sortfield
+        // keeps the window deterministic across calls.
+        $trig_cap = 200;
         $trig_params = [
             'hostids' => $ids,
             'output' => ['triggerid', 'description'],
             'selectTags' => ['tag', 'value'],
             'selectHosts' => ['host'],
             'expandDescription' => true,
-            'limit' => 200
+            'sortfield' => 'triggerid',
+            'limit' => $trig_cap + 1
         ];
         if (trim($keyword) !== '') {
             $trig_params['search'] = ['description' => trim($keyword)];
         }
         $triggers = $this->call('trigger.get', $trig_params);
+        $triggers_truncated = count($triggers) > $trig_cap;
+        if ($triggers_truncated) {
+            $triggers = array_slice($triggers, 0, $trig_cap);
+        }
+
+        // Problems inherit ITEM tags too (host + template + trigger + item),
+        // so an instance-specific item tag may be the only unique
+        // discriminator available. Only tagged items are kept.
+        $item_cap = 500;
+        $item_params = [
+            'hostids' => $ids,
+            'output' => ['itemid', 'name', 'hostid'],
+            'selectTags' => ['tag', 'value'],
+            'sortfield' => 'itemid',
+            'limit' => $item_cap + 1
+        ];
+        if (trim($keyword) !== '') {
+            $item_params['search'] = ['name' => trim($keyword)];
+        }
+        $items = $this->call('item.get', $item_params);
+        $items_truncated = count($items) > $item_cap;
+        if ($items_truncated) {
+            $items = array_slice($items, 0, $item_cap);
+        }
 
         $hosts_out = [];
         foreach ($detail as $h) {
@@ -3730,7 +3769,31 @@ class ZabbixApiClient {
             ];
         }
 
-        return ['hosts' => $hosts_out, 'triggers' => $trig_out, 'keyword' => $keyword];
+        $host_by_id = [];
+        foreach ($detail as $h) {
+            $host_by_id[(string) $h['hostid']] = (string) $h['host'];
+        }
+        $items_out = [];
+        foreach ($items as $it) {
+            if (empty($it['tags'])) {
+                continue;
+            }
+            $items_out[] = [
+                'itemid' => (string) $it['itemid'],
+                'host' => $host_by_id[(string) ($it['hostid'] ?? '')] ?? '',
+                'name' => (string) ($it['name'] ?? ''),
+                'tags' => $it['tags']
+            ];
+        }
+
+        return [
+            'hosts' => $hosts_out,
+            'triggers' => $trig_out,
+            'items' => $items_out,
+            'triggers_truncated' => $triggers_truncated,
+            'items_truncated' => $items_truncated,
+            'keyword' => $keyword
+        ];
     }
 
     // ── Phase 3 controlled host administration (writes) ───────────────────
