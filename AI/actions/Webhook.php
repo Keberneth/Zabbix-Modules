@@ -5,11 +5,7 @@ namespace Modules\AI\Actions;
 require_once __DIR__.'/../lib/bootstrap.php';
 
 use CController,
-    CControllerResponseData,
-    Modules\AI\Lib\AuditLogger,
-    Modules\AI\Lib\Config,
-    Modules\AI\Lib\Util,
-    Modules\AI\Lib\WebhookHandler;
+    CControllerResponseData;
 
 class Webhook extends CController {
 
@@ -22,40 +18,17 @@ class Webhook extends CController {
     }
 
     protected function checkPermissions(): bool {
-        return true;
+        // The legacy zabbix.php?action=ai.webhook route is intentionally dead.
+        // Machine delivery must use the standalone /ai-webhook endpoint, where
+        // any network-layer secret opt-out applies to that endpoint alone.
+        return false;
     }
 
     protected function doAction(): void {
-        $config = Config::get();
-
-        try {
-            $raw = file_get_contents('php://input');
-            $decoded = json_decode((string) $raw, true);
-            if (!is_array($decoded)) {
-                throw new \RuntimeException('Invalid JSON payload.');
-            }
-
-            $result = WebhookHandler::process($config, $decoded);
-            $this->respond([
-                'ok' => true,
-                'posted_chunks' => (int) ($result['posted_chunks'] ?? 0),
-                'reply' => (string) ($result['reply'] ?? ''),
-                'result' => (string) ($result['result'] ?? '')
-            ]);
-        }
-        catch (\Throwable $e) {
-            AuditLogger::log($config, 'errors', [
-                'event' => 'webhook.failed',
-                'source' => 'ai.webhook',
-                'status' => 'error',
-                'message' => Util::truncate($e->getMessage(), 1000)
-            ]);
-
-            $this->respond([
-                'ok' => false,
-                'error' => $e->getMessage()
-            ], 400);
-        }
+        $this->respond([
+            'ok' => false,
+            'error' => 'This legacy module route is disabled. Use the standalone /ai-webhook endpoint.'
+        ], 410);
     }
 
     private function respond(array $payload, int $http_status = 200): void {

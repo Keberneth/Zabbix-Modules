@@ -42,8 +42,9 @@ class WebhookHandler {
 
         $provider = Config::getProvider($config, '', 'webhook');
         if ($provider === null) {
-            throw new RuntimeException('No provider is configured for webhook use.');
+            throw new RuntimeException('No enabled provider is configured for webhook use. Tick "Use this provider" on a provider in AI settings.');
         }
+        $provider = Config::resolveProviderSecrets($provider);
 
         $context = [];
         $zabbix_api = ZabbixApiClient::fromConfig($config);
@@ -55,11 +56,7 @@ class WebhookHandler {
         }
 
         $netbox = NetBoxClient::fromConfig($config);
-        // Either the legacy webhook[include_netbox] toggle or the canonical
-        // netbox[enrich_webhook_host] toggle enables enrichment. We accept both
-        // so existing installs keep working without re-configuration.
-        $netbox_enrich_webhook = Util::truthy($config['netbox']['enrich_webhook_host'] ?? false)
-            || Util::truthy($config['webhook']['include_netbox'] ?? false);
+        $netbox_enrich_webhook = Util::truthy($config['webhook']['include_netbox'] ?? false);
 
         if (!empty($payload['hostname']) && $netbox_enrich_webhook && $netbox !== null) {
             $context['netbox_info'] = $netbox->getContextForHostname($payload['hostname']);
@@ -177,11 +174,17 @@ class WebhookHandler {
     public static function loadConfigFromPdo(\PDO $pdo): array {
         $module_id = Config::MODULE_ID;
 
-        $stmt = $pdo->prepare('SELECT config FROM module WHERE id = :id LIMIT 1');
+        $stmt = $pdo->prepare('SELECT config,status FROM module WHERE id = :id LIMIT 1');
         $stmt->execute([':id' => $module_id]);
         $row = $stmt->fetch();
 
-        if (!$row || empty($row['config'])) {
+        if (!$row) {
+            throw new RuntimeException('The AI module is not registered in Zabbix.');
+        }
+        if ((int) ($row['status'] ?? 0) !== 1) {
+            throw new RuntimeException('The AI module is disabled; the standalone webhook is unavailable.');
+        }
+        if (empty($row['config'])) {
             return Config::mergeWithDefaults([]);
         }
 
@@ -250,14 +253,16 @@ class WebhookHandler {
     public static function validateSecret(array $config, array $payload): void {
         $expected = Config::resolveSecret(
             $config['webhook']['shared_secret'] ?? '',
-            $config['webhook']['shared_secret_env'] ?? ''
+            $config['webhook']['shared_secret_env'] ?? '',
+            Config::allowsPlaintextSecrets($config)
         );
         $require = Util::truthy($config['webhook']['require_secret'] ?? false);
 
         if ($expected === '') {
-            // No secret configured. By default this passes, preserving existing
-            // behavior. When "require_secret" is enabled, reject instead so an
-            // enabled-but-unauthenticated webhook endpoint cannot be reached.
+            // Secure default: when "require_secret" is enabled, an empty
+            // configuration is a hard failure rather than an unauthenticated
+            // webhook. Operators may explicitly opt out only when a separate
+            // network-layer control protects the standalone endpoint.
             if ($require) {
                 self::logRejectedWebhook($config, 'secret_required_but_not_configured');
                 throw new RuntimeException('Webhook rejected: a shared secret is required but none is configured.');

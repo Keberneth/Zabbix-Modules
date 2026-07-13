@@ -16,6 +16,17 @@
     // ── Drawer state ──
     var activeDrawer = null;
     var activeEventId = null;
+    var activeDrawerGeneration = 0;
+    var contextAbortController = null;
+    var historyAbortController = null;
+
+    function isCurrentDrawer(drawer, eventid, generation) {
+        return activeDrawer === drawer
+            && activeEventId === eventid
+            && drawer
+            && drawer.dataset.eventid === String(eventid)
+            && drawer.dataset.generation === String(generation);
+    }
 
     // Per-event in-memory chat state.
     var eventChats = {};
@@ -112,6 +123,9 @@
 
         activeEventId = eventid;
         var chat = getEventChat(eventid);
+        chat.context = null;
+        chat.pendingAction = null;
+        var drawerGeneration = ++activeDrawerGeneration;
 
         var chatUrl = zbxUrl('ai.chat') + '&eventid=' + encodeURIComponent(eventid);
 
@@ -139,13 +153,15 @@
             '<form class="ai-drawer-compose" id="ai-drawer-compose">' +
                 '<textarea class="ai-drawer-input" id="ai-drawer-message" rows="3" placeholder="Ask about this problem..."></textarea>' +
                 '<div class="ai-drawer-actions">' +
-                    '<button type="submit" class="btn ai-drawer-send" id="ai-drawer-send">Send</button>' +
-                    '<button type="button" class="btn-alt ai-drawer-history-btn" id="ai-drawer-history-btn" title="Fetch item history/trends and send to AI for deeper analysis">Include history</button>' +
+                    '<button type="submit" class="btn ai-drawer-send" id="ai-drawer-send" disabled>Send</button>' +
+                    '<button type="button" class="btn-alt ai-drawer-history-btn" id="ai-drawer-history-btn" disabled title="Fetch item history/trends and send to AI for deeper analysis">Include history</button>' +
                     '<button type="button" class="btn-alt ai-drawer-post" id="ai-drawer-post" disabled title="Post last AI answer as problem update comment">Post to event</button>' +
                 '</div>' +
             '</form>';
 
         document.body.appendChild(drawer);
+        drawer.dataset.eventid = String(eventid);
+        drawer.dataset.generation = String(drawerGeneration);
         activeDrawer = drawer;
 
         drawer.querySelector('.ai-drawer-close').addEventListener('click', closeDrawer);
@@ -159,30 +175,39 @@
             });
         }
 
-        var form = document.getElementById('ai-drawer-compose');
-        var msgField = document.getElementById('ai-drawer-message');
-        var sendBtn = document.getElementById('ai-drawer-send');
-        var postBtn = document.getElementById('ai-drawer-post');
+        var form = drawer.querySelector('#ai-drawer-compose');
+        var msgField = drawer.querySelector('#ai-drawer-message');
+        var sendBtn = drawer.querySelector('#ai-drawer-send');
+        var postBtn = drawer.querySelector('#ai-drawer-post');
 
         form.addEventListener('submit', function (e) {
             e.preventDefault();
-            sendMessage(eventid, msgField, sendBtn);
+            sendMessage(eventid, drawer, drawerGeneration, msgField, sendBtn);
         });
 
         postBtn.addEventListener('click', function () {
-            postLastAnswer(eventid);
+            postLastAnswer(eventid, drawer, drawerGeneration);
         });
 
-        var historyBtn = document.getElementById('ai-drawer-history-btn');
+        var historyBtn = drawer.querySelector('#ai-drawer-history-btn');
         historyBtn.addEventListener('click', function () {
-            fetchAndSendItemHistory(eventid);
+            fetchAndSendItemHistory(eventid, drawer, drawerGeneration);
         });
 
-        renderTranscript(eventid);
-        loadContext(eventid);
+        renderTranscript(eventid, drawer);
+        loadContext(eventid, drawer, drawerGeneration);
     }
 
     function closeDrawer() {
+        activeDrawerGeneration += 1;
+        if (contextAbortController) {
+            contextAbortController.abort();
+            contextAbortController = null;
+        }
+        if (historyAbortController) {
+            historyAbortController.abort();
+            historyAbortController = null;
+        }
         if (activeDrawer) {
             activeDrawer.remove();
             activeDrawer = null;
@@ -190,21 +215,37 @@
         }
     }
 
-    function loadContext(eventid) {
-        var contextEl = document.getElementById('ai-drawer-context');
+    function loadContext(eventid, drawer, drawerGeneration) {
+        if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
+        var contextEl = drawer.querySelector('#ai-drawer-context');
         if (!contextEl) return;
 
-        fetch(zbxUrl('ai.problem.context') + '&eventid=' + encodeURIComponent(eventid), {
-            method: 'GET',
-            credentials: 'same-origin'
-        })
+        if (contextAbortController) contextAbortController.abort();
+        contextAbortController = typeof AbortController !== 'undefined'
+            ? new AbortController()
+            : null;
+        var requestController = contextAbortController;
+        var options = { method: 'GET', credentials: 'same-origin' };
+        if (requestController) options.signal = requestController.signal;
+        function enableMatchingControls() {
+            if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
+            var sendBtn = drawer.querySelector('#ai-drawer-send');
+            var historyBtn = drawer.querySelector('#ai-drawer-history-btn');
+            if (sendBtn) sendBtn.disabled = false;
+            if (historyBtn) historyBtn.disabled = false;
+            updatePostBtn(eventid, drawer);
+        }
+
+        fetch(zbxUrl('ai.problem.context') + '&eventid=' + encodeURIComponent(eventid), options)
             .then(handleJsonResponse)
             .then(function (response) {
+                if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
                 if (!response || !response.ok) {
                     var errMsg = (response && typeof response.error === 'string')
                         ? response.error
                         : 'Failed to load context.';
                     contextEl.innerHTML = '<div class="ai-drawer-context-error">' + escapeHtml(errMsg) + '</div>';
+                    enableMatchingControls();
                     return;
                 }
 
@@ -232,6 +273,7 @@
 
                 if (!ctx || typeof ctx !== 'object') {
                     contextEl.innerHTML = '<div class="ai-drawer-context-error">Invalid context data received.</div>';
+                    enableMatchingControls();
                     return;
                 }
 
@@ -239,7 +281,7 @@
                 chat.context = ctx;
 
                 // Update "Full chat" link with hostname and problem summary.
-                var chatLink = document.querySelector('.ai-drawer-open-chat');
+                var chatLink = drawer.querySelector('.ai-drawer-open-chat');
                 if (chatLink && ctx.hostname) {
                     chatLink.href = zbxUrl('ai.chat') +
                         '&eventid=' + encodeURIComponent(eventid) +
@@ -266,61 +308,81 @@
                 }
 
                 contextEl.innerHTML = html || '<div class="ai-drawer-context-empty">No additional context available.</div>';
+                enableMatchingControls();
 
                 // Auto-send starter message if this is a fresh chat and auto_analyze is enabled.
                 var autoAnalyze = !response.settings || response.settings.auto_analyze !== false;
                 if (chat.history.length === 0 && autoAnalyze) {
-                    autoStartAnalysis(eventid);
+                    autoStartAnalysis(eventid, drawer, drawerGeneration);
                 }
             })
             .catch(function (err) {
+                if (!isCurrentDrawer(drawer, eventid, drawerGeneration)
+                    || (err && err.name === 'AbortError')) return;
                 var msg = (err && typeof err.message === 'string') ? err.message : 'Failed to load context.';
                 contextEl.innerHTML = '<div class="ai-drawer-context-error">' + escapeHtml(msg) + '</div>';
+                enableMatchingControls();
+            })
+            .finally(function () {
+                if (requestController === contextAbortController) {
+                    contextAbortController = null;
+                }
             });
     }
 
-    function autoStartAnalysis(eventid) {
+    function autoStartAnalysis(eventid, drawer, drawerGeneration) {
+        if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
         var chat = getEventChat(eventid);
         var starterMessage = 'Analyze this active Zabbix problem. ' +
             'Summarize the likely cause, suggest safe diagnostic checks, ' +
             'and use Zabbix tools when helpful.';
 
         chat.history.push({ role: 'user', content: starterMessage });
-        renderTranscript(eventid);
+        renderTranscript(eventid, drawer);
 
-        var sendBtn = document.getElementById('ai-drawer-send');
+        var sendBtn = drawer.querySelector('#ai-drawer-send');
+        var historyBtn = drawer.querySelector('#ai-drawer-history-btn');
         if (sendBtn) sendBtn.disabled = true;
-        showDrawerStatus('Analyzing problem...', false);
+        if (historyBtn) historyBtn.disabled = true;
+        showDrawerStatus('Analyzing problem...', false, drawer);
 
-        doSend(eventid, starterMessage, function () {
+        doSend(eventid, starterMessage, drawer, drawerGeneration, function () {
             if (sendBtn) sendBtn.disabled = false;
+            if (historyBtn) historyBtn.disabled = false;
         });
     }
 
-    function sendMessage(eventid, msgField, sendBtn) {
+    function sendMessage(eventid, drawer, drawerGeneration, msgField, sendBtn) {
+        if (!isCurrentDrawer(drawer, eventid, drawerGeneration) || sendBtn.disabled) return;
         var message = (msgField.value || '').trim();
         if (!message) return;
 
         var chat = getEventChat(eventid);
         chat.history.push({ role: 'user', content: message });
-        renderTranscript(eventid);
+        renderTranscript(eventid, drawer);
         msgField.value = '';
         sendBtn.disabled = true;
-        showInlineTypingIndicator('ai-drawer-transcript', true);
-        showDrawerStatus('Sending...', false);
+        var historyBtn = drawer.querySelector('#ai-drawer-history-btn');
+        if (historyBtn) historyBtn.disabled = true;
+        showInlineTypingIndicator('ai-drawer-transcript', true, drawer);
+        showDrawerStatus('Sending...', false, drawer);
 
-        doSend(eventid, message, function () {
+        doSend(eventid, message, drawer, drawerGeneration, function () {
             sendBtn.disabled = false;
-            showInlineTypingIndicator('ai-drawer-transcript', false);
+            if (historyBtn) historyBtn.disabled = false;
+            showInlineTypingIndicator('ai-drawer-transcript', false, drawer);
             msgField.focus();
         });
     }
 
-    function doSend(eventid, message, onDone) {
+    function doSend(eventid, message, drawer, drawerGeneration, onDone, untrustedMonitoringContext) {
         var chat = getEventChat(eventid);
+        function current() {
+            return isCurrentDrawer(drawer, eventid, drawerGeneration);
+        }
 
         var requestHistory = chat.history.slice(0, -1).filter(function (m) {
-            return m.role === 'user' || m.role === 'assistant';
+            return (m.role === 'user' || m.role === 'assistant') && !m.non_forwardable;
         });
 
         if (requestHistory.length > 12) {
@@ -331,9 +393,11 @@
 
         if (!csrf) {
             chat.history.push({ role: 'assistant', content: '[Error] CSRF token not available. Try closing and reopening the AI drawer.' });
-            renderTranscript(eventid);
-            showDrawerStatus('CSRF token missing. Reopen the drawer to retry.', true);
-            if (onDone) onDone();
+            if (current()) {
+                renderTranscript(eventid, drawer);
+                showDrawerStatus('CSRF token missing. Reopen the drawer to retry.', true, drawer);
+                if (onDone) onDone();
+            }
             return;
         }
 
@@ -344,8 +408,10 @@
         params.set('hostname', (chat.context && chat.context.hostname) || '');
         params.set('problem_summary', (chat.context && chat.context.problem_summary) || '');
         params.set('extra_context', '');
+        params.set('untrusted_monitoring_context', untrustedMonitoringContext || '');
         params.set('chat_session_id', chat.sessionId);
         params.set('provider_id', defaultProviderId);
+        params.set('provider_user_override', '0');
         params.set(CSRF_FIELD, csrf);
 
         fetch(zbxUrl('ai.chat.send'), {
@@ -361,15 +427,25 @@
                 }
 
                 if (response.action_pending) {
+                    if (!current()) {
+                        chat.pendingAction = null;
+                        return;
+                    }
                     chat.pendingAction = {
                         action_id: response.pending_action_id || '',
+                        confirmation_hash: response.pending_confirmation_hash || '',
+                        confirmation_level: response.confirmation_level || 'standard',
                         tool: response.pending_tool || ''
                     };
-                    chat.history.push({ role: 'assistant', content: response.reply || '' });
-                    renderTranscript(eventid);
-                    showActionConfirm(eventid);
-                    showDrawerStatus('Action requires confirmation.', false);
-                    updatePostBtn(eventid);
+                    chat.history.push({
+                        role: 'assistant',
+                        content: response.reply || '',
+                        non_forwardable: true
+                    });
+                    renderTranscript(eventid, drawer);
+                    showActionConfirm(eventid, drawer, drawerGeneration);
+                    showDrawerStatus('Operation requires confirmation.', false, drawer);
+                    updatePostBtn(eventid, drawer);
                     return;
                 }
 
@@ -381,24 +457,31 @@
                 }
 
                 chat.history.push({ role: 'assistant', content: prefix + (response.reply || '') });
-                renderTranscript(eventid);
-                showDrawerStatus('Reply received from ' + (response.provider_name || 'AI') + '.', false);
-                updatePostBtn(eventid);
+                if (current()) {
+                    renderTranscript(eventid, drawer);
+                    showDrawerStatus('Reply received from ' + (response.provider_name || 'AI') + '.', false, drawer);
+                    updatePostBtn(eventid, drawer);
+                }
             })
             .catch(function (err) {
                 var msg = (err && typeof err.message === 'string') ? err.message : String(err);
                 chat.history.push({ role: 'assistant', content: '[Error] ' + msg });
-                renderTranscript(eventid);
-                showDrawerStatus(msg, true);
+                if (current()) {
+                    renderTranscript(eventid, drawer);
+                    showDrawerStatus(msg, true, drawer);
+                }
             })
             .finally(function () {
-                if (onDone) onDone();
+                if (current() && onDone) onDone();
             });
     }
 
-    function showActionConfirm(eventid) {
-        var transcript = document.getElementById('ai-drawer-transcript');
+    function showActionConfirm(eventid, drawer, drawerGeneration) {
+        if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
+        var transcript = drawer.querySelector('#ai-drawer-transcript');
         if (!transcript) return;
+        var oldBar = transcript.querySelector('#ai-drawer-confirm-bar');
+        if (oldBar) oldBar.remove();
 
         var bar = document.createElement('div');
         bar.className = 'ai-action-confirm-buttons';
@@ -407,7 +490,10 @@
         var confirmBtn = document.createElement('button');
         confirmBtn.type = 'button';
         confirmBtn.className = 'btn ai-confirm-btn';
-        confirmBtn.textContent = 'Confirm';
+        var chat = getEventChat(eventid);
+        var highImpact = chat.pendingAction && chat.pendingAction.confirmation_level === 'high_impact';
+        var highImpactArmed = false;
+        confirmBtn.textContent = highImpact ? 'Review high-impact action' : 'Confirm';
 
         var cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
@@ -415,17 +501,25 @@
         cancelBtn.textContent = 'Cancel';
 
         confirmBtn.addEventListener('click', function () {
+            if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
+            if (highImpact && !highImpactArmed) {
+                highImpactArmed = true;
+                confirmBtn.textContent = 'Execute high-impact action';
+                showDrawerStatus('High-impact action reviewed. Click Execute to confirm it explicitly.', true, drawer);
+                return;
+            }
             bar.remove();
-            executeConfirmed(eventid);
+            executeConfirmed(eventid, drawer, drawerGeneration);
         });
 
         cancelBtn.addEventListener('click', function () {
+            if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
             bar.remove();
             var chat = getEventChat(eventid);
             chat.pendingAction = null;
             chat.history.push({ role: 'assistant', content: 'Action cancelled by user.' });
-            renderTranscript(eventid);
-            showDrawerStatus('Action cancelled.', false);
+            renderTranscript(eventid, drawer);
+            showDrawerStatus('Action cancelled.', false, drawer);
         });
 
         bar.appendChild(confirmBtn);
@@ -434,22 +528,29 @@
         transcript.scrollTop = transcript.scrollHeight;
     }
 
-    function executeConfirmed(eventid) {
+    function executeConfirmed(eventid, drawer, drawerGeneration) {
+        if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
         var chat = getEventChat(eventid);
         if (!chat.pendingAction) return;
 
-        var sendBtn = document.getElementById('ai-drawer-send');
+        var sendBtn = drawer.querySelector('#ai-drawer-send');
+        var historyBtn = drawer.querySelector('#ai-drawer-history-btn');
         if (sendBtn) sendBtn.disabled = true;
-        showDrawerStatus('Executing Zabbix action...', false);
+        if (historyBtn) historyBtn.disabled = true;
+        showDrawerStatus('Executing confirmed operation...', false, drawer);
 
         var actionId = chat.pendingAction.action_id;
         var actionTool = chat.pendingAction.tool;
+        var confirmationHash = chat.pendingAction.confirmation_hash || '';
+        var highImpactConfirmed = chat.pendingAction.confirmation_level === 'high_impact';
         chat.pendingAction = null;
 
         var csrf = csrfTokens['ai.chat.execute'] || '';
 
         var params = new URLSearchParams();
         params.set('action_id', actionId);
+        params.set('confirmation_hash', confirmationHash);
+        params.set('high_impact_confirmed', highImpactConfirmed ? '1' : '0');
         params.set('provider_id', defaultProviderId);
         params.set('chat_session_id', chat.sessionId);
         params.set(CSRF_FIELD, csrf);
@@ -467,33 +568,57 @@
                 }
 
                 var prefix = '[Zabbix Action: ' + (response.action_tool || actionTool) + ']\n\n';
-                chat.history.push({ role: 'assistant', content: prefix + (response.reply || '') });
-                renderTranscript(eventid);
-                showDrawerStatus('Action executed.', false);
-                updatePostBtn(eventid);
+                var storedReply = prefix + (response.reply || '');
+                if (response.sensitive_reply) {
+                    window.prompt(
+                        'Sensitive one-time output for Event #' + eventid + ' — copy it now. It will not be stored in chat history:',
+                        response.reply || ''
+                    );
+                    storedReply = prefix + '[Sensitive one-time output was shown separately and was not stored.]';
+                }
+                chat.history.push({ role: 'assistant', content: storedReply });
+                if (isCurrentDrawer(drawer, eventid, drawerGeneration)) {
+                    renderTranscript(eventid, drawer);
+                    showDrawerStatus('Confirmed operation executed.', false, drawer);
+                    updatePostBtn(eventid, drawer);
+                }
             })
             .catch(function (err) {
                 var msg = (err && typeof err.message === 'string') ? err.message : String(err);
                 chat.history.push({ role: 'assistant', content: '[Error] ' + msg });
-                renderTranscript(eventid);
-                showDrawerStatus(msg, true);
+                if (isCurrentDrawer(drawer, eventid, drawerGeneration)) {
+                    renderTranscript(eventid, drawer);
+                    showDrawerStatus(msg, true, drawer);
+                }
             })
             .finally(function () {
-                if (sendBtn) sendBtn.disabled = false;
+                if (isCurrentDrawer(drawer, eventid, drawerGeneration)) {
+                    if (sendBtn) sendBtn.disabled = false;
+                    if (historyBtn) historyBtn.disabled = false;
+                }
             });
     }
 
-    function fetchAndSendItemHistory(eventid) {
-        var historyBtn = document.getElementById('ai-drawer-history-btn');
+    function fetchAndSendItemHistory(eventid, drawer, drawerGeneration) {
+        if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
+        var historyBtn = drawer.querySelector('#ai-drawer-history-btn');
+        var sendBtn = drawer.querySelector('#ai-drawer-send');
         if (historyBtn) historyBtn.disabled = true;
-        showDrawerStatus('Fetching item history...', false);
+        if (sendBtn) sendBtn.disabled = true;
+        showDrawerStatus('Fetching item history...', false, drawer);
 
-        fetch(zbxUrl('ai.problem.context') + '&eventid=' + encodeURIComponent(eventid) + '&include_history=1&history_limit=30', {
-            method: 'GET',
-            credentials: 'same-origin'
-        })
+        if (historyAbortController) historyAbortController.abort();
+        historyAbortController = typeof AbortController !== 'undefined'
+            ? new AbortController()
+            : null;
+        var requestController = historyAbortController;
+        var options = { method: 'GET', credentials: 'same-origin' };
+        if (requestController) options.signal = requestController.signal;
+
+        fetch(zbxUrl('ai.problem.context') + '&eventid=' + encodeURIComponent(eventid) + '&include_history=1&history_limit=30', options)
             .then(handleJsonResponse)
             .then(function (response) {
+                if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
                 if (!response || !response.ok) {
                     throw new Error((response && typeof response.error === 'string') ? response.error : 'Failed to fetch item history.');
                 }
@@ -501,8 +626,9 @@
                 var items = response.item_history || [];
 
                 if (!items.length) {
-                    showDrawerStatus('No item history data available for this problem.', true);
+                    showDrawerStatus('No item history data available for this problem.', true, drawer);
                     if (historyBtn) historyBtn.disabled = false;
+                    if (sendBtn) sendBtn.disabled = false;
                     return;
                 }
 
@@ -518,41 +644,55 @@
                 }
 
                 var historyMessage = lines.join('\n');
+                var operatorInstruction = 'Analyze the recently loaded item history and incorporate relevant trends into your assessment.';
                 var chat = getEventChat(eventid);
-                chat.history.push({ role: 'user', content: historyMessage });
-                renderTranscript(eventid);
+                chat.history.push({
+                    role: 'assistant',
+                    content: '[Untrusted monitoring data — display only]\n\n' + historyMessage,
+                    non_forwardable: true
+                });
+                chat.history.push({ role: 'user', content: operatorInstruction });
+                renderTranscript(eventid, drawer);
 
-                var sendBtn = document.getElementById('ai-drawer-send');
-                if (sendBtn) sendBtn.disabled = true;
-                showDrawerStatus('Analyzing item history trends...', false);
+                showDrawerStatus('Analyzing item history trends...', false, drawer);
 
-                doSend(eventid, historyMessage, function () {
+                doSend(eventid, operatorInstruction, drawer, drawerGeneration, function () {
                     if (sendBtn) sendBtn.disabled = false;
                     if (historyBtn) historyBtn.disabled = false;
-                });
+                }, historyMessage);
             })
             .catch(function (err) {
+                if (!isCurrentDrawer(drawer, eventid, drawerGeneration)
+                    || (err && err.name === 'AbortError')) return;
                 var msg = (err && typeof err.message === 'string') ? err.message : String(err);
-                showDrawerStatus(msg, true);
+                showDrawerStatus(msg, true, drawer);
                 if (historyBtn) historyBtn.disabled = false;
+                if (sendBtn) sendBtn.disabled = false;
+            })
+            .finally(function () {
+                if (requestController === historyAbortController) {
+                    historyAbortController = null;
+                }
             });
     }
 
-    function postLastAnswer(eventid) {
+    function postLastAnswer(eventid, drawer, drawerGeneration) {
+        if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
         var chat = getEventChat(eventid);
         var lastReply = '';
         for (var i = chat.history.length - 1; i >= 0; i--) {
-            if (chat.history[i].role === 'assistant' && (chat.history[i].content || '').trim()) {
+            if (chat.history[i].role === 'assistant' && !chat.history[i].non_forwardable
+                && (chat.history[i].content || '').trim()) {
                 lastReply = chat.history[i].content;
                 break;
             }
         }
         if (!lastReply) {
-            showDrawerStatus('No AI reply to post.', true);
+            showDrawerStatus('No AI reply to post.', true, drawer);
             return;
         }
 
-        var postBtn = document.getElementById('ai-drawer-post');
+        var postBtn = drawer.querySelector('#ai-drawer-post');
         if (postBtn) postBtn.disabled = true;
 
         var csrf = csrfTokens['ai.event.comment'] || '';
@@ -574,19 +714,27 @@
                 if (!response || !response.ok) {
                     throw new Error((response && typeof response.error === 'string') ? response.error : 'Could not post comment.');
                 }
-                showDrawerStatus('Posted ' + (response.chunks || 0) + ' comment chunk(s) to event.', false);
+                if (isCurrentDrawer(drawer, eventid, drawerGeneration)) {
+                    showDrawerStatus('Posted ' + (response.chunks || 0) + ' comment chunk(s) to event.', false, drawer);
+                }
             })
             .catch(function (err) {
                 var msg = (err && typeof err.message === 'string') ? err.message : String(err);
-                showDrawerStatus(msg, true);
+                if (isCurrentDrawer(drawer, eventid, drawerGeneration)) {
+                    showDrawerStatus(msg, true, drawer);
+                }
             })
             .finally(function () {
-                updatePostBtn(eventid);
+                if (isCurrentDrawer(drawer, eventid, drawerGeneration)) {
+                    updatePostBtn(eventid, drawer);
+                }
             });
     }
 
-    function showInlineTypingIndicator(transcriptId, visible) {
-        var transcript = document.getElementById(transcriptId);
+    function showInlineTypingIndicator(transcriptId, visible, drawer) {
+        var transcript = drawer
+            ? drawer.querySelector('#' + transcriptId)
+            : document.getElementById(transcriptId);
         if (!transcript) return;
 
         var existing = transcript.querySelector('.ai-msg-typing');
@@ -630,8 +778,10 @@
         transcript.scrollTop = transcript.scrollHeight;
     }
 
-    function renderTranscript(eventid) {
-        var transcript = document.getElementById('ai-drawer-transcript');
+    function renderTranscript(eventid, drawer) {
+        var transcript = drawer
+            ? drawer.querySelector('#ai-drawer-transcript')
+            : document.getElementById('ai-drawer-transcript');
         if (!transcript) return;
 
         var chat = getEventChat(eventid);
@@ -667,21 +817,26 @@
         transcript.scrollTop = transcript.scrollHeight;
     }
 
-    function showDrawerStatus(message, isError) {
-        var el = document.getElementById('ai-drawer-status');
+    function showDrawerStatus(message, isError, drawer) {
+        var el = drawer
+            ? drawer.querySelector('#ai-drawer-status')
+            : document.getElementById('ai-drawer-status');
         if (!el) return;
         el.textContent = String(message);
         el.className = 'ai-drawer-status ' + (isError ? 'ai-status-error' : 'ai-status-ok');
     }
 
-    function updatePostBtn(eventid) {
-        var postBtn = document.getElementById('ai-drawer-post');
+    function updatePostBtn(eventid, drawer) {
+        var postBtn = drawer
+            ? drawer.querySelector('#ai-drawer-post')
+            : document.getElementById('ai-drawer-post');
         if (!postBtn) return;
 
         var chat = getEventChat(eventid);
         var hasReply = false;
         for (var i = chat.history.length - 1; i >= 0; i--) {
-            if (chat.history[i].role === 'assistant' && (chat.history[i].content || '').trim()) {
+            if (chat.history[i].role === 'assistant' && !chat.history[i].non_forwardable
+                && (chat.history[i].content || '').trim()) {
                 hasReply = true;
                 break;
             }
@@ -705,6 +860,7 @@
                 sessionId: chat.sessionId,
                 context: {
                     provider_id: defaultProviderId,
+                    provider_user_override: false,
                     eventid: eventid,
                     eventid_label: eventid,
                     hostname: ctx.hostname || '',

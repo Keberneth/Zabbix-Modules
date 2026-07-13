@@ -5,7 +5,7 @@ zabbix_export:
       type: WEBHOOK
       parameters:
         - name: ai_webhook_url
-          value: 'https://ZABBIX_FQDN/zabbix.php?action=ai.webhook'
+          value: 'https://ZABBIX_FQDN/ai-webhook'
         - name: eventid
           value: '{EVENT.ID}'
         - name: event_tags
@@ -23,6 +23,7 @@ zabbix_export:
         - name: severity
           value: '{EVENT.SEVERITY}'
         - name: shared_secret
+          value: '{$AI.WEBHOOK.SECRET}'
         - name: trigger_name
           value: '{EVENT.NAME}'
       script: |

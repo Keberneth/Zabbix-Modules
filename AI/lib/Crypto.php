@@ -7,36 +7,41 @@ namespace Modules\AI\Lib;
  * Zabbix `module` config (provider API keys, Zabbix/NetBox tokens, the webhook
  * shared secret).
  *
- * Design goals — chosen specifically so this can never "brick" the module:
- *   - Opt-in. Encryption only activates when an encryption key is provided via
- *     the ZABBIX_AI_ENCRYPTION_KEY environment variable. With no key set the
- *     module behaves exactly as before (secrets stored verbatim), so existing
- *     installs are unaffected and nothing can break by simply upgrading.
+ * Design goals:
+ *   - Required for inline secrets. New inline secrets and pending confirmed
+ *     action payloads (writes and sensitive reads) fail closed unless
+ *     ZABBIX_AI_ENCRYPTION_KEY (or ZABBIX_AI_ENCRYPTION_KEY_FILE) and a crypto backend
+ *     are available. Environment-variable secret references need no storage.
  *   - Backward compatible. Values are tagged with an "enc:v1:" prefix; any value
  *     without it is treated as plain text and returned as-is, so previously
- *     stored plaintext secrets keep working and are upgraded to ciphertext the
- *     next time settings are saved.
+ *     stored plaintext secrets can be migrated once the encryption key is
+ *     configured and settings are saved. Without a key they are refused unless
+ *     the explicit development-only plaintext escape hatch is enabled.
  *   - Fail-safe. If a value is encrypted but the key is missing/wrong (or the
  *     crypto extension is unavailable), decryption returns '' rather than
  *     throwing — the affected feature reports "secret unavailable" instead of
  *     taking down the whole UI.
  *
- * Key handling: the env var value is any passphrase/secret string; a fixed
- * 32-byte key is derived from it with SHA-256. Using an environment variable
- * (rather than a file) is what makes this safe across the module's supported
- * topologies — a single server sets it once, a multi-server install sets the
- * SAME value on each frontend node, and Docker/Compose passes it as an
- * environment variable to every frontend container. The key never touches the
- * database, so a DB dump / backup / configuration export no longer leaks the
- * secrets.
+ * Key handling: the key material may be provided directly in
+ * ZABBIX_AI_ENCRYPTION_KEY or loaded from the server-admin-controlled absolute
+ * path in ZABBIX_AI_ENCRYPTION_KEY_FILE. A fixed 32-byte key is derived from it
+ * with SHA-256. The same material must be available on every frontend node. It
+ * never touches the database, so a DB dump / backup / configuration export no
+ * longer leaks the secrets.
  */
 class Crypto {
 
     private const PREFIX = 'enc:v1:';
     private const ENV_KEY = 'ZABBIX_AI_ENCRYPTION_KEY';
+    private const ENV_KEY_FILE = 'ZABBIX_AI_ENCRYPTION_KEY_FILE';
+    private const ENV_ALLOW_PLAINTEXT = 'ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS';
 
     private const BACKEND_OPENSSL = "\x01";
     private const BACKEND_SODIUM = "\x02";
+
+    private static bool $key_cache_initialized = false;
+    private static ?string $resolved_key_cache = null;
+    private static string $key_source_cache = 'none';
 
     public static function isEncrypted($value): bool {
         return is_string($value) && strncmp($value, self::PREFIX, strlen(self::PREFIX)) === 0;
@@ -54,23 +59,45 @@ class Crypto {
      * Status for the settings UI: whether encryption-at-rest is active and which
      * primitive is in use.
      */
-    public static function status(): array {
+    public static function status(bool $configured_plaintext_allowed = false): array {
         $backend = self::backend();
+        $environment_plaintext_allowed = self::allowsPlaintextSecrets();
 
         return [
             'available' => self::isAvailable(),
             'has_key' => self::resolveKey() !== null,
-            'backend' => $backend !== '' ? $backend : 'none'
+            'key_source' => self::keySource(),
+            'backend' => $backend !== '' ? $backend : 'none',
+            'configured_plaintext_allowed' => $configured_plaintext_allowed,
+            'environment_plaintext_allowed' => $environment_plaintext_allowed,
+            'plaintext_allowed' => $configured_plaintext_allowed || $environment_plaintext_allowed
         ];
     }
 
+    /** Explicit development-only escape hatch for legacy plaintext configs. */
+    public static function allowsPlaintextSecrets(): bool {
+        $value = strtolower(trim((string) getenv(self::ENV_ALLOW_PLAINTEXT)));
+
+        return in_array($value, ['1', 'true', 'yes', 'on'], true);
+    }
+
     /**
-     * Encrypt a secret for storage. No-ops (returns the input unchanged) when the
-     * value is empty, already encrypted, an "env:" indirection reference, or when
-     * no key/backend is available — so callers can apply it unconditionally.
+     * Reset the request-local key snapshot. Normal web requests never need to
+     * call this; it exists for CLI workers/tests which deliberately change
+     * environment/key files without starting a new PHP request.
+     */
+    public static function resetRuntimeKeyCache(): void {
+        self::$key_cache_initialized = false;
+        self::$resolved_key_cache = null;
+        self::$key_source_cache = 'none';
+    }
+
+    /**
+     * Best-effort encryption primitive. Security-sensitive persistence callers
+     * must use encryptRequired(), which verifies ciphertext and fails closed.
      */
     public static function encrypt(string $value): string {
-        if ($value === '' || self::isEncrypted($value) || strncmp($value, 'env:', 4) === 0) {
+        if ($value === '' || self::isEncrypted($value) || SecretReference::isExplicitReference($value)) {
             return $value;
         }
 
@@ -106,6 +133,37 @@ class Crypto {
             // storing it as-is (the UI still warns it is unencrypted).
             return $value;
         }
+    }
+
+    /**
+     * Encrypt a non-empty value and fail closed if encryption cannot be
+     * guaranteed. Use this for pending write payloads and newly persisted
+     * inline secrets; those must never fall back to plaintext.
+     */
+    public static function encryptRequired(string $value, string $purpose = 'sensitive data'): string {
+        if ($value === '') {
+            return '';
+        }
+        if (SecretReference::isExplicitReference($value)) {
+            return $value;
+        }
+        if (self::isEncrypted($value)) {
+            return $value;
+        }
+        if (!self::isAvailable()) {
+            throw new \RuntimeException(
+                'Cannot store '.$purpose.' securely. Configure ZABBIX_AI_ENCRYPTION_KEY or '
+                .'ZABBIX_AI_ENCRYPTION_KEY_FILE '
+                .'for the PHP/web process and ensure OpenSSL or Sodium is available.'
+            );
+        }
+
+        $encrypted = self::encrypt($value);
+        if (!self::isEncrypted($encrypted)) {
+            throw new \RuntimeException('Encryption failed while storing '.$purpose.'; nothing was saved.');
+        }
+
+        return $encrypted;
     }
 
     /**
@@ -168,6 +226,22 @@ class Crypto {
         return '';
     }
 
+    /** Decrypt a value which is required to have been encrypted at rest. */
+    public static function decryptRequired(string $value, string $purpose = 'sensitive data'): string {
+        if (!self::isEncrypted($value)) {
+            throw new \RuntimeException('Refusing plaintext '.$purpose.' from protected storage.');
+        }
+
+        $plain = self::decrypt($value);
+        if ($plain === '') {
+            throw new \RuntimeException(
+                'Could not decrypt '.$purpose.'. Check the Zabbix AI encryption key on every frontend node.'
+            );
+        }
+
+        return $plain;
+    }
+
     private static function backend(): string {
         if (function_exists('sodium_crypto_secretbox')) {
             return 'sodium';
@@ -180,18 +254,66 @@ class Crypto {
         return '';
     }
 
+    /** Opaque equality fingerprint which cannot be brute-forced without the deployment key. */
+    public static function keyedFingerprint(string $value, string $purpose = 'sensitive binding'): string {
+        $key = self::resolveKey();
+        if ($key === null) {
+            throw new \RuntimeException(
+                'Cannot bind '.$purpose.' without ZABBIX_AI_ENCRYPTION_KEY or ZABBIX_AI_ENCRYPTION_KEY_FILE.'
+            );
+        }
+
+        return hash_hmac('sha256', $value, $key);
+    }
+
     /**
-     * Derive the 32-byte key from the ZABBIX_AI_ENCRYPTION_KEY environment
-     * variable, or null when it is not set. Any passphrase is accepted and
-     * hashed to a fixed-length key.
+     * Derive the 32-byte key from direct environment material, or from the
+     * server-configured key file when the direct value is absent. Direct
+     * ZABBIX_AI_ENCRYPTION_KEY deliberately keeps precedence for backward
+     * compatibility during staged migrations.
      */
     private static function resolveKey(): ?string {
+        if (self::$key_cache_initialized) {
+            return self::$resolved_key_cache;
+        }
+        self::$key_cache_initialized = true;
+
         $material = getenv(self::ENV_KEY);
 
-        if (!is_string($material) || trim($material) === '') {
+        if (is_string($material) && trim($material) !== '') {
+            self::$key_source_cache = 'environment';
+            self::$resolved_key_cache = hash('sha256', trim($material), true);
+
+            return self::$resolved_key_cache;
+        }
+
+        $key_file = getenv(self::ENV_KEY_FILE);
+        if (!is_string($key_file) || trim($key_file) === '') {
             return null;
         }
 
-        return hash('sha256', trim($material), true);
+        try {
+            $material = SecretReference::readServerConfiguredFile(
+                trim($key_file),
+                'Zabbix AI encryption key'
+            );
+        }
+        catch (\Throwable $e) {
+            // Preserve the existing fail-safe contract: unavailable/corrupt key
+            // material makes encryption unavailable and decryption return empty.
+            return null;
+        }
+
+        self::$key_source_cache = 'file';
+        self::$resolved_key_cache = hash('sha256', trim($material), true);
+
+        return self::$resolved_key_cache;
+    }
+
+    /** Non-secret source label for the settings status banner. */
+    private static function keySource(): string {
+        self::resolveKey();
+
+        return self::$key_source_cache;
     }
 }

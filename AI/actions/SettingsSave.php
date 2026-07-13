@@ -27,6 +27,26 @@ class SettingsSave extends CController {
             $new_config = Config::buildFromPost($_POST, $current);
             Config::save($new_config);
 
+            // Never tell the browser that a settings change succeeded until a
+            // fresh database read confirms the newly written policy. Besides
+            // catching a failed/no-op write, the response fields let the new UI
+            // detect a mixed deployment where an older PHP-FPM worker handled
+            // the save request.
+            $persisted_config = Config::get();
+            $requested_plaintext = Util::truthy(
+                $new_config['secret_storage']['allow_plaintext_secrets'] ?? false
+            );
+            $persisted_plaintext = Util::truthy(
+                $persisted_config['secret_storage']['allow_plaintext_secrets'] ?? false
+            );
+            if ($persisted_plaintext !== $requested_plaintext) {
+                throw new \RuntimeException(
+                    'AI settings write verification failed: the plaintext-secret compatibility setting '
+                    .'did not persist. Check for a mixed module deployment or database write failure, '
+                    .'reload PHP-FPM/Apache, and try again.'
+                );
+            }
+
             $log_entry = [
                 'event' => 'settings.save',
                 'source' => 'ai.settings.save',
@@ -34,7 +54,13 @@ class SettingsSave extends CController {
                 'meta' => [
                     'providers' => count($new_config['providers'] ?? []),
                     'security_enabled' => !empty($new_config['security']['enabled']),
-                    'logging_enabled' => !empty($new_config['logging']['enabled'])
+                    'logging_enabled' => !empty($new_config['logging']['enabled']),
+                    'plaintext_secrets_before' => !empty(
+                        $current['secret_storage']['allow_plaintext_secrets']
+                    ),
+                    'plaintext_secrets_after' => !empty(
+                        $new_config['secret_storage']['allow_plaintext_secrets']
+                    )
                 ]
             ];
 
@@ -43,7 +69,12 @@ class SettingsSave extends CController {
                 AuditLogger::log($new_config, 'settings_changes', $log_entry);
             }
 
-            $this->respond(['ok' => true, 'message' => _('AI settings updated.')]);
+            $this->respond([
+                'ok' => true,
+                'message' => _('AI settings updated.'),
+                'settings_schema_version' => 1,
+                'plaintext_secrets_enabled' => $persisted_plaintext
+            ]);
         }
         catch (\Throwable $e) {
             AuditLogger::log($current, 'errors', [

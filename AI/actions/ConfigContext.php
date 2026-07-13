@@ -6,6 +6,7 @@ require_once __DIR__.'/../lib/bootstrap.php';
 
 use CController,
     CControllerResponseData,
+    CWebUser,
     Modules\AI\Lib\Config,
     Modules\AI\Lib\Util,
     Modules\AI\Lib\ZabbixApiClient;
@@ -30,7 +31,7 @@ class ConfigContext extends CController {
     }
 
     protected function checkPermissions(): bool {
-        return $this->getUserType() >= USER_TYPE_ZABBIX_USER;
+        return $this->getUserType() >= USER_TYPE_ZABBIX_USER && !CWebUser::isGuest();
     }
 
     protected function doAction(): void {
@@ -501,10 +502,11 @@ class ConfigContext extends CController {
                 }
             }
 
+            $secret = in_array((int) ($macro['type'] ?? 0), [1, 2], true);
             $result[] = [
                 'macro' => $macro['macro'] ?? '',
-                'value' => ($macro['type'] ?? '0') === '1' ? '***SECRET***' : ($macro['value'] ?? ''),
-                'type' => ($macro['type'] ?? '0') === '1' ? 'secret' : 'text',
+                'value' => $secret ? '***SECRET***' : ($macro['value'] ?? ''),
+                'type' => $secret ? 'secret_or_vault' : 'text',
                 'description' => $macro['description'] ?? '',
                 'source' => $source
             ];

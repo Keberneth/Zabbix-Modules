@@ -43,8 +43,11 @@
         var historyPeriod = parseInt(root.dataset.historyPeriod || '24', 10);
         var historyMaxRows = parseInt(root.dataset.historyMaxRows || '50', 10);
 
-        // Tracks a pending write action awaiting user confirmation.
+        // Tracks a pending write or privacy-sensitive read awaiting confirmation.
         var pendingAction = null;
+        var pendingUntrustedMonitoringContext = '';
+        var pendingUntrustedMonitoringEventId = '';
+        var monitoringContextGeneration = 0;
 
         var HISTORY_KEY = 'zbx_ai_chat_history_v1';
         var CONTEXT_KEY = 'zbx_ai_chat_context_v1';
@@ -67,6 +70,7 @@
 
         var history = loadJson(HISTORY_KEY, []);
         var context = loadJson(CONTEXT_KEY, {});
+        var providerUserOverride = context.provider_user_override === true;
 
         if (!hostnameField.value && context.hostname) {
             hostnameField.value = context.hostname;
@@ -92,7 +96,7 @@
         if (context.extra_context) {
             extraContextField.value = context.extra_context;
         }
-        if (context.provider_id && providerField && providerField.querySelector('option[value="' + cssEscape(context.provider_id) + '"]')) {
+        if (providerUserOverride && context.provider_id && providerField && providerField.querySelector('option[value="' + cssEscape(context.provider_id) + '"]')) {
             providerField.value = context.provider_id;
         }
         if (context.hostid) {
@@ -107,7 +111,7 @@
             loadHosts();
         }
 
-        [providerField, problemSummaryField, extraContextField].forEach(function (element) {
+        [problemSummaryField, extraContextField].forEach(function (element) {
             if (!element) {
                 return;
             }
@@ -115,6 +119,12 @@
             element.addEventListener('input', saveContext);
             element.addEventListener('change', saveContext);
         });
+        if (providerField) {
+            providerField.addEventListener('change', function () {
+                providerUserOverride = providerField.value !== '';
+                saveContext();
+            });
+        }
 
         initSearchableDropdown(hostnameSearchField, hostnameList, {
             // While a problem is selected, only its related host(s) are offered.
@@ -132,6 +142,7 @@
                     (host.name && host.name.toLowerCase().indexOf(q) !== -1);
             },
             onSelect: function (host) {
+                invalidatePendingMonitoringContext(true);
                 hostnameField.value = host.host;
                 hostnameIdField.value = host.hostid;
                 hostnameSearchField.value = host.host;
@@ -148,6 +159,7 @@
                 saveContext();
             },
             onClear: function () {
+                invalidatePendingMonitoringContext(true);
                 hostnameField.value = '';
                 hostnameIdField.value = '';
                 allProblems = [];
@@ -175,6 +187,7 @@
                 selectProblem(problem);
             },
             onClear: function () {
+                invalidatePendingMonitoringContext(true);
                 eventidField.value = '';
                 problemHostLock = null;
                 saveContext();
@@ -187,6 +200,7 @@
         });
 
         function selectProblem(problem) {
+            invalidatePendingMonitoringContext(true);
             eventidField.value = problem.eventid;
             var sev = SEVERITY_LABELS[parseInt(problem.severity, 10)] || 'Unknown';
             eventidSearchField.value = problem.eventid + ' — [' + sev + '] ' + problem.name;
@@ -308,12 +322,14 @@
                 return;
             }
 
-            if (!providerField || !providerField.value) {
-                showSideStatus('Select a provider first.', true);
+            if (!providerField || providerField.disabled) {
+                showSideStatus('Configure and enable a provider first.', true);
                 return;
             }
 
-            var requestHistory = normalizeHistory(history.slice(), historyLimit);
+            var requestHistory = normalizeHistory(history.filter(function (item) {
+                return !item.non_forwardable;
+            }), historyLimit);
             history = normalizeHistory(requestHistory.concat([{ role: 'user', content: message }]), historyLimit);
             persistHistory();
             renderHistory();
@@ -323,12 +339,21 @@
 
             var params = new URLSearchParams();
             params.set('provider_id', providerField.value);
+            params.set('provider_user_override', providerUserOverride ? '1' : '0');
             params.set('message', message);
             params.set('history_json', JSON.stringify(requestHistory));
-            params.set('eventid', eventidField.value || '');
+            var selectedEventid = (eventidField.value || '').trim();
+            params.set('eventid', selectedEventid);
             params.set('hostname', hostnameField.value || '');
             params.set('problem_summary', problemSummaryField.value || '');
             params.set('extra_context', extraContextField.value || '');
+            params.set('untrusted_monitoring_context',
+                pendingUntrustedMonitoringEventId === selectedEventid
+                    ? pendingUntrustedMonitoringContext
+                    : '');
+            pendingUntrustedMonitoringContext = '';
+            pendingUntrustedMonitoringEventId = '';
+            monitoringContextGeneration += 1;
             params.set('chat_session_id', chatSessionId);
             params.set(csrfFieldName, chatCsrf);
 
@@ -346,15 +371,21 @@
                         throw new Error(response.error || 'Chat request failed.');
                     }
 
-                    // Handle pending write action that needs confirmation.
+                    // Handle a pending write or privacy-sensitive read.
                     if (response.action_pending) {
                         pendingAction = {
                             action_id: response.pending_action_id || '',
+                            confirmation_hash: response.pending_confirmation_hash || '',
+                            confirmation_level: response.confirmation_level || 'standard',
                             tool: response.pending_tool || '',
                             provider_id: providerField ? providerField.value : ''
                         };
 
-                        history = normalizeHistory(history.concat([{ role: 'assistant', content: response.reply || '' }]), historyLimit);
+                        history = normalizeHistory(history.concat([{
+                            role: 'assistant',
+                            content: response.reply || '',
+                            non_forwardable: true
+                        }]), historyLimit);
                         persistHistory();
                         renderHistory();
                         showActionConfirmButtons();
@@ -377,12 +408,6 @@
                     var statusText = 'Reply received from ' + (response.provider_name || 'AI') + '.';
                     if (response.action_executed) {
                         statusText = 'Zabbix action "' + (response.action_tool || '') + '" executed. ' + statusText;
-                    }
-                    var enrichedHosts = (response.context && Array.isArray(response.context.netbox_enriched_hosts))
-                        ? response.context.netbox_enriched_hosts
-                        : [];
-                    if (enrichedHosts.length > 0) {
-                        statusText += ' NetBox auto-enriched: ' + enrichedHosts.join(', ') + '.';
                     }
                     showSideStatus(statusText, false);
                     updatePostButtonState();
@@ -426,10 +451,17 @@
             if (extraContextField) {
                 extraContextField.value = '';
             }
+            if (providerField) {
+                providerField.value = '';
+            }
             allProblems = [];
             problemsLoaded = false;
             problemHostLock = null;
             pendingAction = null;
+            providerUserOverride = false;
+            pendingUntrustedMonitoringContext = '';
+            pendingUntrustedMonitoringEventId = '';
+            monitoringContextGeneration += 1;
             removeConfirmBar();
             renderHistory();
             showSideStatus('Session cleared.', false);
@@ -511,6 +543,8 @@
 
                 historyButton.disabled = true;
                 showSideStatus('Fetching item history...', false);
+                invalidatePendingMonitoringContext(true);
+                var requestGeneration = monitoringContextGeneration;
 
                 var url = contextUrl;
                 var sep = url.indexOf('?') !== -1 ? '&' : '?';
@@ -521,6 +555,10 @@
                 fetch(url, { method: 'GET', credentials: 'same-origin' })
                     .then(handleJsonResponse)
                     .then(function (response) {
+                        if (requestGeneration !== monitoringContextGeneration
+                            || (eventidField.value || '').trim() !== eventid) {
+                            throw new Error('The selected event changed while history was loading. Load its history again.');
+                        }
                         if (!response.ok) {
                             throw new Error(response.error || 'Failed to fetch item history.');
                         }
@@ -545,16 +583,26 @@
                         }
 
                         var historyMessage = lines.join('\n');
+                        pendingUntrustedMonitoringContext = historyMessage;
+                        pendingUntrustedMonitoringEventId = eventid;
 
-                        // Insert into message field so user can review before sending,
-                        // or auto-send if the field was empty.
+                        // Display the fetched values locally, but never promote
+                        // monitored labels/logs/values into a user message or
+                        // provider-forwarded assistant history.
+                        history = normalizeHistory(history.concat([{
+                            role: 'assistant',
+                            content: '[Untrusted monitoring data — display only]\n\n' + historyMessage,
+                            non_forwardable: true,
+                            monitoring_context_eventid: eventid
+                        }]), historyLimit);
+                        persistHistory();
+                        renderHistory();
                         if ((messageField.value || '').trim() === '') {
-                            messageField.value = historyMessage;
+                            messageField.value = 'Analyze the recently loaded item history and incorporate relevant trends into your assessment.';
                             showSideStatus('Item history loaded (' + items.length + ' item(s)). Review and click Send.', false);
                         }
                         else {
-                            messageField.value = messageField.value + '\n\n' + historyMessage;
-                            showSideStatus('Item history appended (' + items.length + ' item(s)).', false);
+                            showSideStatus('Item history loaded as untrusted context (' + items.length + ' item(s)).', false);
                         }
 
                         historyButton.disabled = false;
@@ -564,6 +612,23 @@
                         historyButton.disabled = false;
                     });
             });
+        }
+
+        function invalidatePendingMonitoringContext(removeDisplayEntry) {
+            pendingUntrustedMonitoringContext = '';
+            pendingUntrustedMonitoringEventId = '';
+            monitoringContextGeneration += 1;
+
+            if (removeDisplayEntry) {
+                var filtered = history.filter(function (item) {
+                    return !item.monitoring_context_eventid;
+                });
+                if (filtered.length !== history.length) {
+                    history = normalizeHistory(filtered, historyLimit);
+                    persistHistory();
+                    renderHistory();
+                }
+            }
         }
 
         function setBusy(isBusy) {
@@ -1110,6 +1175,7 @@
         function saveContext() {
             var currentContext = {
                 provider_id: providerField ? providerField.value : '',
+                provider_user_override: providerUserOverride,
                 eventid: eventidField ? eventidField.value : '',
                 eventid_label: eventidSearchField ? eventidSearchField.value : '',
                 hostname: hostnameField ? hostnameField.value : '',
@@ -1134,7 +1200,8 @@
 
         function getLastAssistantMessage() {
             for (var i = history.length - 1; i >= 0; i -= 1) {
-                if (history[i].role === 'assistant' && (history[i].content || '').trim() !== '') {
+                if (history[i].role === 'assistant' && !history[i].non_forwardable
+                    && (history[i].content || '').trim() !== '') {
                     return history[i].content;
                 }
             }
@@ -1151,7 +1218,7 @@
         }
 
         /**
-         * Show Confirm / Cancel buttons in the transcript for a pending write action.
+         * Show Confirm / Cancel buttons for a pending write or sensitive read.
          */
         function showActionConfirmButtons() {
             var btns = document.createElement('div');
@@ -1161,7 +1228,9 @@
             var confirmBtn = document.createElement('button');
             confirmBtn.type = 'button';
             confirmBtn.className = 'btn ai-confirm-btn';
-            confirmBtn.textContent = 'Confirm';
+            var highImpact = pendingAction && pendingAction.confirmation_level === 'high_impact';
+            var highImpactArmed = false;
+            confirmBtn.textContent = highImpact ? 'Review high-impact action' : 'Confirm';
 
             var cancelBtn = document.createElement('button');
             cancelBtn.type = 'button';
@@ -1169,6 +1238,12 @@
             cancelBtn.textContent = 'Cancel';
 
             confirmBtn.addEventListener('click', function () {
+                if (highImpact && !highImpactArmed) {
+                    highImpactArmed = true;
+                    confirmBtn.textContent = 'Execute high-impact action';
+                    showSideStatus('High-impact action reviewed. Click Execute to confirm it explicitly.', true);
+                    return;
+                }
                 removeConfirmBar();
                 executeConfirmedAction();
             });
@@ -1194,7 +1269,7 @@
         }
 
         /**
-         * Execute a confirmed write action via the ChatExecute endpoint.
+         * Execute a confirmed write or sensitive-read action via ChatExecute.
          */
         function executeConfirmedAction() {
             if (!pendingAction || !executeUrl) {
@@ -1207,6 +1282,8 @@
 
             var params = new URLSearchParams();
             params.set('action_id', pendingAction.action_id || '');
+            params.set('confirmation_hash', pendingAction.confirmation_hash || '');
+            params.set('high_impact_confirmed', pendingAction.confirmation_level === 'high_impact' ? '1' : '0');
             params.set('provider_id', pendingAction.provider_id || '');
             params.set('chat_session_id', chatSessionId);
             params.set(csrfFieldName, executeCsrf);
@@ -1229,7 +1306,15 @@
                     }
 
                     var prefix = '[Zabbix Action: ' + (response.action_tool || actionTool) + ']\n\n';
-                    history = normalizeHistory(history.concat([{ role: 'assistant', content: prefix + (response.reply || '') }]), historyLimit);
+                    var storedReply = prefix + (response.reply || '');
+                    if (response.sensitive_reply) {
+                        window.prompt(
+                            'Sensitive one-time output — copy it now. It will not be stored in chat history:',
+                            response.reply || ''
+                        );
+                        storedReply = prefix + '[Sensitive one-time output was shown separately and was not stored.]';
+                    }
+                    history = normalizeHistory(history.concat([{ role: 'assistant', content: storedReply }]), historyLimit);
                     persistHistory();
                     renderHistory();
                     showSideStatus('Zabbix action "' + (response.action_tool || actionTool) + '" executed successfully.', false);

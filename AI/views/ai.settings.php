@@ -46,8 +46,8 @@ if (function_exists('getUserTheme')) {
 }
 
 $api_key_env_placeholder_map = [
-    'openai_compatible' => 'OPENAI_API_KEY',
-    'anthropic' => 'ANTHROPIC_API_KEY',
+    'openai_compatible' => 'env:OPENAI_API_KEY',
+    'anthropic' => 'env:ANTHROPIC_API_KEY',
     'ollama' => ''
 ];
 
@@ -55,7 +55,10 @@ $render_provider_row = static function(array $provider = []) use ($h, $api_key_e
     ob_start();
     $id = $provider['id'] ?? '__ROW_ID__';
     $current_type = $provider['type'] ?? 'openai_compatible';
-    $api_key_env_placeholder = $api_key_env_placeholder_map[$current_type] ?? 'OPENAI_API_KEY';
+    $api_key_env_placeholder = $api_key_env_placeholder_map[$current_type] ?? 'env:OPENAI_API_KEY';
+    $verify_peer = array_key_exists('verify_peer', $provider)
+        ? !empty($provider['verify_peer'])
+        : true;
     ?>
     <div class="ai-repeat-row ai-provider-row" data-row-type="provider">
         <input type="hidden" class="ai-row-id-field" name="providers[<?= $h($id) ?>][id]" value="<?= $h($id) ?>">
@@ -104,15 +107,16 @@ $render_provider_row = static function(array $provider = []) use ($h, $api_key_e
             <div>
                 <label class="ai-label"><?= $h(_('Context window (Ollama)')) ?></label>
                 <input class="ai-input" type="number" min="0" max="1048576" step="1024" name="providers[<?= $h($id) ?>][num_ctx]" value="<?= $h(($provider['num_ctx'] ?? 0) > 0 ? $provider['num_ctx'] : '') ?>" placeholder="16384">
-                <span class="ai-muted"><?= $h(_('Ollama only. Sets num_ctx. Default 16384. Ollama\'s native default (2048) is too small for the tools system prompt and will silently truncate it, so the model loses access to its Zabbix tools.')) ?></span>
+                <span class="ai-muted"><?= $h(_('Ollama only. Sets num_ctx. Default 16384. Ollama\'s native default (2048) is often too small for the policy, conversation, evidence, and native tool schemas, so the model may stop selecting Zabbix tools.')) ?></span>
             </div>
             <div>
                 <label class="ai-label"><?= $h(_('Verify TLS')) ?></label>
-                <label class="ai-checkbox"><input type="checkbox" name="providers[<?= $h($id) ?>][verify_peer]" value="1" <?= !empty($provider['verify_peer']) ? 'checked' : '' ?>> <?= $h(_('Enable certificate validation')) ?></label>
+                <input type="hidden" name="providers[<?= $h($id) ?>][verify_peer]" value="0">
+                <label class="ai-checkbox"><input type="checkbox" name="providers[<?= $h($id) ?>][verify_peer]" value="1" <?= $verify_peer ? 'checked' : '' ?>> <?= $h(_('Enable certificate validation')) ?></label>
             </div>
             <div class="ai-span-2">
-                <label class="ai-label"><?= $h(_('API key / secret')) ?></label>
-                <input class="ai-input" type="password" name="providers[<?= $h($id) ?>][api_key]" value="" placeholder="<?= !empty($provider['api_key_present']) ? $h(_('Leave blank to keep current secret')) : '' ?>">
+                <label class="ai-label"><?= $h(_('API key / secret (or reference)')) ?></label>
+                <input class="ai-input" type="password" autocomplete="new-password" name="providers[<?= $h($id) ?>][api_key]" value="" placeholder="<?= !empty($provider['api_key_present']) ? $h(_('Leave blank to keep current secret')) : '' ?>">
                 <div class="ai-inline-notes">
                     <?php if (!empty($provider['api_key_present'])): ?>
                         <span class="ai-muted"><?= $h(_('Stored secret exists.')) ?></span>
@@ -121,12 +125,24 @@ $render_provider_row = static function(array $provider = []) use ($h, $api_key_e
                 </div>
             </div>
             <div>
-                <label class="ai-label"><?= $h(_('Secret environment variable')) ?></label>
+                <label class="ai-label"><?= $h(_('Vault / secret reference')) ?></label>
                 <input class="ai-input ai-provider-api-key-env" type="text" name="providers[<?= $h($id) ?>][api_key_env]" value="<?= $h($provider['api_key_env'] ?? '') ?>" placeholder="<?= $h($api_key_env_placeholder) ?>">
+                <span class="ai-muted"><?= $h(_('Use env:NAME or file:NAME. file: names are confined to ZABBIX_AI_SECRET_DIR. Environment names must be standard module names, use the ZABBIX_AI_SECRET_* prefix, or be server-allowlisted. Clear this reference before saving a new inline key. Reference tests require a saved matching endpoint/type/TLS binding.')) ?></span>
             </div>
             <div class="ai-span-3">
-                <label class="ai-label"><?= $h(_('Extra headers JSON')) ?></label>
-                <textarea class="ai-textarea" rows="3" name="providers[<?= $h($id) ?>][headers_json]" placeholder='{"X-Custom-Header":"value"}'><?= $h($provider['headers_json'] ?? '') ?></textarea>
+                <label class="ai-label"><?= $h(_('Extra headers JSON (inline secret)')) ?></label>
+                <textarea class="ai-textarea" rows="3" autocomplete="off" spellcheck="false" name="providers[<?= $h($id) ?>][headers_json]" placeholder="<?= !empty($provider['headers_json_present']) ? $h(_('Leave blank to keep the stored encrypted headers')) : $h('{"X-Custom-Header":"value"}') ?>"></textarea>
+                <div class="ai-inline-notes">
+                    <?php if (!empty($provider['headers_json_present'])): ?>
+                        <span class="ai-muted"><?= $h(_('Stored inline headers exist.')) ?></span>
+                    <?php endif; ?>
+                    <label class="ai-checkbox ai-checkbox-danger"><input type="checkbox" name="providers[<?= $h($id) ?>][clear_headers_json]" value="1"> <?= $h(_('Clear stored headers')) ?></label>
+                </div>
+            </div>
+            <div class="ai-span-3">
+                <label class="ai-label"><?= $h(_('Extra headers vault / secret reference')) ?></label>
+                <input class="ai-input" type="text" name="providers[<?= $h($id) ?>][headers_json_ref]" value="<?= $h($provider['headers_json_ref'] ?? '') ?>" placeholder="file:provider_headers_json">
+                <span class="ai-muted"><?= $h(_('Optional alternative to storing the JSON above. The referenced value must contain the complete JSON object.')) ?></span>
             </div>
         </div>
         <div class="ai-repeat-row-actions">
@@ -249,7 +265,7 @@ ob_start();
         </div>
     </div>
 
-    <form id="ai-settings-form" method="post" action="<?= $h($settings_save_url) ?>" data-active-tab="providers">
+    <form id="ai-settings-form" method="post" action="<?= $h($settings_save_url) ?>" data-active-tab="providers" novalidate>
         <input type="hidden" name="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>" value="<?= $h(CCsrfTokenHelper::get('ai.settings.save')) ?>">
 
         <nav class="ai-settings-tabs" role="tablist" aria-label="<?= $h(_('Settings sections')) ?>">
@@ -281,27 +297,65 @@ ob_start();
                     <li><strong>ollama</strong> &mdash; Local or remote Ollama instances (e.g. <code>http://localhost:11434/api/chat</code>)</li>
                     <li><strong>anthropic</strong> &mdash; Anthropic Claude API (native Messages format)</li>
                 </ul>
-                <p><strong>Defaults:</strong> You can use different providers for chat, webhook, and Zabbix actions. For example, a fast/cheap model for chat and a more capable model for Zabbix actions.</p>
-                <p><strong>API keys:</strong> Prefer environment variables over storing secrets directly. Set the env var name in "Secret environment variable" and ensure it is visible to your PHP/web process.</p>
+                <p><strong>Defaults:</strong> The chat default handles turns where Zabbix Actions are disabled. The Zabbix-actions default handles every action-enabled turn, even when the model ultimately makes no tool call. An operator's explicit provider choice overrides either default.</p>
+                <p><strong>API keys:</strong> Prefer a vault/secret reference over storing the value directly. Use an allowed <code>env:NAME</code>, or let a local encrypted vault/deployment tool materialize a protected runtime file beneath <code>ZABBIX_AI_SECRET_DIR</code> and use <code>file:NAME</code>. Keep the database-encryption master key outside that directory.</p>
             </div>
             <p class="ai-muted">Supported provider types: openai_compatible, ollama, anthropic.</p>
             <?php $secret_storage = $config['secret_storage'] ?? ['available' => false, 'backend' => 'none']; ?>
-            <?php if (!empty($secret_storage['available'])): ?>
+            <?php $plaintext_secret_count = (int) ($secret_storage['plaintext_secret_count'] ?? 0); ?>
+            <?php if (!empty($secret_storage['available']) && $plaintext_secret_count === 0): ?>
                 <div class="ai-status ai-status-ok">
                     <strong><?= $h(_('Secret storage: encrypted at rest')) ?></strong>
-                    <?= $h(sprintf(_('API keys, tokens and the webhook shared secret are encrypted in the Zabbix database using the ZABBIX_AI_ENCRYPTION_KEY environment key (%s). A database dump, backup or configuration export no longer exposes them. Keep the same key value on every frontend node, or stored secrets cannot be decrypted there.'), (string) $secret_storage['backend'])) ?>
+                    <?= $h(sprintf(_('Inline API keys, custom provider headers, tokens, the webhook shared secret, and pending confirmed actions are protected with %1$s. Master-key source: %2$s. Keep the same key on every frontend node.'), (string) $secret_storage['backend'], (string) ($secret_storage['key_source'] ?? 'unknown'))) ?>
+                </div>
+            <?php elseif (!empty($secret_storage['available'])): ?>
+                <div class="ai-warning">
+                    <strong><?= $h(_('Encryption ready — plaintext migration pending')) ?></strong>
+                    <?= $h(sprintf(_('%d inline secret value(s) are still stored as legacy plaintext. The key is ready, but the database is not fully protected until you click Save settings once or replace those values with env:/file: references.'), $plaintext_secret_count)) ?>
                 </div>
             <?php else: ?>
                 <div class="ai-warning">
-                    <strong><?= $h(_('Secret storage: not encrypted')) ?></strong>
-                    <?= $h(_('API keys, tokens and the webhook shared secret you type here are stored unencrypted in the Zabbix database (the module configuration). Anyone with database, backup or configuration-export access can read them.')) ?>
+                    <strong><?= $h(_('Secret storage: encryption required')) ?></strong>
+                    <?= $h(_('Without the explicitly warned compatibility option below, stored inline API keys, custom headers, tokens and webhook secrets cannot be saved or later used. A freshly typed connection-test credential is request-local and is never persisted. Confirmed AI writes, sensitive reads, and bulk previews cannot be staged under any plaintext override.')) ?>
+                    <?php if ($plaintext_secret_count > 0): ?>
+                        <br><strong><?= $h(sprintf(_('%d existing inline secret value(s) are currently plaintext.'), $plaintext_secret_count)) ?></strong>
+                    <?php endif; ?>
                     <br><br>
-                    <?= $h(_('To encrypt them at rest, set the ZABBIX_AI_ENCRYPTION_KEY environment variable for the PHP/web process to a long random passphrase, then re-save this page (existing secrets are migrated to ciphertext on save). On multi-server or Docker deployments, set the SAME value on every frontend node/container so each can decrypt. Alternatively, leave a secret field blank and set its "Secret environment variable" name instead, so the value is resolved from the environment (e.g. a Vault-populated variable) and never stored in the database at all.')) ?>
+                    <?= $h(_('Recommended: set ZABBIX_AI_ENCRYPTION_KEY_FILE to a protected runtime credential file, then re-save this page to migrate legacy plaintext. Direct ZABBIX_AI_ENCRYPTION_KEY remains supported. For provider keys and tokens, env:NAME or file:NAME references keep the values out of the database entirely.')) ?>
                 </div>
             <?php endif; ?>
+            <div class="ai-danger-notice" id="ai-plaintext-secret-option" role="alert">
+                <p><strong><?= $h(_('Unsafe compatibility mode — isolated development only')) ?></strong></p>
+                <label class="ai-checkbox ai-checkbox-danger">
+                    <input
+                        id="ai-allow-plaintext-secrets"
+                        type="checkbox"
+                        name="secret_storage[allow_plaintext_secrets]"
+                        value="1"
+                        data-initially-enabled="<?= !empty($secret_storage['configured_plaintext_allowed']) ? '1' : '0' ?>"
+                        <?= !empty($secret_storage['configured_plaintext_allowed']) ? 'checked' : '' ?>
+                    >
+                    <?= $h(_('Allow inline secrets to be read and saved as plaintext when encryption is unavailable')) ?>
+                </label>
+                <p><?= $h(_('If enabled, provider keys/headers, Zabbix and NetBox tokens, and the webhook secret may be readable in the Zabbix database, database dumps, backups, and configuration exports. This does not enable pending writes, sensitive-read confirmations, or bulk previews; those still require encryption. Prefer env:/file: references.')) ?></p>
+                <p><?= $h(_('This is the settings-managed equivalent of ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS=1 for module-config credentials; it does not modify the PHP process environment.')) ?></p>
+                <?php if (!empty($secret_storage['plaintext_allowed'])): ?>
+                    <p><strong><?= $h(_('Compatibility mode is active. Inline module credentials may remain plaintext until you disable every override and save with encryption available.')) ?></strong></p>
+                <?php endif; ?>
+                <div id="ai-plaintext-risk-ack" style="<?= !empty($secret_storage['configured_plaintext_allowed']) ? 'display:none;' : '' ?>">
+                    <label class="ai-checkbox ai-checkbox-danger">
+                        <input id="ai-plaintext-risk-acknowledged" type="checkbox" name="secret_storage[plaintext_risk_acknowledged]" value="1">
+                        <?= $h(_('I understand that this exposes configured credentials in plaintext at rest.')) ?>
+                    </label>
+                    <p class="ai-muted"><?= $h(_('This acknowledgment is one-time and is not stored. After a successful save, only the “Allow inline secrets…” option remains enabled.')) ?></p>
+                </div>
+                <?php if (!empty($secret_storage['environment_plaintext_allowed'])): ?>
+                    <p><strong><?= $h(_('Server override active: ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS is enabled. It cannot be disabled from this page.')) ?></strong></p>
+                <?php endif; ?>
+            </div>
             <div class="ai-defaults-block">
                 <h3 class="ai-defaults-heading"><?= $h(_('Default providers')) ?></h3>
-                <p class="ai-muted ai-defaults-subhead"><?= $h(_('Pick which configured provider is used for each context. "Auto" falls back to the first enabled provider.')) ?></p>
+                <p class="ai-muted ai-defaults-subhead"><?= $h(_('Pick which provider receives each context. The Zabbix-actions default receives every action-enabled chat turn; "Auto" uses the first enabled provider.')) ?></p>
                 <div class="ai-repeat-grid ai-settings-grid">
                     <div>
                         <label class="ai-label"><?= $h(_('Default for chat')) ?></label>
@@ -369,7 +423,7 @@ ob_start();
             </div>
             <div id="faq-links" class="ai-faq-box">
                 <p><strong>What is this?</strong> URLs the AI can suggest to operators when relevant. For example, internal runbooks, wiki pages, or dashboards.</p>
-                <p>The AI sees these links in its system prompt and will suggest them when they are useful to the current problem.</p>
+                <p>The AI sees enabled links exactly as written in its system prompt and may suggest them when useful. They are not passed through URL redaction, so never include credentials, signed secrets, tokens, or passwords in a link.</p>
             </div>
             <div id="ai-reference-links-list" class="ai-repeat-list">
                 <?php foreach ($reference_links as $link): ?>
@@ -387,12 +441,12 @@ ob_start();
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-zabbix-api" title="<?= $h(_('Help')) ?>">?</button>
             </div>
             <div id="faq-zabbix-api" class="ai-faq-box">
-                <p><strong>What is this?</strong> The module uses the Zabbix frontend internal API for logged-in chat/problem-page actions when possible. The HTTP API URL/token is still used for webhook/standalone automation and as a fallback. Module write gates (read/readwrite mode, per-category write permissions, "Require Super Admin for write") apply on both transports.</p>
-                <p><strong>API URL:</strong> Usually <code>https://your-zabbix/api_jsonrpc.php</code>. This must point to the Zabbix web frontend, not the Zabbix server daemon.</p>
+                <p><strong>What is this?</strong> The module uses the Zabbix frontend internal API for logged-in chat/problem-page actions. The HTTP API URL/token is used for webhook/standalone automation. Interactive reads fail closed if the caller's frontend identity is unavailable unless the split-deployment fallback below is explicitly enabled. Module write gates (read/readwrite mode, per-category write permissions, "Require Super Admin for write") apply on both transports.</p>
+                <p><strong>API URL:</strong> Usually <code>https://your-zabbix/api_jsonrpc.php</code>. An explicit HTTPS URL is required whenever a service token is configured. This must point to the Zabbix web frontend, not the Zabbix server daemon.</p>
                 <p><strong>Auth mode:</strong> (only used when the HTTP transport is taken — webhook, standalone, or fallback)</p>
                 <ul>
-                    <li><strong>auto</strong> &mdash; tries Bearer token first, falls back to legacy auth field (recommended)</li>
-                    <li><strong>bearer</strong> &mdash; Zabbix 6.4+ API token in Authorization header</li>
+                    <li><strong>bearer</strong> &mdash; Zabbix 6.4+ API token in Authorization header (recommended)</li>
+                    <li><strong>auto</strong> &mdash; tries Bearer first and retries only read-only <code>*.get</code> calls with the legacy auth field after an explicit authentication rejection</li>
                     <li><strong>legacy_auth_field</strong> &mdash; token sent in JSON auth field (older Zabbix versions)</li>
                 </ul>
                 <p><strong>Token permissions:</strong> For webhook/standalone/fallback use, the API token needs read access for read actions and write access for permitted write actions. Logged-in chat actions additionally inherit the current frontend user's Zabbix permissions.</p>
@@ -405,8 +459,8 @@ ob_start();
                 <div>
                     <label class="ai-label"><?= $h(_('Auth mode')) ?></label>
                     <select class="ai-input" name="zabbix_api[auth_mode]">
-                        <?php foreach (['auto', 'bearer', 'legacy_auth_field'] as $auth_mode): ?>
-                            <option value="<?= $h($auth_mode) ?>" <?= (($config['zabbix_api']['auth_mode'] ?? 'auto') === $auth_mode) ? 'selected' : '' ?>><?= $h($auth_mode) ?></option>
+                        <?php foreach (['bearer', 'auto', 'legacy_auth_field'] as $auth_mode): ?>
+                            <option value="<?= $h($auth_mode) ?>" <?= (($config['zabbix_api']['auth_mode'] ?? 'bearer') === $auth_mode) ? 'selected' : '' ?>><?= $h($auth_mode) ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
@@ -420,7 +474,7 @@ ob_start();
                 </div>
                 <div class="ai-span-2">
                     <label class="ai-label"><?= $h(_('API token')) ?></label>
-                    <input class="ai-input" type="password" name="zabbix_api[token]" value="" placeholder="<?= !empty($config['zabbix_api']['token_present']) ? $h(_('Leave blank to keep current token')) : '' ?>">
+                    <input class="ai-input" type="password" autocomplete="new-password" name="zabbix_api[token]" value="" placeholder="<?= !empty($config['zabbix_api']['token_present']) ? $h(_('Leave blank to keep current token')) : '' ?>">
                     <div class="ai-inline-notes">
                         <?php if (!empty($config['zabbix_api']['token_present'])): ?>
                             <span class="ai-muted"><?= $h(_('Stored token exists.')) ?></span>
@@ -429,8 +483,12 @@ ob_start();
                     </div>
                 </div>
                 <div>
-                    <label class="ai-label"><?= $h(_('Token environment variable')) ?></label>
-                    <input class="ai-input" type="text" name="zabbix_api[token_env]" value="<?= $h($config['zabbix_api']['token_env'] ?? '') ?>" placeholder="ZABBIX_API_TOKEN">
+                    <label class="ai-label"><?= $h(_('Token vault / secret reference')) ?></label>
+                    <input class="ai-input" type="text" name="zabbix_api[token_env]" value="<?= $h($config['zabbix_api']['token_env'] ?? '') ?>" placeholder="env:ZABBIX_API_TOKEN">
+                    <span class="ai-muted"><?= $h(_('Use env:NAME or file:NAME; setting a reference removes any stored inline token on save. Clear the reference before switching back to inline.')) ?></span>
+                </div>
+                <div class="ai-span-3">
+                    <label class="ai-checkbox"><input type="checkbox" name="zabbix_api[allow_service_token_read_fallback]" value="1" <?= !empty($config['zabbix_api']['allow_service_token_read_fallback']) ? 'checked' : '' ?>> <?= $h(_('Allow interactive reads to use the shared service token when the caller\'s frontend API identity is unavailable (split deployments only)')) ?></label>
                 </div>
             </div>
         </section>
@@ -441,8 +499,9 @@ ob_start();
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-netbox" title="<?= $h(_('Help')) ?>">?</button>
             </div>
             <div id="faq-netbox" class="ai-faq-box">
-                <p><strong>What is this?</strong> Optional NetBox/CMDB integration. When enabled, the AI receives extra context about hosts (VM details, device info, services) from NetBox when a hostname is provided in the chat or webhook.</p>
+                <p><strong>What is this?</strong> Optional NetBox/CMDB integration. Interactive NetBox data is retrieved only through a confirmed sensitive-read tool; webhook automation can add it as explicitly configured context.</p>
                 <p><strong>When to use:</strong> If your team uses NetBox as a source of truth for infrastructure data and you want the AI to include that context in troubleshooting answers.</p>
+                <p><strong>Interactive scope:</strong> NetBox tool results require operator confirmation and are limited to exact hostnames visible through the current Zabbix API identity. A hostname that cannot be resolved in that scope returns no NetBox data.</p>
             </div>
             <div class="ai-repeat-grid ai-settings-grid">
                 <div>
@@ -455,6 +514,7 @@ ob_start();
                 </div>
                 <div>
                     <label class="ai-label"><?= $h(_('Verify TLS')) ?></label>
+                    <input type="hidden" name="netbox[verify_peer]" value="0">
                     <label class="ai-checkbox"><input type="checkbox" name="netbox[verify_peer]" value="1" <?= !empty($config['netbox']['verify_peer']) ? 'checked' : '' ?>> <?= $h(_('Enable certificate validation')) ?></label>
                 </div>
                 <div class="ai-span-3">
@@ -463,7 +523,7 @@ ob_start();
                 </div>
                 <div class="ai-span-2">
                     <label class="ai-label"><?= $h(_('NetBox token')) ?></label>
-                    <input class="ai-input" type="password" name="netbox[token]" value="" placeholder="<?= !empty($config['netbox']['token_present']) ? $h(_('Leave blank to keep current token')) : '' ?>">
+                    <input class="ai-input" type="password" autocomplete="new-password" name="netbox[token]" value="" placeholder="<?= !empty($config['netbox']['token_present']) ? $h(_('Leave blank to keep current token')) : '' ?>">
                     <div class="ai-inline-notes">
                         <?php if (!empty($config['netbox']['token_present'])): ?>
                             <span class="ai-muted"><?= $h(_('Stored token exists.')) ?></span>
@@ -472,16 +532,15 @@ ob_start();
                     </div>
                 </div>
                 <div>
-                    <label class="ai-label"><?= $h(_('Token environment variable')) ?></label>
-                    <input class="ai-input" type="text" name="netbox[token_env]" value="<?= $h($config['netbox']['token_env'] ?? '') ?>" placeholder="NETBOX_TOKEN">
+                    <label class="ai-label"><?= $h(_('Token vault / secret reference')) ?></label>
+                    <input class="ai-input" type="text" name="netbox[token_env]" value="<?= $h($config['netbox']['token_env'] ?? '') ?>" placeholder="env:NETBOX_TOKEN">
+                    <span class="ai-muted"><?= $h(_('Use env:NAME or file:NAME; setting a reference removes any stored inline token on save. Clear it before switching back to inline; save URL/TLS/reference changes before testing them.')) ?></span>
                 </div>
                 <div class="ai-span-3">
                     <label class="ai-label"><?= $h(_('Enrichment behaviour')) ?></label>
-                    <label class="ai-checkbox"><input type="checkbox" name="netbox[auto_enrich_chat]" value="1" <?= !empty($config['netbox']['auto_enrich_chat']) ? 'checked' : '' ?>> <?= $h(_('Auto-enrich chat when a specific hostname is mentioned')) ?></label>
                     <span class="ai-muted" style="display:block;margin:4px 0 8px 24px;">
-                        <?= $h(_('Fires only when the message contains a clear hostname pattern (e.g. LHBHANA101, kt4-jump-linux, srv-web-03). Broad questions like "all servers" do NOT trigger any extra tokens. The enriched hostnames are listed in the chat status after each reply so you can audit usage.')) ?>
+                        <?= $h(_('Interactive NetBox records are retrieved only after an operator confirms a sensitive-read tool. Automatic webhook enrichment is controlled by the single "Include NetBox" setting in the Webhook section.')) ?>
                     </span>
-                    <label class="ai-checkbox"><input type="checkbox" name="netbox[enrich_webhook_host]" value="1" <?= !empty($config['netbox']['enrich_webhook_host']) ? 'checked' : '' ?>> <?= $h(_('Include the NetBox record for the affected host in webhook (notification) prompts')) ?></label>
                 </div>
             </div>
             <div class="ai-section-actions">
@@ -497,7 +556,7 @@ ob_start();
             </div>
             <div id="faq-webhook" class="ai-faq-box">
                 <p><strong>What is this?</strong> The webhook lets Zabbix send problem events to the AI automatically. The AI generates first-line troubleshooting guidance and can post it back as a problem update comment.</p>
-                <p><strong>Webhook URL:</strong> <code>https://your-zabbix/zabbix.php?action=ai.webhook</code></p>
+                <p><strong>Webhook URL:</strong> <code>https://your-zabbix/ai-webhook</code> (configure the web-server mapping in <code>INSTALL.md</code>)</p>
                 <p><strong>Shared secret:</strong> Protects the webhook from unauthorized access. Set the same secret in the Zabbix media type and here.</p>
                 <p><strong>Settings:</strong></p>
                 <ul>
@@ -522,7 +581,7 @@ ob_start();
                 </div>
                 <div>
                     <label class="ai-label"><?= $h(_('Include NetBox')) ?></label>
-                    <label class="ai-checkbox"><input type="checkbox" name="webhook[include_netbox]" value="1" <?= !empty($config['webhook']['include_netbox']) ? 'checked' : '' ?>> <?= $h(_('Use NetBox context (legacy — same as "Include NetBox record" toggle in the NetBox section)')) ?></label>
+                    <label class="ai-checkbox"><input type="checkbox" name="webhook[include_netbox]" value="1" <?= !empty($config['webhook']['include_netbox']) ? 'checked' : '' ?>> <?= $h(_('Include the affected host\'s NetBox record in automated webhook prompts')) ?></label>
                 </div>
                 <div>
                     <label class="ai-label"><?= $h(_('Include OS hint')) ?></label>
@@ -530,7 +589,13 @@ ob_start();
                 </div>
                 <div>
                     <label class="ai-label"><?= $h(_('Comment action code')) ?></label>
-                    <input class="ai-input" type="number" min="1" max="256" name="webhook[problem_update_action]" value="<?= $h($config['webhook']['problem_update_action'] ?? 4) ?>">
+                    <?php // Normalize legacy free-form values with the same mask the runtime applies. ?>
+                    <?php $ack_current = ((int) ($config['webhook']['problem_update_action'] ?? 4) & 7) | 4; ?>
+                    <select class="ai-input" name="webhook[problem_update_action]">
+                        <?php foreach ([4 => _('Comment only'), 6 => _('Comment + acknowledge'), 5 => _('Comment + close'), 7 => _('Comment + acknowledge + close')] as $ack_code => $ack_label): ?>
+                            <option value="<?= $h($ack_code) ?>" <?= ($ack_current === $ack_code) ? 'selected' : '' ?>><?= $h($ack_label) ?></option>
+                        <?php endforeach; ?>
+                    </select>
                 </div>
                 <div>
                     <label class="ai-label"><?= $h(_('Comment chunk size')) ?></label>
@@ -544,14 +609,14 @@ ob_start();
                     </label>
                     <label class="ai-checkbox"><input type="checkbox" name="webhook[require_secret]" value="1" <?= !empty($config['webhook']['require_secret']) ? 'checked' : '' ?>> <?= $h(_('Reject webhook calls that have no valid shared secret')) ?></label>
                     <div id="faq-webhook-require-secret" class="ai-faq-box">
-                        <p><strong><?= $h(_('Why this matters:')) ?></strong> <?= $h(_('The webhook endpoint intentionally has CSRF disabled and open permission checks so Zabbix (a machine, not a logged-in user) can call it. Authentication therefore relies entirely on the shared secret.')) ?></p>
+                        <p><strong><?= $h(_('Why this matters:')) ?></strong> <?= $h(_('The standalone /ai-webhook endpoint has no Zabbix frontend session authentication because it is called by a machine. Authentication therefore relies on the shared secret and any upstream network controls.')) ?></p>
                         <p><?= $h(_('If the webhook is enabled but no shared secret is configured, the endpoint is UNAUTHENTICATED: any host that can reach the URL could trigger AI calls and — if "Post update back to event" is on — post AI-generated comments onto your Zabbix events.')) ?></p>
                         <p><?= $h(_('This is enabled by default. Requests with a missing or invalid secret (including the case where no secret is configured at all) are rejected and each rejection is logged with the source IP. Untick it only if you deliberately allow unauthenticated access (e.g. the endpoint is already protected by an upstream proxy or network ACL).')) ?></p>
                     </div>
                 </div>
                 <div class="ai-span-2">
                     <label class="ai-label"><?= $h(_('Shared secret')) ?></label>
-                    <input class="ai-input" type="password" name="webhook[shared_secret]" value="" placeholder="<?= !empty($config['webhook']['shared_secret_present']) ? $h(_('Leave blank to keep current secret')) : '' ?>">
+                    <input class="ai-input" type="password" autocomplete="new-password" name="webhook[shared_secret]" value="" placeholder="<?= !empty($config['webhook']['shared_secret_present']) ? $h(_('Leave blank to keep current secret')) : '' ?>">
                     <div class="ai-inline-notes">
                         <?php if (!empty($config['webhook']['shared_secret_present'])): ?>
                             <span class="ai-muted"><?= $h(_('Stored secret exists.')) ?></span>
@@ -560,8 +625,9 @@ ob_start();
                     </div>
                 </div>
                 <div>
-                    <label class="ai-label"><?= $h(_('Secret environment variable')) ?></label>
-                    <input class="ai-input" type="text" name="webhook[shared_secret_env]" value="<?= $h($config['webhook']['shared_secret_env'] ?? '') ?>" placeholder="AI_WEBHOOK_SECRET">
+                    <label class="ai-label"><?= $h(_('Shared-secret vault / secret reference')) ?></label>
+                    <input class="ai-input" type="text" name="webhook[shared_secret_env]" value="<?= $h($config['webhook']['shared_secret_env'] ?? '') ?>" placeholder="env:AI_WEBHOOK_SECRET">
+                    <span class="ai-muted"><?= $h(_('Use env:NAME or file:NAME; setting a reference removes any stored inline secret on save. Clear the reference before switching back to inline.')) ?></span>
                 </div>
             </div>
         </section>
@@ -630,6 +696,7 @@ ob_start();
             <div id="faq-security" class="ai-faq-box">
                 <p><strong>What is this?</strong> Replaces sensitive values (hostnames, IPs, domains, URLs, OS names) with safe aliases before sending data to the AI provider. When the AI responds, aliases are restored locally so you see the real values.</p>
                 <p><strong>How it works:</strong> <code>prd-web-001</code> becomes <code>ai-host-001</code> outbound. The AI works with the alias. When the reply comes back, <code>ai-host-001</code> is replaced with <code>prd-web-001</code> before you see it.</p>
+                <p><strong>Configuration/history assistant:</strong> Before sending its displayed form/API context, the drawer asks for explicit consent. That context may include preprocessing code, interface addresses, item/history values, triggers, non-secret macro values and recent problems. Secret/vault macros are masked. Untrusted-data fencing prevents model instructions from being taken from this data, but does not itself redact it.</p>
                 <p><strong>Settings:</strong></p>
                 <ul>
                     <li><strong>Strict mode</strong> &mdash; blocks requests if a known sensitive value was not fully masked. Safer but may need tuning.</li>
@@ -850,7 +917,7 @@ sudo -u $WEB_GROUP sh -c 'echo t &gt; /var/log/zabbix-ai/.t \
                     <?= $h(_('Enabling this lets the AI module read and (in Read & write mode) modify your Zabbix configuration on behalf of users. Write actions can create maintenance windows, change items/triggers, create users, and acknowledge problems. Only enable if you trust the AI provider, the configured Zabbix API token scope, and the users who can chat with the AI.')) ?>
                 </p>
                 <p class="ai-danger-notice-followup">
-                    <?= $h(_('Nothing happens automatically: every write action is shown to the user with the exact tool name and arguments, and the user must click Confirm before the module executes it. Read actions run without confirmation.')) ?>
+                    <?= $h(_('Routine troubleshooting reads may run automatically. Fleet problem/maintenance, event-comment and other privacy-sensitive reads pause for confirmation, and every write is shown with its exact server-validated identity, target and values before execution.')) ?>
                 </p>
             </div>
             <div id="faq-actions" class="ai-faq-box">
@@ -876,7 +943,7 @@ sudo -u $WEB_GROUP sh -c 'echo t &gt; /var/log/zabbix-ai/.t \
                     <?= $h(sprintf(_('The AI currently has %1$d tools — %2$d read, %3$d write. This list is generated from the module code, so it stays accurate as tools are added.'), count($cat_reads) + $write_total, count($cat_reads), $write_total)) ?>
                 </p>
                 <?php if ($cat_reads): ?>
-                    <p><strong><?= $h(_('Read actions')) ?></strong> (<?= (int) count($cat_reads) ?>, <?= $h(_('always safe, no confirmation')) ?>): <?= $h(implode(', ', $cat_reads)) ?></p>
+                    <p><strong><?= $h(_('Read actions')) ?></strong> (<?= (int) count($cat_reads) ?>, <?= $h(_('fleet problem/maintenance, event-comment, broad inventory, contact, macro, NetBox and audit reads require privacy confirmation')) ?>): <?= $h(implode(', ', $cat_reads)) ?></p>
                 <?php endif; ?>
                 <?php if ($cat_writes): ?>
                     <p><strong><?= $h(_('Write actions')) ?></strong> (<?= (int) $write_total ?>, <?= $h(_('require confirmation; each category is gated by the Write permissions below')) ?>):</p>
@@ -892,8 +959,8 @@ sudo -u $WEB_GROUP sh -c 'echo t &gt; /var/log/zabbix-ai/.t \
                     <li><strong>Write permissions</strong> &mdash; enable per category so you control exactly what the AI can modify</li>
                     <li><strong>Require Super Admin</strong> &mdash; when checked, only Super Admin users can execute write actions</li>
                 </ul>
-                <p><strong>Requires:</strong> Zabbix API must be configured above with a token that has sufficient permissions.</p>
-                <p><strong>Tip:</strong> Larger AI models (GPT-4, Claude Sonnet/Opus) are much better at generating correct tool calls than smaller models.</p>
+                <p><strong>Requires:</strong> a valid Zabbix frontend API session. The explicitly configured service-token fallback is available only under the identity rules described above.</p>
+                <p><strong>Model compatibility:</strong> the selected provider and model must support provider-native structured tool calls whenever Zabbix Actions are enabled. Model prose is never parsed as an executable action.</p>
             </div>
             <div class="ai-repeat-grid ai-settings-grid">
                 <div>
@@ -922,6 +989,9 @@ sudo -u $WEB_GROUP sh -c 'echo t &gt; /var/log/zabbix-ai/.t \
                         <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[write_permissions][<?= $h($perm) ?>]" value="1" <?= !empty($config['zabbix_actions']['write_permissions'][$perm]) ? 'checked' : '' ?>> <?= $h($perm === 'sla' ? 'SLA' : ucfirst($perm)) ?></label>
                     <?php endforeach; ?>
                 </div>
+                <h3><?= $h(_('Web scenario destination allowlist')) ?></h3>
+                <p class="ai-muted"><?= $h(_('AI-created web scenarios are denied unless the URL origin is listed here. Enter one exact origin per line, for example https://status.example.com or https://*.checks.example.com:8443. Scheme and port are enforced; loopback, link-local and cloud metadata addresses remain blocked even if listed.')) ?></p>
+                <textarea class="ai-textarea" rows="4" name="zabbix_actions[web_scenario_allowed_origins]" placeholder="https://status.example.com&#10;https://*.checks.example.com:8443"><?= $h($config['zabbix_actions']['web_scenario_allowed_origins'] ?? '') ?></textarea>
                 <h3><?= $h(_('Bulk safety limits')) ?></h3>
                 <p class="ai-muted"><?= $h(_('Maximum number of objects a single bulk action may affect. Bulk previews and writes are capped to these values.')) ?></p>
                 <div class="ai-repeat-grid ai-settings-grid">

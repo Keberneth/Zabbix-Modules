@@ -21,6 +21,7 @@ class ZabbixActionExecutor {
      * not rewrite.
      */
     public const RAW_OUTPUT_SENTINEL = "[[AI-RAW]]\n";
+    public const SENSITIVE_OUTPUT_SENTINEL = "[[AI-SENSITIVE]]\n";
 
     private const SEVERITY_LABELS = [
         '0' => 'Not classified',
@@ -51,6 +52,74 @@ class ZabbixActionExecutor {
     private const HOST_ID_TAG_NAMES = ['host', 'hostname', 'server'];
 
     /**
+     * Read tools whose result can disclose broad infrastructure inventory,
+     * contact destinations, effective macro values, NetBox records or audit
+     * history. Keep aliases here too: dispatch-equivalent tool names must not
+     * be able to bypass the privacy confirmation.
+     */
+    private const SENSITIVE_READ_TOOLS = [
+        'get_problems',
+        'get_noisy_triggers',
+        'list_active_maintenance',
+        'get_related_problems',
+        'get_event_timeline',
+        'generate_problem_graph',
+        'list_zabbix_hosts',
+        'list_netbox_devices',
+        'get_netbox_info',
+        'get_items',
+        'get_triggers',
+        'get_trigger_dependencies',
+        'get_unsupported_items',
+        'get_host_info',
+        'get_host_interfaces',
+        'get_proxy_assigned_hosts',
+        'get_user_media_for_problem',
+        'get_alerts_for_event',
+        'get_actions_for_event',
+        'get_mediatypes_status',
+        'get_escalation_path',
+        'get_recent_changes',
+        'get_auditlog_for_object',
+        'get_audit_log',
+        'get_effective_macros',
+        'get_action_config',
+        'get_web_scenarios',
+        'get_proxy_status',
+        'get_sla_overview',
+        'get_service_impact',
+        'analyze_sla_scope',
+        'get_services',
+        'preview_disable_triggers',
+        'preview_disable_items_by_error',
+        'preview_enable_items',
+        'preview_bulk_add_host_tag',
+        'preview_link_template',
+        'preview_unlink_template',
+        'generate_report',
+        'generate_evidence_bundle'
+    ];
+
+    /** Every write must be reviewed into the explicit target-binding switch. */
+    private const WRITE_BINDING_POLICY_TOOLS = [
+        'create_maintenance', 'create_hostgroup_maintenance',
+        'create_tag_scoped_maintenance', 'extend_maintenance',
+        'end_maintenance', 'update_trigger', 'update_item', 'create_user',
+        'acknowledge_problem', 'suppress_problem', 'unsuppress_problem',
+        'mark_problem_as_cause', 'mark_problem_as_symptom',
+        'change_problem_severity', 'unacknowledge_problem',
+        'add_problem_message', 'add_hosts_to_group', 'create_host_group',
+        'post_evidence_to_event', 'enable_host', 'disable_host',
+        'update_host_tags', 'update_host_inventory', 'update_host_macros',
+        'update_host_interface', 'create_web_scenario',
+        'create_web_scenario_trigger', 'create_problem_dashboard',
+        'link_template_to_host', 'unlink_template_from_host',
+        'enable_lld_rule', 'disable_lld_rule', 'create_host',
+        'apply_bulk_action', 'create_sla_service',
+        'create_sla', 'add_template_tag', 'add_trigger_tag'
+    ];
+
+    /**
      * True for tag NAMES that can never act as a unique SLA selection handle:
      * SLA service_tags are OR-matched, so selecting on a conventional shared
      * name silently widens the SLA to every service that carries it.
@@ -75,21 +144,32 @@ class ZabbixActionExecutor {
         return substr($output, strlen(self::RAW_OUTPUT_SENTINEL));
     }
 
+    /** One-time output which must bypass providers and audit payload bodies. */
+    public static function extractSensitiveOutput(string $output): ?string {
+        if (strncmp($output, self::SENSITIVE_OUTPUT_SENTINEL, strlen(self::SENSITIVE_OUTPUT_SENTINEL)) !== 0) {
+            return null;
+        }
+
+        return substr($output, strlen(self::SENSITIVE_OUTPUT_SENTINEL));
+    }
+
     /**
      * Server-side schema for write tools.
      *
      * The map is `tool_name => [param_name => [type, required]]`. Types:
      *   'string'      — non-empty trimmed string
-     *   'int'         — integer (numeric string accepted)
-     *   'number'      — int or float (numeric string accepted)
-     *   'bool'        — boolean (PHP truthy)
+     *   'int'         — canonical integer after staging normalization
+     *   'number'      — finite int or float after staging normalization
+     *   'bool'        — canonical boolean after staging normalization
      *   'array'       — array with at least one element
      *   'array_str'   — array, every element a non-empty string
      *   'object'      — associative array
      *
      * Required entries fail validation when missing or when the value does not
      * match the type. Optional entries fail only when present and of the wrong
-     * type. Unknown params are passed through but logged.
+     * type. Unknown params are rejected. ChatSend canonicalizes flexible JSON
+     * spellings before this strict check; ChatExecute validates the encrypted
+     * staged form again immediately before execution.
      *
      * Read tools are intentionally not schema-validated: they tolerate fuzzy AI
      * inputs and are side-effect-free. Write tools must pass validation before
@@ -142,8 +222,7 @@ class ZabbixActionExecutor {
             ],
             'create_user' => [
                 'username'  => ['string',     true],
-                'passwd'    => ['string',     true],
-                'usrgrpids' => ['array',      true],
+                'usrgrpids' => ['array_str',  true],
                 'roleid'    => ['int',        true],
                 'name'      => ['string',     false],
                 'surname'   => ['string',     false]
@@ -180,8 +259,7 @@ class ZabbixActionExecutor {
             ],
             'add_hosts_to_group' => [
                 'hostnames'    => ['array_str', true],
-                'group_name'   => ['string',    true],
-                'create_group' => ['bool',      false]
+                'group_name'   => ['string',    true]
             ],
             'create_host_group' => [
                 'name' => ['string', true]
@@ -224,9 +302,7 @@ class ZabbixActionExecutor {
                 'delay'               => ['string', false],
                 'status_codes'        => ['string', false],
                 'step_name'           => ['string', false],
-                'tags'                => ['array',  false],
-                'add_failure_trigger' => ['bool',   false],
-                'trigger_priority'    => ['int',    false]
+                'tags'                => ['array',  false]
             ],
             'create_web_scenario_trigger' => [
                 'hostname'      => ['string', true],
@@ -260,15 +336,7 @@ class ZabbixActionExecutor {
                 'description'           => ['string',    false],
                 'interface_ip'          => ['string',    false],
                 'interface_dns'         => ['string',    false],
-                'interface_port'        => ['string',    false],
-                'create_missing_groups' => ['bool',      false]
-            ],
-            'create_trigger' => [
-                'description'         => ['string', true],
-                'expression'          => ['string', true],
-                'priority'            => ['int',    false],
-                'comments'            => ['string', false],
-                'recovery_expression' => ['string', false]
+                'interface_port'        => ['string',    false]
             ],
             'apply_bulk_action' => [
                 'preview_token' => ['string', true]
@@ -326,6 +394,12 @@ class ZabbixActionExecutor {
 
         $errors = [];
 
+        foreach (array_keys($params) as $name) {
+            if (!array_key_exists($name, $schemas[$tool_name])) {
+                $errors[] = 'unexpected parameter "'.$name.'"';
+            }
+        }
+
         foreach ($schemas[$tool_name] as $name => $rule) {
             [$type, $required] = $rule;
             $present = array_key_exists($name, $params);
@@ -351,7 +425,781 @@ class ZabbixActionExecutor {
             }
         }
 
+        if ($tool_name === 'create_user' && array_key_exists('passwd', $params)) {
+            $errors[] = 'parameter "passwd" is forbidden; temporary passwords are generated server-side and never accepted from the AI';
+        }
+
+        if ($tool_name === 'update_trigger' && is_array($params['changes'] ?? null)) {
+            $allowed = ['description', 'priority', 'status', 'comments', 'url'];
+            foreach (['expression', 'recovery_expression'] as $field) {
+                if (array_key_exists($field, $params['changes'])) {
+                    $errors[] = 'trigger '.$field.' changes are forbidden in AI chat; edit expressions directly in Zabbix';
+                }
+            }
+            foreach (array_keys($params['changes']) as $field) {
+                if (!in_array($field, array_merge($allowed, ['expression', 'recovery_expression']), true)) {
+                    $errors[] = 'unexpected trigger change field "'.$field.'"';
+                }
+            }
+            foreach (['comments', 'url'] as $field) {
+                if (array_key_exists($field, $params['changes']) && !is_string($params['changes'][$field])) {
+                    $errors[] = 'trigger change "'.$field.'" must be a string';
+                }
+            }
+            if (array_key_exists('description', $params['changes'])
+                && (!is_string($params['changes']['description']) || trim($params['changes']['description']) === '')) {
+                $errors[] = 'trigger change "description" must be a non-empty string';
+            }
+            if (array_key_exists('priority', $params['changes'])
+                && (!is_int($params['changes']['priority'])
+                    || $params['changes']['priority'] < 0
+                    || $params['changes']['priority'] > 5)) {
+                $errors[] = 'trigger change "priority" must be an integer between 0 and 5';
+            }
+            if (array_key_exists('status', $params['changes'])
+                && (!is_int($params['changes']['status'])
+                    || !in_array($params['changes']['status'], [0, 1], true))) {
+                $errors[] = 'trigger change "status" must be integer 0 or 1';
+            }
+        }
+
+        if ($tool_name === 'update_item' && is_array($params['changes'] ?? null)) {
+            $allowed = ['status', 'delay', 'name', 'description', 'history', 'trends'];
+            foreach (array_keys($params['changes']) as $field) {
+                if (!in_array($field, $allowed, true)) {
+                    $errors[] = 'unexpected item change field "'.$field.'"';
+                }
+            }
+            if (array_key_exists('status', $params['changes'])
+                && (!is_int($params['changes']['status'])
+                    || !in_array($params['changes']['status'], [0, 1], true))) {
+                $errors[] = 'item change "status" must be integer 0 or 1';
+            }
+            foreach (['delay', 'name', 'history', 'trends'] as $field) {
+                if (array_key_exists($field, $params['changes'])
+                    && (!is_string($params['changes'][$field]) || trim($params['changes'][$field]) === '')) {
+                    $errors[] = 'item change "'.$field.'" must be a non-empty string';
+                }
+            }
+            if (array_key_exists('description', $params['changes']) && !is_string($params['changes']['description'])) {
+                $errors[] = 'item change "description" must be a string';
+            }
+        }
+
+        if ($tool_name === 'update_host_macros' && is_array($params['macros'] ?? null)) {
+            $seen_macros = [];
+            foreach ($params['macros'] as $index => $macro) {
+                if (!is_array($macro)) {
+                    $errors[] = 'macro '.($index + 1).' must be an object';
+                    continue;
+                }
+                foreach (array_keys($macro) as $field) {
+                    if (!in_array($field, ['macro', 'value', 'type'], true)) {
+                        $errors[] = 'unexpected macro field "'.$field.'" at index '.$index;
+                    }
+                }
+                $name = $macro['macro'] ?? null;
+                if (!is_string($name) || $name !== trim($name)
+                    || !Util::isValidZabbixUserMacro($name)) {
+                    $errors[] = 'macro '.($index + 1).' has an invalid macro name';
+                }
+                elseif (isset($seen_macros[$name])) {
+                    $errors[] = 'macro "'.$name.'" is duplicated';
+                }
+                else {
+                    $seen_macros[$name] = true;
+                }
+                if (!array_key_exists('value', $macro) || !is_string($macro['value'])) {
+                    $errors[] = 'macro '.($index + 1).' value must be a string';
+                }
+                elseif (self::stringLength($macro['value']) > 2048) {
+                    $errors[] = 'macro '.($index + 1).' value exceeds 2048 characters';
+                }
+                if (is_string($name) && self::stringLength($name) > 255) {
+                    $errors[] = 'macro '.($index + 1).' name exceeds 255 characters';
+                }
+                if (!is_int($macro['type'] ?? null) || $macro['type'] !== 0) {
+                    $errors[] = 'macro '.($index + 1).' is secret/vault type; secret macro values must be changed outside AI chat';
+                }
+            }
+        }
+
+        if ($tool_name === 'update_host_tags'
+            && !in_array($params['operation'] ?? null, ['add', 'remove', 'replace'], true)) {
+            $errors[] = 'parameter "operation" must be add, remove, or replace';
+        }
+        if (in_array($tool_name, ['update_host_tags', 'create_web_scenario'], true)
+            && is_array($params['tags'] ?? null)) {
+            try {
+                if ($params['tags'] !== self::canonicalPlainTags($params['tags'], 'tags')) {
+                    $errors[] = 'parameter "tags" is not in canonical {tag, value} form';
+                }
+            }
+            catch (\Throwable $e) {
+                $errors[] = $e->getMessage();
+            }
+        }
+        if ($tool_name === 'update_host_inventory' && is_array($params['fields'] ?? null)) {
+            try {
+                if ($params['fields'] !== self::canonicalInventoryFields($params['fields'])) {
+                    $errors[] = 'parameter "fields" is not in canonical string-to-string form';
+                }
+            }
+            catch (\Throwable $e) {
+                $errors[] = $e->getMessage();
+            }
+        }
+        if ($tool_name === 'create_tag_scoped_maintenance' && is_array($params['tags'] ?? null)) {
+            try {
+                if ($params['tags'] !== self::canonicalMatchTags($params['tags'], 'tags')) {
+                    $errors[] = 'parameter "tags" is not in canonical matcher form';
+                }
+            }
+            catch (\Throwable $e) {
+                $errors[] = $e->getMessage();
+            }
+        }
+        if ($tool_name === 'create_tag_scoped_maintenance'
+            && empty($params['hostnames']) && empty($params['group_names'])) {
+            $errors[] = 'at least one of "hostnames" or "group_names" is required';
+        }
+        if ($tool_name === 'create_sla' && is_array($params['service_tags'] ?? null)) {
+            try {
+                if ($params['service_tags'] !== self::canonicalMatchTags($params['service_tags'], 'service_tags')) {
+                    $errors[] = 'parameter "service_tags" is not in canonical matcher form';
+                }
+            }
+            catch (\Throwable $e) {
+                $errors[] = $e->getMessage();
+            }
+        }
+        if ($tool_name === 'create_sla_service') {
+            foreach (['problem_tags' => 'match', 'service_tags' => 'plain'] as $field => $shape) {
+                if (!is_array($params[$field] ?? null)) {
+                    continue;
+                }
+                try {
+                    $canonical = $shape === 'match'
+                        ? self::canonicalMatchTags($params[$field], $field)
+                        : self::canonicalPlainTags($params[$field], $field);
+                    if ($params[$field] !== $canonical) {
+                        $errors[] = 'parameter "'.$field.'" is not in canonical tag form';
+                    }
+                }
+                catch (\Throwable $e) {
+                    $errors[] = $e->getMessage();
+                }
+            }
+            if (is_array($params['child_serviceids'] ?? null)) {
+                try {
+                    if ($params['child_serviceids'] !== self::canonicalIdList(
+                        $params['child_serviceids'],
+                        'child_serviceids'
+                    )) {
+                        $errors[] = 'parameter "child_serviceids" is not a canonical ID list';
+                    }
+                }
+                catch (\Throwable $e) {
+                    $errors[] = $e->getMessage();
+                }
+            }
+        }
+        if ($tool_name === 'create_user' && is_array($params['usrgrpids'] ?? null)) {
+            try {
+                if ($params['usrgrpids'] !== self::canonicalIdList($params['usrgrpids'], 'usrgrpids')) {
+                    $errors[] = 'parameter "usrgrpids" is not a canonical ID list';
+                }
+            }
+            catch (\Throwable $e) {
+                $errors[] = $e->getMessage();
+            }
+        }
+        if ($tool_name === 'create_host') {
+            try {
+                if ($params !== self::canonicalCreateHostParams($params)) {
+                    $errors[] = 'create_host parameters are not in canonical validated form';
+                }
+            }
+            catch (\Throwable $e) {
+                $errors[] = $e->getMessage();
+            }
+        }
+
+        if ($tool_name === 'change_problem_severity' && isset($params['severity'])
+            && (!is_int($params['severity']) || $params['severity'] < 0 || $params['severity'] > 5)) {
+            $errors[] = 'parameter "severity" must be an integer between 0 and 5';
+        }
+        if ($tool_name === 'suppress_problem' && isset($params['suppress_until'])
+            && (!is_int($params['suppress_until']) || $params['suppress_until'] < 0)) {
+            $errors[] = 'parameter "suppress_until" must be a non-negative Unix timestamp (0 means indefinite)';
+        }
+        if ($tool_name === 'acknowledge_problem' && isset($params['action'])) {
+            $action = is_int($params['action']) ? $params['action'] : 0;
+            if (!is_int($params['action']) || $action <= 0 || ($action & ~(1 | 2 | 4)) !== 0) {
+                $errors[] = 'parameter "action" may contain only close (1), acknowledge (2), and add-message (4)';
+            }
+            if (($action & 4) !== 0 && trim((string) ($params['message'] ?? '')) === '') {
+                $errors[] = 'parameter "message" is required when action contains add-message (4)';
+            }
+        }
+        if ($tool_name === 'update_host_interface' && isset($params['useip'])
+            && (!is_int($params['useip']) || !in_array($params['useip'], [0, 1], true))) {
+            $errors[] = 'parameter "useip" must be integer 0 or 1';
+        }
+        if ($tool_name === 'create_web_scenario_trigger' && isset($params['priority'])
+            && (!is_int($params['priority']) || $params['priority'] < 0 || $params['priority'] > 5)) {
+            $errors[] = 'parameter "priority" must be an integer between 0 and 5';
+        }
+
+        if ($tool_name === 'create_tag_scoped_maintenance'
+            && array_key_exists('data_collection', $params)
+            && !Util::truthy($params['data_collection'])) {
+            $errors[] = 'tag-scoped maintenance requires data_collection=true; Zabbix rejects problem tags on no-data maintenance';
+        }
+        if ($tool_name === 'create_sla') {
+            if (isset($params['slo']) && is_numeric($params['slo'])
+                && abs((float) $params['slo'] - round((float) $params['slo'], 4)) > 0.000000001) {
+                $errors[] = 'parameter "slo" supports at most 4 fractional digits';
+            }
+            if (isset($params['status']) && !in_array((int) $params['status'], [0, 1], true)) {
+                $errors[] = 'parameter "status" must be 0 or 1';
+            }
+            if (isset($params['description']) && is_string($params['description'])
+                && self::stringLength($params['description']) > 65535) {
+                $errors[] = 'parameter "description" must be at most 65535 characters';
+            }
+        }
+        if ($tool_name === 'create_sla_service' && isset($params['sortorder'])) {
+            $sortorder = (int) $params['sortorder'];
+            if ($sortorder < 0 || $sortorder > 999) {
+                $errors[] = 'parameter "sortorder" must be between 0 and 999';
+            }
+        }
+        if ($tool_name === 'create_sla_service') {
+            if (is_string($params['name'] ?? null)
+                && self::stringLength($params['name']) > 128) {
+                $errors[] = 'parameter "name" must be at most 128 characters';
+            }
+            $has_problem_tags = !empty($params['problem_tags']);
+            $has_children = !empty($params['child_serviceids']);
+            if ($has_problem_tags === $has_children) {
+                $errors[] = $has_problem_tags
+                    ? 'service cannot have both problem_tags and child_serviceids'
+                    : 'service needs problem_tags or child_serviceids';
+            }
+            if ($has_children && !array_key_exists('algorithm', $params)) {
+                $errors[] = 'parent service requires an explicit algorithm';
+            }
+            if (isset($params['algorithm'])
+                && (!is_int($params['algorithm']) || !in_array($params['algorithm'], [1, 2], true))) {
+                $errors[] = 'parameter "algorithm" must be integer 1 or 2';
+            }
+        }
+
+        if ($tool_name === 'create_web_scenario') {
+            if (isset($params['delay'])
+                && (!is_string($params['delay']) || preg_match('/^\d+[smhd]?$/D', $params['delay']) !== 1)) {
+                $errors[] = 'parameter "delay" must use a value such as 30s, 5m, or 1h';
+            }
+            if (isset($params['status_codes'])
+                && (!is_string($params['status_codes'])
+                    || preg_match('/^\d{3}(?:,\d{3})*$/D', $params['status_codes']) !== 1)) {
+                $errors[] = 'parameter "status_codes" must be a comma-separated list such as 200 or 200,301';
+            }
+        }
+
         return $errors;
+    }
+
+    public static function writeBindingPolicyTools(): array {
+        return self::WRITE_BINDING_POLICY_TOOLS;
+    }
+
+    /**
+     * Freeze time-derived/defaulted write values before confirmation so the
+     * exact payload cannot change at midnight or while the user is deciding.
+     */
+    public static function normalizeWriteParamsForConfirmation(string $tool_name, array $params): array {
+        // Canonicalize scalar schema types before classification, previewing,
+        // hashing and execution.  Flexible JSON spellings such as "false" or
+        // "01" must never have different meanings in those four phases.
+        foreach (self::writeToolSchemas()[$tool_name] ?? [] as $name => $rule) {
+            if (!array_key_exists($name, $params)) {
+                continue;
+            }
+            $type = (string) ($rule[0] ?? '');
+            if ($type === 'bool') {
+                $params[$name] = self::canonicalBoolean($params[$name], $name);
+            }
+            elseif ($type === 'int') {
+                $params[$name] = self::canonicalInteger($params[$name], $name);
+            }
+            elseif ($type === 'number') {
+                $params[$name] = self::canonicalNumber($params[$name], $name);
+            }
+            elseif ($type === 'array_str' && is_array($params[$name])) {
+                $params[$name] = ($tool_name === 'create_user' && $name === 'usrgrpids')
+                    ? self::canonicalIdList($params[$name], $name)
+                    : self::canonicalStringList($params[$name], $name);
+            }
+        }
+
+        // Canonicalize semantic identifiers before target binding, previewing,
+        // hashing and execution. Free-form bodies (descriptions, comments,
+        // macro/tag values) are intentionally excluded so their exact text is
+        // preserved.
+        $trimmed_string_fields = [
+            'create_maintenance' => ['start_time', 'name'],
+            'create_hostgroup_maintenance' => ['start_time', 'name'],
+            'create_tag_scoped_maintenance' => ['start_time', 'name'],
+            'extend_maintenance' => ['maintenance_id'],
+            'end_maintenance' => ['maintenance_id'],
+            'update_trigger' => ['trigger_id'],
+            'update_item' => ['item_id'],
+            'create_user' => ['username'],
+            'acknowledge_problem' => ['eventid', 'message'],
+            'suppress_problem' => ['eventid'],
+            'unsuppress_problem' => ['eventid'],
+            'mark_problem_as_cause' => ['eventid'],
+            'mark_problem_as_symptom' => ['eventid', 'cause_eventid'],
+            'change_problem_severity' => ['eventid'],
+            'unacknowledge_problem' => ['eventid'],
+            'add_problem_message' => ['eventid', 'message'],
+            'add_hosts_to_group' => ['group_name'],
+            'create_host_group' => ['name'],
+            'post_evidence_to_event' => ['eventid', 'report_token', 'note'],
+            'enable_host' => ['hostname'],
+            'disable_host' => ['hostname'],
+            'update_host_tags' => ['hostname', 'operation'],
+            'update_host_inventory' => ['hostname'],
+            'update_host_macros' => ['hostname'],
+            'update_host_interface' => ['interfaceid', 'ip', 'dns', 'port'],
+            'create_web_scenario' => ['hostname', 'name', 'url', 'delay', 'status_codes', 'step_name'],
+            'create_web_scenario_trigger' => ['hostname', 'scenario_name', 'name'],
+            'create_problem_dashboard' => ['name'],
+            'link_template_to_host' => ['template'],
+            'unlink_template_from_host' => ['template'],
+            'enable_lld_rule' => ['lld_rule_id'],
+            'disable_lld_rule' => ['lld_rule_id'],
+            'apply_bulk_action' => ['preview_token'],
+            'create_sla_service' => ['name', 'parent_service'],
+            'create_sla' => ['name', 'period', 'timezone', 'effective_date'],
+            'add_template_tag' => ['template', 'tag'],
+            'add_trigger_tag' => ['trigger_id', 'tag']
+        ];
+        foreach ($trimmed_string_fields[$tool_name] ?? [] as $field) {
+            if (array_key_exists($field, $params) && is_string($params[$field])) {
+                $params[$field] = trim($params[$field]);
+            }
+        }
+
+        if ($tool_name === 'create_sla' && array_key_exists('period', $params)) {
+            $period = self::parseSlaPeriod($params['period']);
+            if ($period === null) {
+                throw new RuntimeException('period must be daily, weekly, monthly, quarterly, or annually.');
+            }
+            $params['period'] = [0 => 'daily', 1 => 'weekly', 2 => 'monthly', 3 => 'quarterly', 4 => 'annually'][$period];
+        }
+
+        if (in_array($tool_name, ['update_trigger', 'update_item'], true)
+            && is_array($params['changes'] ?? null)) {
+            $changes = $params['changes'];
+            if (array_key_exists('status', $changes)) {
+                $changes['status'] = self::canonicalInteger($changes['status'], 'changes.status');
+            }
+            if ($tool_name === 'update_trigger' && array_key_exists('priority', $changes)) {
+                $changes['priority'] = self::canonicalInteger($changes['priority'], 'changes.priority');
+            }
+            $params['changes'] = $changes;
+        }
+
+        if ($tool_name === 'update_host_macros' && is_array($params['macros'] ?? null)) {
+            $macros = [];
+            $seen = [];
+            foreach ($params['macros'] as $index => $macro) {
+                if (!is_array($macro)) {
+                    throw new RuntimeException('macros['.$index.'] must be an object.');
+                }
+                foreach (array_keys($macro) as $field) {
+                    if (!in_array($field, ['macro', 'value', 'type'], true)) {
+                        throw new RuntimeException('macros['.$index.'] has unexpected field "'.$field.'".');
+                    }
+                }
+                if (!is_string($macro['macro'] ?? null)) {
+                    throw new RuntimeException('macros['.$index.'].macro must be a string.');
+                }
+                $name = trim($macro['macro']);
+                if (!Util::isValidZabbixUserMacro($name)) {
+                    throw new RuntimeException('Macro "'.$name.'" has invalid Zabbix user-macro syntax.');
+                }
+                if (isset($seen[$name])) {
+                    throw new RuntimeException('Macro "'.$name.'" is duplicated.');
+                }
+                if (!array_key_exists('value', $macro) || !is_string($macro['value'])) {
+                    throw new RuntimeException('macros['.$index.'].value must be a string.');
+                }
+                if (self::stringLength($name) > 255) {
+                    throw new RuntimeException('Macro "'.$name.'" exceeds 255 characters.');
+                }
+                if (self::stringLength($macro['value']) > 2048) {
+                    throw new RuntimeException('Macro "'.$name.'" value exceeds 2048 characters.');
+                }
+                $seen[$name] = true;
+                $macros[] = [
+                    'macro' => $name,
+                    'value' => $macro['value'],
+                    'type' => array_key_exists('type', $macro)
+                        ? self::canonicalInteger($macro['type'], 'macros['.$index.'].type')
+                        : 0
+                ];
+            }
+            $params['macros'] = $macros;
+        }
+
+        if (in_array($tool_name, ['update_host_tags', 'create_web_scenario'], true)
+            && is_array($params['tags'] ?? null)) {
+            $params['tags'] = self::canonicalPlainTags($params['tags'], 'tags');
+        }
+
+        if ($tool_name === 'update_host_inventory' && is_array($params['fields'] ?? null)) {
+            $params['fields'] = self::canonicalInventoryFields($params['fields']);
+        }
+
+        if ($tool_name === 'create_user' && is_array($params['usrgrpids'] ?? null)) {
+            $params['usrgrpids'] = self::canonicalIdList($params['usrgrpids'], 'usrgrpids');
+        }
+
+        if ($tool_name === 'create_sla' && is_array($params['service_tags'] ?? null)) {
+            $params['service_tags'] = self::canonicalMatchTags($params['service_tags'], 'service_tags');
+        }
+
+        if ($tool_name === 'create_sla_service') {
+            if (is_array($params['problem_tags'] ?? null)) {
+                $params['problem_tags'] = self::canonicalMatchTags($params['problem_tags'], 'problem_tags');
+            }
+            if (is_array($params['child_serviceids'] ?? null)) {
+                $params['child_serviceids'] = self::canonicalIdList(
+                    $params['child_serviceids'],
+                    'child_serviceids'
+                );
+            }
+
+            $has_problem_tags = !empty($params['problem_tags']);
+            $has_children = !empty($params['child_serviceids']);
+            if ($has_problem_tags === $has_children) {
+                throw new RuntimeException(
+                    $has_problem_tags
+                        ? 'A service cannot have both problem_tags and child_serviceids.'
+                        : 'A service needs problem_tags (leaf) or child_serviceids (parent).'
+                );
+            }
+            if (self::stringLength((string) ($params['name'] ?? '')) > 128) {
+                throw new RuntimeException('Service name must be at most 128 characters.');
+            }
+            if ($has_children && !array_key_exists('algorithm', $params)) {
+                throw new RuntimeException('A parent service requires an explicit algorithm (1 or 2).');
+            }
+            if (!$has_children && !array_key_exists('algorithm', $params)) {
+                $params['algorithm'] = 1;
+            }
+            if (isset($params['algorithm']) && !in_array($params['algorithm'], [1, 2], true)) {
+                throw new RuntimeException('algorithm must be 1 or 2.');
+            }
+            if (!array_key_exists('sortorder', $params)) {
+                $params['sortorder'] = 0;
+            }
+        }
+
+        if ($tool_name === 'create_host') {
+            $params = self::canonicalCreateHostParams($params);
+        }
+
+        if ($tool_name === 'create_web_scenario') {
+            foreach (['delay' => '60s', 'status_codes' => '200', 'step_name' => 'Check'] as $field => $default) {
+                if (!isset($params[$field]) || trim((string) $params[$field]) === '') {
+                    $params[$field] = $default;
+                }
+            }
+            if (!preg_match('/^\d+[smhd]?$/D', (string) $params['delay'])) {
+                throw new RuntimeException('delay must use a value such as 30s, 5m, or 1h.');
+            }
+            if (!preg_match('/^\d{3}(?:,\d{3})*$/D', (string) $params['status_codes'])) {
+                throw new RuntimeException('status_codes must be a comma-separated list such as 200 or 200,301.');
+            }
+        }
+
+        if ($tool_name === 'create_web_scenario_trigger') {
+            if (!isset($params['name']) || trim((string) $params['name']) === '') {
+                $params['name'] = self::webScenarioTriggerName(
+                    (string) ($params['hostname'] ?? ''),
+                    (string) ($params['scenario_name'] ?? '')
+                );
+            }
+            if (!array_key_exists('priority', $params)) {
+                $params['priority'] = 3;
+            }
+        }
+
+        if ($tool_name === 'create_tag_scoped_maintenance'
+            && empty($params['hostnames']) && empty($params['group_names'])) {
+            throw new RuntimeException('At least one hostname or host group is required for tag-scoped maintenance.');
+        }
+
+        if ($tool_name === 'update_host_tags') {
+            $operation = strtolower(trim((string) ($params['operation'] ?? 'add')));
+            if (!in_array($operation, ['add', 'remove', 'replace'], true)) {
+                throw new RuntimeException('operation must be add, remove, or replace.');
+            }
+            $params['operation'] = $operation;
+        }
+
+        if ($tool_name === 'change_problem_severity'
+            && ((int) ($params['severity'] ?? -1) < 0 || (int) ($params['severity'] ?? -1) > 5)) {
+            throw new RuntimeException('severity must be between 0 and 5.');
+        }
+        if ($tool_name === 'suppress_problem' && isset($params['suppress_until'])
+            && (int) $params['suppress_until'] < 0) {
+            throw new RuntimeException('suppress_until must be a non-negative Unix timestamp (0 means indefinite).');
+        }
+        if ($tool_name === 'suppress_problem' && !array_key_exists('suppress_until', $params)) {
+            $params['suppress_until'] = 0;
+        }
+        if ($tool_name === 'acknowledge_problem') {
+            $action = (int) ($params['action'] ?? 0);
+            if ($action <= 0 || ($action & ~(1 | 2 | 4)) !== 0) {
+                throw new RuntimeException('action may contain only close (1), acknowledge (2), and add-message (4).');
+            }
+            if (($action & 4) !== 0 && trim((string) ($params['message'] ?? '')) === '') {
+                throw new RuntimeException('message is required when action contains add-message (4).');
+            }
+        }
+        if ($tool_name === 'update_host_interface' && isset($params['useip'])
+            && !in_array((int) $params['useip'], [0, 1], true)) {
+            throw new RuntimeException('useip must be 0 (DNS) or 1 (IP).');
+        }
+        if ($tool_name === 'create_web_scenario_trigger' && isset($params['priority'])
+            && ((int) $params['priority'] < 0 || (int) $params['priority'] > 5)) {
+            throw new RuntimeException('priority must be between 0 and 5.');
+        }
+
+        if (in_array($tool_name, [
+            'create_maintenance',
+            'create_hostgroup_maintenance',
+            'create_tag_scoped_maintenance'
+        ], true)) {
+            if (!isset($params['duration_hours']) || !is_numeric($params['duration_hours'])) {
+                throw new RuntimeException('duration_hours must be numeric.');
+            }
+            $raw_period_seconds = ((float) $params['duration_hours']) * 3600;
+            $period_seconds = (int) round($raw_period_seconds);
+            if (abs($raw_period_seconds - $period_seconds) > 0.01 || $period_seconds % 60 !== 0) {
+                throw new RuntimeException('duration_hours must represent an exact whole number of minutes.');
+            }
+            if ($period_seconds < 300 || $period_seconds > 86399940) {
+                throw new RuntimeException('duration_hours must resolve to a whole-minute period between 5 minutes and 23,999 hours 59 minutes.');
+            }
+            $params['duration_hours'] = $period_seconds / 3600;
+            $params['data_collection'] = array_key_exists('data_collection', $params)
+                ? Util::truthy($params['data_collection'])
+                : true;
+
+            $raw = trim((string) ($params['start_time'] ?? ''));
+            $timestamp = $raw === '' ? time() : strtotime($raw);
+            if ($timestamp === false) {
+                throw new RuntimeException('start_time is invalid. Use an ISO 8601 timestamp or YYYY-MM-DD HH:MM.');
+            }
+            $timestamp = (int) floor($timestamp / 60) * 60;
+            $params['start_time'] = date(DATE_ATOM, $timestamp);
+
+            if ($tool_name === 'create_tag_scoped_maintenance') {
+                if (!$params['data_collection']) {
+                    throw new RuntimeException('tag-scoped maintenance requires data_collection=true.');
+                }
+                $evaltype = isset($params['tags_evaltype']) ? (int) $params['tags_evaltype'] : 0;
+                if (!in_array($evaltype, [0, 2], true)) {
+                    throw new RuntimeException('tags_evaltype must be 0 (And/Or) or 2 (Or).');
+                }
+                $params['tags_evaltype'] = $evaltype;
+                $params['tags'] = self::canonicalMatchTags((array) ($params['tags'] ?? []), 'tags');
+                if (!$params['tags']) {
+                    throw new RuntimeException('Tag-scoped maintenance requires at least one valid tag.');
+                }
+            }
+
+            $explicit_name = trim((string) ($params['name'] ?? ''));
+            if ($explicit_name !== '' && strlen($explicit_name) > 128) {
+                throw new RuntimeException('Maintenance name must be at most 128 characters.');
+            }
+            if ($explicit_name === '') {
+                if ($tool_name === 'create_maintenance') {
+                    $explicit_name = 'AI maintenance: '.implode(', ', array_map('strval', (array) ($params['hostnames'] ?? [])));
+                }
+                elseif ($tool_name === 'create_hostgroup_maintenance') {
+                    $explicit_name = 'AI maintenance (group): '.implode(', ', array_map('strval', (array) ($params['group_names'] ?? [])));
+                }
+                else {
+                    $targets = !empty($params['hostnames']) ? (array) $params['hostnames'] : (array) ($params['group_names'] ?? []);
+                    $tag_labels = [];
+                    foreach ((array) ($params['tags'] ?? []) as $tag) {
+                        $tag_labels[] = (string) $tag['tag'].((string) $tag['value'] !== '' ? '='.(string) $tag['value'] : '');
+                    }
+                    $explicit_name = 'AI tag-scoped: '.implode(', ', array_map('strval', $targets)).' ['.implode(', ', $tag_labels).']';
+                }
+                $explicit_name = Util::truncate($explicit_name, 128);
+            }
+            $params['name'] = $explicit_name;
+        }
+
+        if ($tool_name === 'extend_maintenance') {
+            if (!isset($params['additional_hours']) || !is_numeric($params['additional_hours'])) {
+                throw new RuntimeException('additional_hours must be numeric.');
+            }
+            $raw_seconds = ((float) $params['additional_hours']) * 3600;
+            $seconds = (int) round($raw_seconds);
+            if (abs($raw_seconds - $seconds) > 0.01 || $seconds < 60 || $seconds % 60 !== 0) {
+                throw new RuntimeException('additional_hours must represent at least one exact whole minute.');
+            }
+            $params['additional_hours'] = $seconds / 3600;
+        }
+
+        if ($tool_name === 'create_sla') {
+            if (trim((string) ($params['effective_date'] ?? '')) === '') {
+                $params['effective_date'] = gmdate('Y-m-d');
+            }
+            if (trim((string) ($params['timezone'] ?? '')) === '') {
+                $params['timezone'] = date_default_timezone_get() ?: 'UTC';
+            }
+            if (!array_key_exists('status', $params)) {
+                $params['status'] = 1;
+            }
+            if (isset($params['description'])
+                && self::stringLength((string) $params['description']) > 65535) {
+                throw new RuntimeException('description must be at most 65535 characters.');
+            }
+        }
+
+        if ($tool_name === 'create_sla_service') {
+            if (empty($params['service_tags'])) {
+                $name = trim((string) ($params['name'] ?? ''));
+                $slug = strtolower((string) preg_replace('/[^a-z0-9]+/i', '-', $name));
+                $slug = trim($slug, '-');
+                $params['service_tags'] = [[
+                    'tag' => 'sla_scope',
+                    'value' => $slug !== '' ? $slug : 'service'
+                ]];
+            }
+            else {
+                $params['service_tags'] = self::canonicalPlainTags(
+                    (array) $params['service_tags'],
+                    'service_tags'
+                );
+            }
+        }
+
+        return $params;
+    }
+
+    /**
+     * Live before-state shown in a deterministic write preview. Supported
+     * mutation tools fail closed when the target cannot be read; ChatExecute
+     * reloads this same state and rejects stale confirmations.
+     */
+    public static function loadWriteConfirmationState(
+        string $tool_name,
+        array $params,
+        ZabbixApiClient $api
+    ): array {
+        if ($tool_name === 'update_trigger') {
+            $changes = is_array($params['changes'] ?? null) ? $params['changes'] : [];
+            $fields = array_values(array_intersect(
+                array_keys($changes),
+                ['expression', 'description', 'priority', 'status', 'comments', 'url', 'recovery_expression']
+            ));
+            $rows = $api->call('trigger.get', [
+                'triggerids' => [(string) ($params['trigger_id'] ?? '')],
+                'output' => array_values(array_unique(array_merge(['triggerid', 'description'], $fields))),
+                'limit' => 1
+            ]);
+            if (empty($rows[0])) {
+                throw new RuntimeException('Trigger target could not be read for the confirmation preview.');
+            }
+            return [
+                'target_name' => (string) ($rows[0]['description'] ?? ''),
+                'values' => array_intersect_key($rows[0], array_flip($fields))
+            ];
+        }
+
+        if ($tool_name === 'update_item') {
+            $changes = is_array($params['changes'] ?? null) ? $params['changes'] : [];
+            $fields = array_values(array_intersect(
+                array_keys($changes),
+                ['status', 'delay', 'name', 'description', 'history', 'trends']
+            ));
+            $rows = $api->call('item.get', [
+                'itemids' => [(string) ($params['item_id'] ?? '')],
+                'output' => array_values(array_unique(array_merge(['itemid', 'name'], $fields))),
+                'selectHosts' => ['host'],
+                'limit' => 1
+            ]);
+            if (empty($rows[0])) {
+                throw new RuntimeException('Item target could not be read for the confirmation preview.');
+            }
+            $host = (string) ($rows[0]['hosts'][0]['host'] ?? '');
+            $name = (string) ($rows[0]['name'] ?? '');
+            return [
+                'target_name' => trim($host.($host !== '' && $name !== '' ? ' / ' : '').$name),
+                'values' => array_intersect_key($rows[0], array_flip($fields))
+            ];
+        }
+
+        if ($tool_name === 'update_host_interface') {
+            $fields = array_values(array_intersect(['ip', 'dns', 'port', 'useip'], array_keys($params)));
+            $rows = $api->call('hostinterface.get', [
+                'interfaceids' => [(string) ($params['interfaceid'] ?? '')],
+                'output' => array_values(array_unique(array_merge(['interfaceid'], $fields))),
+                'selectHosts' => ['host'],
+                'limit' => 1
+            ]);
+            if (empty($rows[0])) {
+                throw new RuntimeException('Host interface target could not be read for the confirmation preview.');
+            }
+            return [
+                'target_name' => (string) ($rows[0]['hosts'][0]['host'] ?? ''),
+                'values' => array_intersect_key($rows[0], array_flip($fields)),
+                'top_level_fields' => $fields
+            ];
+        }
+
+        if (in_array($tool_name, ['enable_host', 'disable_host'], true)) {
+            $host = $api->getHostInfo((string) ($params['hostname'] ?? ''));
+            if (!is_array($host)) {
+                throw new RuntimeException('Host target could not be read for the confirmation preview.');
+            }
+            return [
+                'target_name' => (string) ($host['name'] ?? $host['host'] ?? ''),
+                'values' => ['status' => (string) ($host['status'] ?? '')]
+            ];
+        }
+
+        if (in_array($tool_name, ['enable_lld_rule', 'disable_lld_rule'], true)) {
+            $rows = $api->call('discoveryrule.get', [
+                'itemids' => [(string) ($params['lld_rule_id'] ?? '')],
+                'output' => ['itemid', 'name', 'status'],
+                'selectHosts' => ['host'],
+                'limit' => 1
+            ]);
+            if (empty($rows[0])) {
+                throw new RuntimeException('LLD rule target could not be read for the confirmation preview.');
+            }
+            $host = (string) ($rows[0]['hosts'][0]['host'] ?? '');
+            $name = (string) ($rows[0]['name'] ?? '');
+            return [
+                'target_name' => trim($host.($host !== '' && $name !== '' ? ' / ' : '').$name),
+                'values' => ['status' => (string) ($rows[0]['status'] ?? '')]
+            ];
+        }
+
+        return [];
     }
 
     private static function checkType(string $type, $value): bool {
@@ -359,12 +1207,11 @@ class ZabbixActionExecutor {
             case 'string':
                 return is_string($value) && trim($value) !== '';
             case 'int':
-                return is_int($value) || (is_string($value) && preg_match('/^-?\d+$/', $value));
+                return is_int($value);
             case 'number':
-                return is_int($value) || is_float($value)
-                    || (is_string($value) && is_numeric($value));
+                return is_int($value) || is_float($value);
             case 'bool':
-                return is_bool($value) || in_array($value, [0, 1, '0', '1', 'true', 'false', 'yes', 'no'], true);
+                return is_bool($value);
             case 'array':
                 return is_array($value) && count($value) > 0;
             case 'array_str':
@@ -392,6 +1239,279 @@ class ZabbixActionExecutor {
         return false;
     }
 
+    private static function canonicalBoolean($value, string $name): bool {
+        if (is_bool($value)) {
+            return $value;
+        }
+        if (is_int($value) && in_array($value, [0, 1], true)) {
+            return $value === 1;
+        }
+        if (is_string($value)) {
+            $value = strtolower(trim($value));
+            if (in_array($value, ['1', 'true', 'yes'], true)) {
+                return true;
+            }
+            if (in_array($value, ['0', 'false', 'no'], true)) {
+                return false;
+            }
+        }
+
+        throw new RuntimeException($name.' must be a boolean.');
+    }
+
+    private static function canonicalInteger($value, string $name): int {
+        if (is_int($value)) {
+            return $value;
+        }
+        if (is_string($value) && preg_match('/^-?(?:0|[1-9]\d*)$/D', trim($value))) {
+            $canonical = filter_var(trim($value), FILTER_VALIDATE_INT);
+            if ($canonical !== false) {
+                return (int) $canonical;
+            }
+        }
+
+        throw new RuntimeException($name.' must be a canonical integer.');
+    }
+
+    private static function canonicalNumber($value, string $name) {
+        if (is_int($value) || (is_float($value) && is_finite($value))) {
+            return $value;
+        }
+        if (is_string($value) && is_numeric(trim($value))) {
+            $number = (float) trim($value);
+            if (is_finite($number)) {
+                return $number;
+            }
+        }
+
+        throw new RuntimeException($name.' must be a finite number.');
+    }
+
+    /** Exact nested representation used by host/web-scenario tag writes. */
+    private static function canonicalPlainTags(array $tags, string $path): array {
+        $normalized = [];
+        $seen = [];
+
+        foreach ($tags as $index => $tag) {
+            if (!is_array($tag)) {
+                throw new RuntimeException($path.'['.$index.'] must be an object.');
+            }
+            foreach (array_keys($tag) as $field) {
+                if (!in_array($field, ['tag', 'value'], true)) {
+                    throw new RuntimeException($path.'['.$index.'] has unexpected field "'.$field.'".');
+                }
+            }
+            if (!is_string($tag['tag'] ?? null)) {
+                throw new RuntimeException($path.'['.$index.'].tag must be a string.');
+            }
+            $name = trim($tag['tag']);
+            if ($name === '') {
+                throw new RuntimeException($path.'['.$index.'].tag must not be empty.');
+            }
+            $value = $tag['value'] ?? '';
+            if (!is_string($value)) {
+                throw new RuntimeException($path.'['.$index.'].value must be a string.');
+            }
+            $value = trim($value);
+            $key = $name.chr(31).$value;
+            if (isset($seen[$key])) {
+                throw new RuntimeException($path.' contains duplicate tag "'.$name.'" with the same value.');
+            }
+            $seen[$key] = true;
+            $normalized[] = ['tag' => $name, 'value' => $value];
+        }
+
+        return $normalized;
+    }
+
+    /** Exact {tag, operator, value} matcher representation for maintenance/SLA writes. */
+    private static function canonicalMatchTags(array $tags, string $path): array {
+        $normalized = [];
+        $seen = [];
+
+        foreach ($tags as $index => $tag) {
+            if (!is_array($tag)) {
+                throw new RuntimeException($path.'['.$index.'] must be an object.');
+            }
+            foreach (array_keys($tag) as $field) {
+                if (!in_array($field, ['tag', 'operator', 'value'], true)) {
+                    throw new RuntimeException($path.'['.$index.'] has unexpected field "'.$field.'".');
+                }
+            }
+            if (!is_string($tag['tag'] ?? null)) {
+                throw new RuntimeException($path.'['.$index.'].tag must be a string.');
+            }
+            $name = trim($tag['tag']);
+            if ($name === '') {
+                throw new RuntimeException($path.'['.$index.'].tag must not be empty.');
+            }
+            $operator = array_key_exists('operator', $tag)
+                ? self::canonicalInteger($tag['operator'], $path.'['.$index.'].operator')
+                : 0;
+            if (!in_array($operator, [0, 2], true)) {
+                throw new RuntimeException($path.'['.$index.'].operator must be 0 (equals) or 2 (contains).');
+            }
+            $value = $tag['value'] ?? '';
+            if (!is_string($value)) {
+                throw new RuntimeException($path.'['.$index.'].value must be a string.');
+            }
+            $value = trim($value);
+            if ($operator === 2 && $value === '') {
+                throw new RuntimeException($path.'['.$index.'] cannot use contains (2) with an empty value.');
+            }
+            $key = $name.chr(31).$operator.chr(31).$value;
+            if (isset($seen[$key])) {
+                throw new RuntimeException($path.' contains a duplicate matcher for tag "'.$name.'".');
+            }
+            $seen[$key] = true;
+            $normalized[] = ['tag' => $name, 'operator' => $operator, 'value' => $value];
+        }
+
+        return $normalized;
+    }
+
+    /** Canonical positive decimal identifiers copied from Zabbix tool output. */
+    private static function canonicalIdList(array $values, string $path): array {
+        $normalized = [];
+        $seen = [];
+
+        foreach ($values as $index => $value) {
+            if (is_int($value)) {
+                $id = $value > 0 ? (string) $value : '';
+            }
+            elseif (is_string($value) && preg_match('/^[1-9]\d*$/D', trim($value))) {
+                $id = trim($value);
+            }
+            else {
+                $id = '';
+            }
+            if ($id === '') {
+                throw new RuntimeException($path.'['.$index.'] must be a positive decimal ID.');
+            }
+            if (isset($seen[$id])) {
+                throw new RuntimeException($path.' contains duplicate ID "'.$id.'".');
+            }
+            $seen[$id] = true;
+            $normalized[] = $id;
+        }
+
+        return $normalized;
+    }
+
+    /** Canonical list used by every write schema declared as array_str. */
+    private static function canonicalStringList(array $values, string $path): array {
+        $normalized = [];
+        $seen = [];
+
+        foreach ($values as $index => $value) {
+            if (!is_string($value)) {
+                throw new RuntimeException($path.'['.$index.'] must be a string.');
+            }
+            $value = trim($value);
+            if ($value === '') {
+                throw new RuntimeException($path.'['.$index.'] must not be empty.');
+            }
+            if (isset($seen[$value])) {
+                throw new RuntimeException($path.' contains duplicate value "'.$value.'".');
+            }
+            $seen[$value] = true;
+            $normalized[] = $value;
+        }
+
+        return $normalized;
+    }
+
+    /** Freeze and prevalidate create_host before any implicit group creation. */
+    private static function canonicalCreateHostParams(array $params): array {
+        $hostname = trim((string) ($params['hostname'] ?? ''));
+        if ($hostname === '' || self::stringLength($hostname) > 128
+            || preg_match('/^[A-Za-z0-9._ -]+$/D', $hostname) !== 1) {
+            throw new RuntimeException('hostname must be 1-128 characters using letters, digits, spaces, dots, dashes, or underscores.');
+        }
+        $params['hostname'] = $hostname;
+
+        foreach ((array) ($params['groups'] ?? []) as $group) {
+            if (self::stringLength((string) $group) > 255) {
+                throw new RuntimeException('Host group names must be at most 255 characters.');
+            }
+        }
+        foreach ((array) ($params['templates'] ?? []) as $template) {
+            if (self::stringLength((string) $template) > 128) {
+                throw new RuntimeException('Template names must be at most 128 characters.');
+            }
+        }
+
+        if (array_key_exists('visible_name', $params)) {
+            $params['visible_name'] = trim((string) $params['visible_name']);
+            if ($params['visible_name'] === '' || self::stringLength($params['visible_name']) > 128) {
+                throw new RuntimeException('visible_name must be 1-128 characters when supplied.');
+            }
+        }
+        if (array_key_exists('description', $params)
+            && self::stringLength((string) $params['description']) > 65535) {
+            throw new RuntimeException('description must be at most 65535 characters.');
+        }
+
+        $ip = trim((string) ($params['interface_ip'] ?? ''));
+        $dns = trim((string) ($params['interface_dns'] ?? ''));
+        if (array_key_exists('interface_ip', $params)) {
+            if ($ip === '' || filter_var($ip, FILTER_VALIDATE_IP) === false) {
+                throw new RuntimeException('interface_ip must be a valid IPv4 or IPv6 address when supplied.');
+            }
+            $params['interface_ip'] = $ip;
+        }
+        if (array_key_exists('interface_dns', $params)) {
+            if ($dns === '' || self::stringLength($dns) > 255
+                || filter_var($dns, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) === false) {
+                throw new RuntimeException('interface_dns must be a valid DNS hostname of at most 255 characters when supplied.');
+            }
+            $params['interface_dns'] = $dns;
+        }
+
+        if ($ip === '' && $dns === '') {
+            if (array_key_exists('interface_port', $params)) {
+                throw new RuntimeException('interface_port requires interface_ip or interface_dns.');
+            }
+        }
+        else {
+            $port = trim((string) ($params['interface_port'] ?? '10050'));
+            $numeric_port = ctype_digit($port) ? (int) $port : 0;
+            $macro_port = Util::isValidZabbixUserMacro($port);
+            if ((!$macro_port && ($numeric_port < 1 || $numeric_port > 65535))
+                || self::stringLength($port) > 64) {
+                throw new RuntimeException('interface_port must be 1-65535 or a valid user macro.');
+            }
+            $params['interface_port'] = $port;
+        }
+
+        return $params;
+    }
+
+    private static function stringLength(string $value): int {
+        return function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
+    }
+
+    /** Prevent PHP scalar/array coercion after an inventory write is previewed. */
+    private static function canonicalInventoryFields(array $fields): array {
+        $normalized = [];
+
+        foreach ($fields as $field => $value) {
+            if (!is_string($field) || trim($field) === '') {
+                throw new RuntimeException('Every inventory field name must be a non-empty string.');
+            }
+            $canonical_field = trim($field);
+            if (array_key_exists($canonical_field, $normalized)) {
+                throw new RuntimeException('Inventory field "'.$canonical_field.'" is duplicated after trimming.');
+            }
+            if (!is_string($value)) {
+                throw new RuntimeException('Inventory field "'.$canonical_field.'" must have a string value.');
+            }
+            $normalized[$canonical_field] = $value;
+        }
+
+        return $normalized;
+    }
+
     /**
      * Full catalogue of available tools.
      *
@@ -400,9 +1520,10 @@ class ZabbixActionExecutor {
      *   'params'      => parameter descriptions for the AI
      *   'rw'          => 'read' | 'write'
      *   'category'    => write sub-category (only relevant when rw=write)
+     *   'sensitive_read' => privacy confirmation capability
      */
     public static function allTools(): array {
-        return [
+        $tools = [
             'get_problems' => [
                 'description' => 'Get active problems / alerts from Zabbix.',
                 'params' => [
@@ -515,9 +1636,9 @@ class ZabbixActionExecutor {
                 'category' => 'maintenance'
             ],
             'list_active_maintenance' => [
-                'description' => 'List maintenance windows currently in effect (or all known windows when only_active is false).',
+                'description' => 'List maintenance records whose active date envelope includes now (or all known records when only_active is false). For recurring schedules, the result does not prove that a recurrence is in progress at this exact minute.',
                 'params' => [
-                    'only_active' => '(bool, optional, default true) When true, only windows that are active right now are returned.',
+                    'only_active' => '(bool, optional, default true) When true, filter to active_since <= now < active_till. Recurring timeperiod occurrence evaluation remains in Zabbix.',
                     'limit' => '(int, optional) Max windows to return. Default 50.'
                 ],
                 'rw' => 'read',
@@ -545,7 +1666,7 @@ class ZabbixActionExecutor {
                 'description' => 'Update a trigger. IMPORTANT: First use get_triggers to find the trigger ID, then call this tool. FIELD NAMES in Zabbix: "comments" is the operational notes/comment text field. "description" is the trigger NAME/title. Do NOT change "description" or "expression" unless the user explicitly asks to rename the trigger or change the expression. When the user says "update comment" or "change comment", use the "comments" field.',
                 'params' => [
                     'trigger_id' => '(string, required) The trigger ID to update. Use get_triggers to find it first.',
-                    'changes' => '(object, required) Fields to change. Allowed fields: comments (operational notes text), description (trigger name - ONLY if user wants to rename), expression (ONLY if user explicitly wants to change the expression), priority (0-5), status (0=enabled, 1=disabled), recovery_expression.'
+                    'changes' => '(object, required) Fields to change. Allowed fields: comments (operational notes text), description (trigger name - ONLY if user wants to rename), priority (0-5), status (0=enabled, 1=disabled), url. Trigger expression changes must be made directly in Zabbix.'
                 ],
                 'rw' => 'write',
                 'category' => 'triggers'
@@ -560,12 +1681,11 @@ class ZabbixActionExecutor {
                 'category' => 'items'
             ],
             'create_user' => [
-                'description' => 'Create a new Zabbix user.',
+                'description' => 'Create a new Zabbix user. A strong temporary password is generated only on the server after confirmation and shown once directly to the operator; never supply or request a password in tool parameters.',
                 'params' => [
                     'username' => '(string, required) Login username.',
                     'name' => '(string, optional) First name.',
                     'surname' => '(string, optional) Last name.',
-                    'passwd' => '(string, required) Password (min 8 chars).',
                     'usrgrpids' => '(array of strings, required) User group IDs.',
                     'roleid' => '(int, required) Role ID (1=User, 2=Admin, 3=Super admin).'
                 ],
@@ -583,11 +1703,10 @@ class ZabbixActionExecutor {
                 'category' => 'problems'
             ],
             'add_hosts_to_group' => [
-                'description' => 'Add one or more hosts to a host group. If the host group does not exist, you can create it automatically by setting create_group to true. Useful for organizing hosts (e.g. "add all MSSQL hosts to a Microsoft SQL Server group"). First use get_host_info or get_triggers with a template filter to identify the relevant hosts, then use this tool to add them.',
+                'description' => 'Add one or more hosts to an existing host group. Group creation is a separate create_host_group action so each confirmation maps to one API mutation. Useful for organizing hosts (e.g. "add all MSSQL hosts to a Microsoft SQL Server group"). First use get_host_info or get_triggers with a template filter to identify the relevant hosts.',
                 'params' => [
                     'hostnames' => '(array of strings, required) List of technical hostnames to add to the group.',
-                    'group_name' => '(string, required) The name of the host group.',
-                    'create_group' => '(bool, optional) If true, create the host group if it does not exist. Default false — will ask for confirmation first if group is missing.'
+                    'group_name' => '(string, required) Existing host group name. Use create_host_group first when it does not exist.'
                 ],
                 'rw' => 'write',
                 'category' => 'hostgroups'
@@ -649,9 +1768,9 @@ class ZabbixActionExecutor {
                 'category' => ''
             ],
             'get_netbox_info' => [
-                'description' => 'Look up a single host in NetBox by hostname. Returns the full NetBox record (VM or device) with status, site, cluster, role, platform, primary IP, vCPU, RAM, disk, OS, services, and custom fields. Use this for a deep-dive on ONE host. Only available when NetBox is enabled in AI Settings. For multi-host reports, prefer list_netbox_devices.',
+                'description' => 'Look up a single caller-visible Zabbix technical hostname against an exact, globally unique NetBox canonical name. Returns the full NetBox record (VM or device) with status, site, cluster, role, platform, primary IP, vCPU, RAM, disk, OS, services, and custom fields. Ambiguous/missing names fail closed. Use this for a deep-dive on ONE host. Only available when NetBox is enabled in AI Settings. For multi-host reports, prefer list_netbox_devices.',
                 'params' => [
-                    'hostname' => '(string, required) Hostname to look up (matches NetBox name or display).'
+                    'hostname' => '(string, required) Exact Zabbix technical hostname; it must equal one unique NetBox canonical name.'
                 ],
                 'rw' => 'read',
                 'category' => ''
@@ -979,10 +2098,10 @@ class ZabbixActionExecutor {
                 'category' => 'hosts'
             ],
             'update_host_macros' => [
-                'description' => 'Create or update host-level user macros (e.g. thresholds). Other macros are left untouched. NEVER display secret macro VALUES back to the user. Set "type":1 for a secret macro, 2 for a Vault macro, 0 (default) for plain text.',
+                'description' => 'Create or update non-secret host-level user macros (e.g. thresholds). Other macros are left untouched. Only type 0 (plain text) is allowed through AI chat. Secret and Vault macro values must be entered through a trusted Zabbix/Vault workflow, never sent to the model.',
                 'params' => [
                     'hostname' => '(string, required) The technical hostname.',
-                    'macros' => '(array, required) Array of {"macro":"{$NAME}","value":"...","type":0} objects. type: 0=text, 1=secret, 2=vault.'
+                    'macros' => '(array, required) Array of {"macro":"{$NAME}","value":"...","type":0} objects. Only type 0=text is accepted.'
                 ],
                 'rw' => 'write',
                 'category' => 'hosts'
@@ -1000,7 +2119,7 @@ class ZabbixActionExecutor {
                 'category' => 'interfaces'
             ],
             'create_web_scenario' => [
-                'description' => 'Create a single-step web monitoring (HTTP) check on a host from a simple request, optionally with a failure trigger. Example: "monitor https://intranet/healthz every 60s, expect 200, on host APP-PROD-01, and alert if it fails" -> set add_failure_trigger=true.',
+                'description' => 'Create one single-step web monitoring (HTTP) check on a host. The URL must match an administrator-configured allowed origin; loopback, link-local and cloud metadata destinations are always blocked. To alert on failure, use create_web_scenario_trigger as a separate confirmed action after this succeeds.',
                 'params' => [
                     'hostname' => '(string, required) The technical hostname to attach the check to.',
                     'name' => '(string, required) Scenario name.',
@@ -1008,9 +2127,7 @@ class ZabbixActionExecutor {
                     'delay' => '(string, optional, default 60s) Check interval, e.g. 60s, 5m.',
                     'status_codes' => '(string, optional, default 200) Expected HTTP status code(s), e.g. "200" or "200,301".',
                     'step_name' => '(string, optional) Name of the single step.',
-                    'tags' => '(array, optional) Array of {"tag":"name","value":"val"} tags.',
-                    'add_failure_trigger' => '(bool, optional) When true, also create a trigger that fires when the scenario fails (last(/HOST/web.test.fail[Scenario])<>0).',
-                    'trigger_priority' => '(int, optional, default 3) Severity for the failure trigger, 0=Not classified..5=Disaster.'
+                    'tags' => '(array, optional) Array of {"tag":"name","value":"val"} tags.'
                 ],
                 'rw' => 'write',
                 'category' => 'web'
@@ -1070,11 +2187,10 @@ class ZabbixActionExecutor {
                 'category' => 'discovery'
             ],
             'create_host' => [
-                'description' => 'Create a new monitored host. Requires at least one host group, which must already exist unless create_missing_groups=true. Optionally link templates and add an agent interface. For web/URL monitoring or template-only hosts, omit the interface (agentless). After creating the host you can attach a web scenario, items, or triggers to it.',
+                'description' => 'Create a new monitored host in existing host groups. Group creation is a separate create_host_group action so a confirmed host creation is a single API mutation. Optionally link templates and add an agent interface. For web/URL monitoring or template-only hosts, omit the interface (agentless).',
                 'params' => [
                     'hostname' => '(string, required) Technical host name, e.g. "iver.se".',
-                    'groups' => '(array of strings, required) Existing host group name(s). A missing group is an error unless create_missing_groups=true.',
-                    'create_missing_groups' => '(bool, optional, default false) When true, any group that does not exist is created. Default false to avoid creating a wrong group from a typo.',
+                    'groups' => '(array of strings, required) Existing host group name(s). Use create_host_group first for a missing group.',
                     'visible_name' => '(string, optional) Visible name (defaults to the technical name).',
                     'templates' => '(array of strings, optional) Template names to link (must already exist).',
                     'description' => '(string, optional) Host description.',
@@ -1084,18 +2200,6 @@ class ZabbixActionExecutor {
                 ],
                 'rw' => 'write',
                 'category' => 'hosts'
-            ],
-            'create_trigger' => [
-                'description' => 'Create a trigger (alert definition) on a host from a Zabbix trigger expression. Use this to alert on item or web-scenario failures, e.g. a web check not returning HTTP 200. First confirm the exact item key (via get_items / get_web_scenarios) so the expression references a real item, e.g. last(/HOST/web.test.fail[Scenario name])<>0.',
-                'params' => [
-                    'description' => '(string, required) Trigger name, e.g. "HTTP 200 check failed for iver.se".',
-                    'expression' => '(string, required) Zabbix trigger expression, e.g. last(/KT4B-SRV-JUMP/web.test.fail[HTTP 200 check])<>0',
-                    'priority' => '(int, optional) Severity 0=Not classified, 1=Information, 2=Warning, 3=Average, 4=High, 5=Disaster. Default 0.',
-                    'comments' => '(string, optional) Operational notes shown with the problem.',
-                    'recovery_expression' => '(string, optional) Separate recovery expression; omit to let Zabbix auto-recover when the problem expression is false.'
-                ],
-                'rw' => 'write',
-                'category' => 'triggers'
             ],
             'get_proxy_assigned_hosts' => [
                 'description' => 'Show which hosts are assigned to each Zabbix proxy (or a single named proxy) — distributed-monitoring visibility, e.g. "what does proxy DC2 monitor?". Read-only.',
@@ -1162,7 +2266,7 @@ class ZabbixActionExecutor {
                 'category' => ''
             ],
             'apply_bulk_action' => [
-                'description' => 'Execute a bulk change that was previously computed by a preview_* tool. Pass the preview_token from the preview result; this applies the action to EXACTLY the frozen set the preview listed (it does not re-query). Requires operator confirmation — set confirm:true and a confirm_message that states the operation and the exact count from the preview.',
+                'description' => 'Execute a bulk change that was previously computed by a preview_* tool. Pass the preview_token from the preview result; this applies the action to EXACTLY the frozen set the preview listed (it does not re-query). The server-generated high-impact confirmation shows the frozen operation and exact target count.',
                 'params' => [
                     'preview_token' => '(string, required) The token returned by a preview_* tool.'
                 ],
@@ -1215,7 +2319,7 @@ class ZabbixActionExecutor {
                     'effective_date' => '(string, optional) Date the SLA starts calculating, strictly YYYY-MM-DD (e.g. 2026-07-12). Any other format is rejected. Defaults to today.',
                     'status' => '(int, optional, default 1) 1=enabled, 0=disabled.',
                     'description' => '(string, optional) Free text.',
-                    'allow_multiple_matching_services' => '(bool, optional, default false) Set true ONLY after the operator explicitly confirmed a deliberately broad SLA and your confirm_message lists EVERY matched service by name.'
+                    'allow_multiple_matching_services' => '(bool, optional, default false) Set true ONLY after the operator explicitly requested a deliberately broad SLA; the server-generated confirmation must list every matched service by name.'
                 ],
                 'rw' => 'write',
                 'category' => 'sla'
@@ -1241,6 +2345,14 @@ class ZabbixActionExecutor {
                 'category' => 'triggers'
             ]
         ];
+
+        foreach ($tools as $name => &$tool) {
+            $tool['sensitive_read'] = ($tool['rw'] ?? '') === 'read'
+                && in_array($name, self::SENSITIVE_READ_TOOLS, true);
+        }
+        unset($tool);
+
+        return $tools;
     }
 
     /**
@@ -1273,45 +2385,108 @@ class ZabbixActionExecutor {
     }
 
     /**
-     * Build the tool-description block for the AI system prompt.
+     * Provider-neutral JSON-Schema definitions for native function calling.
+     * Assistant prose is never parsed into an executable call; ProviderClient
+     * converts this shape to OpenAI/Ollama or Anthropic's native protocol.
      */
-    public static function buildToolSystemPrompt(array $permissions): string {
-        $tools = self::getToolDefinitions($permissions);
+    public static function getNativeToolDefinitions(array $permissions): array {
+        $definitions = self::getToolDefinitions($permissions);
+        $write_schemas = self::writeToolSchemas();
+        $result = [];
 
-        if (!$tools) {
-            return '';
-        }
+        foreach ($definitions as $name => $definition) {
+            $properties = [];
+            $required = [];
 
-        $lines = [];
-        $lines[] = 'You have access to Zabbix tools. When you need to query or modify Zabbix, respond with ONLY a JSON tool call in this exact format (no other text):';
-        $lines[] = '{"tool": "tool_name", "params": {"param1": "value1"}}';
-        $lines[] = '';
-        $lines[] = 'For every tool marked [WRITE], you MUST first describe exactly what will be changed and ask for confirmation. Respond with:';
-        $lines[] = '{"tool": "tool_name", "params": {...}, "confirm": true, "confirm_message": "I will [describe exactly what will be changed, including which field]. Should I proceed?"}';
-        $lines[] = '';
-        $lines[] = 'For update_trigger, ALWAYS specify in the confirm_message which Zabbix field you will change (e.g. "comments", "expression", "priority") and what the new value will be.';
-        $lines[] = '';
-        $lines[] = 'For READ actions, execute them immediately without confirmation.';
-        $lines[] = '';
-        $lines[] = 'If the user message is a normal conversation or troubleshooting question that does not require a Zabbix tool, respond normally with text.';
-        $lines[] = '';
-        $lines[] = 'Available tools:';
-        $lines[] = '';
+            foreach (($definition['params'] ?? []) as $param_name => $description) {
+                $description = (string) $description;
+                $write_rule = $write_schemas[$name][$param_name] ?? null;
+                $type = is_array($write_rule)
+                    ? (string) ($write_rule[0] ?? 'string')
+                    : self::inferNativeParamType($description);
+                $is_required = is_array($write_rule)
+                    ? !empty($write_rule[1])
+                    : (bool) preg_match('/^\([^)]*\brequired\s*\)/i', trim($description));
 
-        foreach ($tools as $name => $tool) {
-            $rw_label = $tool['rw'] === 'write' ? ' [WRITE]' : ' [READ]';
-            $lines[] = '### '.$name.$rw_label;
-            $lines[] = $tool['description'];
-            $lines[] = 'Parameters:';
+                $schema = self::nativeSchemaForType($type, $description);
+                $schema['description'] = $description;
+                $properties[(string) $param_name] = $schema;
 
-            foreach ($tool['params'] as $pname => $pdesc) {
-                $lines[] = '  - '.$pname.': '.$pdesc;
+                if ($is_required) {
+                    $required[] = (string) $param_name;
+                }
             }
 
-            $lines[] = '';
+            $parameters = [
+                'type' => 'object',
+                'properties' => $properties ?: new \stdClass(),
+                'additionalProperties' => false
+            ];
+            if ($required) {
+                $parameters['required'] = $required;
+            }
+
+            $result[] = [
+                'name' => (string) $name,
+                'description' => (string) ($definition['description'] ?? ''),
+                'parameters' => $parameters
+            ];
         }
 
-        return implode("\n", $lines);
+        return $result;
+    }
+
+    private static function inferNativeParamType(string $description): string {
+        $lower = strtolower(trim($description));
+        if (preg_match('/^\((?:int|integer)\b/', $lower)) {
+            return 'int';
+        }
+        if (preg_match('/^\((?:number|float)\b/', $lower)) {
+            return 'number';
+        }
+        if (preg_match('/^\((?:bool|boolean)\b/', $lower)) {
+            return 'bool';
+        }
+        if (preg_match('/^\(object\b/', $lower)) {
+            return 'object';
+        }
+        if (preg_match('/^\(array of strings?\b/', $lower)) {
+            return 'array_str';
+        }
+        if (preg_match('/^\(array\b/', $lower)) {
+            return 'array';
+        }
+
+        return 'string';
+    }
+
+    private static function nativeSchemaForType(string $type, string $description): array {
+        switch ($type) {
+            case 'int':
+                return ['type' => 'integer'];
+            case 'number':
+                return ['type' => 'number'];
+            case 'bool':
+                return ['type' => 'boolean'];
+            case 'object':
+                return ['type' => 'object', 'additionalProperties' => true];
+            case 'array_str':
+                return ['type' => 'array', 'items' => ['type' => 'string']];
+            case 'array':
+                if (preg_match('/array of (?:ints?|integers?|numeric ids?)/i', $description)) {
+                    return ['type' => 'array', 'items' => ['type' => 'integer']];
+                }
+                if (preg_match('/array of strings?/i', $description)) {
+                    return ['type' => 'array', 'items' => ['type' => 'string']];
+                }
+
+                return [
+                    'type' => 'array',
+                    'items' => ['type' => 'object', 'additionalProperties' => true]
+                ];
+        }
+
+        return ['type' => 'string'];
     }
 
     /**
@@ -1374,61 +2549,6 @@ class ZabbixActionExecutor {
     }
 
     /**
-     * Try to parse the FIRST tool call from an AI response.
-     *
-     * Returns ['tool' => ..., 'params' => ..., 'confirm' => bool, 'confirm_message' => string]
-     * or null if the response is not a tool call. Tolerates surrounding text,
-     * markdown code fences, AND multiple concatenated tool calls (extracts
-     * only the first complete `{"tool":...}` object).
-     */
-    public static function parseToolCall(string $response): ?array {
-        $trimmed = trim($response);
-
-        // Try to extract JSON from a markdown code fence first.
-        if (preg_match('/```(?:json)?\s*(\{[\s\S]*?\})\s*```/', $trimmed, $m)) {
-            $trimmed = trim($m[1]);
-        }
-
-        // Find the first `{"tool"` block in the response.
-        $json_start = strpos($trimmed, '{"tool"');
-
-        if ($json_start === false) {
-            // Maybe the AI used single quotes or extra whitespace. Try a
-            // more permissive search before giving up.
-            if (!preg_match('/\{\s*"tool"\s*:/', $trimmed, $m, PREG_OFFSET_CAPTURE)) {
-                return null;
-            }
-            $json_start = (int) $m[0][1];
-        }
-
-        $end = self::findJsonObjectEnd($trimmed, $json_start);
-
-        if ($end <= $json_start) {
-            return null;
-        }
-
-        $candidate = substr($trimmed, $json_start, $end - $json_start);
-        $decoded = json_decode($candidate, true);
-
-        if (!is_array($decoded) || !isset($decoded['tool'])) {
-            return null;
-        }
-
-        $tool_name = trim((string) ($decoded['tool'] ?? ''));
-
-        if ($tool_name === '' || !isset(self::allTools()[$tool_name])) {
-            return null;
-        }
-
-        return [
-            'tool' => $tool_name,
-            'params' => is_array($decoded['params'] ?? null) ? $decoded['params'] : [],
-            'confirm' => !empty($decoded['confirm']),
-            'confirm_message' => trim((string) ($decoded['confirm_message'] ?? ''))
-        ];
-    }
-
-    /**
      * Strip all JSON tool call blocks from a response string.
      *
      * Uses string-aware JSON object scanning so tool params containing
@@ -1488,12 +2608,540 @@ class ZabbixActionExecutor {
         return $tool['category'];
     }
 
+    /** Reads whose results can expose broad inventory, contact or audit data. */
+    public static function requiresSensitiveReadConfirmation(string $tool_name): bool {
+        $tool = self::allTools()[$tool_name] ?? null;
+
+        return is_array($tool) && !empty($tool['sensitive_read']);
+    }
+
+    /**
+     * Resolve the exact live IT-service set rendered in an SLA confirmation.
+     * The same canonical shape is compared immediately before the create API
+     * call, so a tag collision, rename or algorithm change requires a fresh
+     * operator preview.
+     */
+    public static function resolveSlaConfirmationScope(
+        string $tool_name,
+        array $params,
+        ZabbixApiClient $api
+    ): ?array {
+        if ($tool_name === 'create_sla') {
+            $raw_tags = (array) ($params['service_tags'] ?? []);
+            $tags = $api->normalizeMatchTags($raw_tags);
+            if (!$raw_tags || count($tags) !== count($raw_tags)) {
+                throw new RuntimeException('Could not resolve SLA scope: every service_tags entry must have a tag name and a valid matcher shape.');
+            }
+
+            $dedup = [];
+            foreach ($tags as $tag) {
+                $dedup[$tag['tag'].chr(31).$tag['operator'].chr(31).$tag['value']] = $tag;
+            }
+
+            return [
+                'kind' => 'matched',
+                'services' => self::canonicalSlaServiceRefs(
+                    $api->getServicesDetailed(array_values($dedup))
+                )
+            ];
+        }
+
+        if ($tool_name === 'create_sla_service') {
+            $name = trim((string) ($params['name'] ?? ''));
+            if ($name === '') {
+                throw new RuntimeException('Could not resolve SLA handle collisions: service name is required.');
+            }
+
+            $service_tags = (array) ($params['service_tags'] ?? []);
+            if (!$service_tags) {
+                $slug = strtolower((string) preg_replace('/[^a-z0-9]+/i', '-', $name));
+                $slug = trim($slug, '-');
+                $service_tags = [[
+                    'tag' => 'sla_scope',
+                    'value' => $slug !== '' ? $slug : 'service'
+                ]];
+            }
+
+            $clean = [];
+            foreach ($service_tags as $tag) {
+                if (!is_array($tag)) {
+                    throw new RuntimeException('Could not resolve SLA handle collisions: every service_tags entry must be an object.');
+                }
+                $tag_name = trim((string) ($tag['tag'] ?? ''));
+                if ($tag_name === '') {
+                    throw new RuntimeException('Could not resolve SLA handle collisions: every service tag needs a name.');
+                }
+                $tag_value = trim((string) ($tag['value'] ?? ''));
+                $clean[$tag_name.chr(31).$tag_value] = ['tag' => $tag_name, 'value' => $tag_value];
+            }
+
+            $scope_matchers = [];
+            foreach ($clean as $tag) {
+                if (strtolower($tag['tag']) !== 'sla_scope') {
+                    continue;
+                }
+                if ($tag['tag'] !== 'sla_scope' || $tag['value'] === '') {
+                    throw new RuntimeException('Could not resolve SLA handle collisions: sla_scope must be lowercase and have a non-empty value.');
+                }
+                $scope_matchers[] = [
+                    'tag' => 'sla_scope',
+                    'operator' => 0,
+                    'value' => $tag['value']
+                ];
+            }
+            if (count($scope_matchers) !== 1) {
+                throw new RuntimeException('Could not resolve SLA handle collisions: exactly one sla_scope service tag is required.');
+            }
+
+            return [
+                'kind' => 'colliding',
+                'services' => self::canonicalSlaServiceRefs(
+                    $api->getServicesDetailed($scope_matchers)
+                )
+            ];
+        }
+
+        return null;
+    }
+
+    /**
+     * Strict target registry for every write tool. Name-addressed resources
+     * are resolved to immutable IDs here; ID-only and pure-create tools still
+     * receive an explicit registry marker so a newly added write cannot stage
+     * without choosing a binding policy.
+     */
+    public static function resolveWriteTargetBindings(
+        string $tool_name,
+        array $params,
+        ZabbixApiClient $api
+    ): array {
+        $schemas = self::writeToolSchemas();
+        if (!isset($schemas[$tool_name])
+            || !in_array($tool_name, self::WRITE_BINDING_POLICY_TOOLS, true)) {
+            throw new RuntimeException('Write target binding is not registered for tool "'.$tool_name.'".');
+        }
+
+        $bindings = [
+            'version' => 'zabbix-ai-targets-v1',
+            'policy' => 'direct_id_or_no_existing_target'
+        ];
+        $hostnames = [];
+        $allow_missing_hosts = false;
+        $group_names = [];
+        $allow_missing_groups = false;
+        $template_names = [];
+
+        switch ($tool_name) {
+            case 'create_maintenance':
+                $hostnames = (array) ($params['hostnames'] ?? []);
+                break;
+            case 'create_hostgroup_maintenance':
+                $group_names = (array) ($params['group_names'] ?? []);
+                break;
+            case 'create_tag_scoped_maintenance':
+                $hostnames = (array) ($params['hostnames'] ?? []);
+                $group_names = (array) ($params['group_names'] ?? []);
+                break;
+            case 'add_hosts_to_group':
+                $hostnames = (array) ($params['hostnames'] ?? []);
+                $group_names = [(string) ($params['group_name'] ?? '')];
+                break;
+            case 'enable_host':
+            case 'disable_host':
+            case 'update_host_tags':
+            case 'update_host_inventory':
+            case 'update_host_macros':
+            case 'create_web_scenario':
+            case 'create_web_scenario_trigger':
+                $hostnames = [(string) ($params['hostname'] ?? '')];
+                break;
+            case 'link_template_to_host':
+            case 'unlink_template_from_host':
+                $hostnames = (array) ($params['hostnames'] ?? []);
+                $template_names = [(string) ($params['template'] ?? '')];
+                break;
+            case 'create_host':
+                $hostnames = [(string) ($params['hostname'] ?? '')];
+                $allow_missing_hosts = true;
+                $group_names = (array) ($params['groups'] ?? []);
+                $template_names = (array) ($params['templates'] ?? []);
+                break;
+            case 'create_host_group':
+                $group_names = [(string) ($params['name'] ?? '')];
+                $allow_missing_groups = true;
+                break;
+            case 'add_template_tag':
+                $template_names = [(string) ($params['template'] ?? '')];
+                break;
+            case 'update_trigger':
+                $changes = is_array($params['changes'] ?? null) ? $params['changes'] : [];
+                foreach (['expression', 'recovery_expression'] as $field) {
+                    if (array_key_exists($field, $changes)) {
+                        throw new RuntimeException('Trigger '.$field.' changes are forbidden in AI chat.');
+                    }
+                }
+                break;
+
+            // Immutable-ID targets or pure creates. These are explicit policy
+            // entries, not an implicit default: adding a new write schema now
+            // fails closed until its binding semantics are reviewed.
+            case 'extend_maintenance':
+            case 'end_maintenance':
+            case 'update_item':
+            case 'create_user':
+            case 'acknowledge_problem':
+            case 'suppress_problem':
+            case 'unsuppress_problem':
+            case 'mark_problem_as_cause':
+            case 'mark_problem_as_symptom':
+            case 'change_problem_severity':
+            case 'unacknowledge_problem':
+            case 'add_problem_message':
+            case 'post_evidence_to_event':
+            case 'update_host_interface':
+            case 'create_problem_dashboard':
+            case 'enable_lld_rule':
+            case 'disable_lld_rule':
+            case 'apply_bulk_action':
+            case 'create_sla_service':
+            case 'create_sla':
+            case 'add_trigger_tag':
+                break;
+
+            default:
+                throw new RuntimeException('Write target binding policy is missing for tool "'.$tool_name.'".');
+        }
+
+        if ($hostnames) {
+            $bindings['hosts'] = self::resolveHostBindings($hostnames, $api, $allow_missing_hosts);
+        }
+        if ($group_names) {
+            $bindings['host_groups'] = self::resolveHostGroupBindings($group_names, $api, $allow_missing_groups);
+        }
+        if ($template_names) {
+            $bindings['templates'] = self::resolveTemplateBindings($template_names, $api);
+        }
+
+        if (in_array($tool_name, ['extend_maintenance', 'end_maintenance'], true)) {
+            $maintenanceid = trim((string) ($params['maintenance_id'] ?? ''));
+            $rows = $api->call('maintenance.get', [
+                'maintenanceids' => [$maintenanceid],
+                'output' => ['maintenanceid', 'name', 'active_since', 'active_till'],
+                'selectTimeperiods' => 'extend'
+            ]);
+            if (count($rows) !== 1) {
+                throw new RuntimeException('Maintenance target "'.$maintenanceid.'" was not found uniquely while binding confirmation.');
+            }
+            $period_json = json_encode(
+                $rows[0]['timeperiods'] ?? [],
+                JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION
+            );
+            if ($period_json === false) {
+                throw new RuntimeException('Could not bind the maintenance schedule.');
+            }
+            $bindings['maintenances'] = [$maintenanceid => [
+                'id' => (string) ($rows[0]['maintenanceid'] ?? ''),
+                'name' => (string) ($rows[0]['name'] ?? ''),
+                'active_since' => (string) ($rows[0]['active_since'] ?? ''),
+                'active_till' => (string) ($rows[0]['active_till'] ?? ''),
+                'timeperiods_sha256' => hash('sha256', $period_json)
+            ]];
+        }
+
+        if ($tool_name === 'update_host_macros') {
+            $hostname = trim((string) ($params['hostname'] ?? ''));
+            $host_binding = $bindings['hosts'][$hostname] ?? null;
+            $hostid = is_array($host_binding) ? trim((string) ($host_binding['id'] ?? '')) : '';
+            if ($hostid === '') {
+                throw new RuntimeException('Could not bind host macros because the host target was not resolved.');
+            }
+            $rows = $api->call('usermacro.get', [
+                'hostids' => [$hostid],
+                'output' => ['hostmacroid', 'hostid', 'macro', 'type', 'automatic']
+            ]);
+            $existing = [];
+            foreach ($rows as $row) {
+                $existing[(string) ($row['macro'] ?? '')] = [
+                    'id' => (string) ($row['hostmacroid'] ?? ''),
+                    'hostid' => (string) ($row['hostid'] ?? $hostid),
+                    'type' => (int) ($row['type'] ?? 0),
+                    'automatic' => (int) ($row['automatic'] ?? 0)
+                ];
+            }
+            $macro_bindings = [];
+            $has_existing_macro = false;
+            $has_new_macro = false;
+            foreach ((array) ($params['macros'] ?? []) as $macro) {
+                if (!is_array($macro)) {
+                    continue;
+                }
+                $macro_name = trim((string) ($macro['macro'] ?? ''));
+                if ($macro_name !== '') {
+                    if (isset($existing[$macro_name]) && (int) ($existing[$macro_name]['type'] ?? 0) !== 0) {
+                        throw new RuntimeException('Host macro "'.$macro_name.'" already exists as secret/vault type and cannot be changed through AI chat.');
+                    }
+                    if (isset($existing[$macro_name]) && (int) ($existing[$macro_name]['automatic'] ?? 0) !== 0) {
+                        throw new RuntimeException('Host macro "'.$macro_name.'" is discovery-managed and cannot be changed through AI chat.');
+                    }
+                    if (isset($existing[$macro_name])) {
+                        $has_existing_macro = true;
+                    }
+                    else {
+                        $has_new_macro = true;
+                    }
+                    $macro_bindings[$macro_name] = $existing[$macro_name] ?? ['state' => 'absent'];
+                }
+            }
+            if ($has_existing_macro && $has_new_macro) {
+                throw new RuntimeException(
+                    'A macro action cannot mix new and existing macros. Request separate confirmed actions for creates and updates.'
+                );
+            }
+            ksort($macro_bindings, SORT_STRING);
+            $bindings['host_macros'] = $macro_bindings;
+        }
+
+        if (in_array($tool_name, ['create_web_scenario', 'create_web_scenario_trigger'], true)) {
+            $hostname = trim((string) ($params['hostname'] ?? ''));
+            $host_binding = $bindings['hosts'][$hostname] ?? null;
+            $hostid = is_array($host_binding) ? trim((string) ($host_binding['id'] ?? '')) : '';
+            $scenario_name = trim((string) ($params[$tool_name === 'create_web_scenario' ? 'name' : 'scenario_name'] ?? ''));
+            if ($hostid === '' || $scenario_name === '') {
+                throw new RuntimeException('Could not bind the web-scenario target.');
+            }
+            $rows = $api->call('httptest.get', [
+                'hostids' => [$hostid],
+                'output' => ['httptestid', 'hostid', 'name'],
+                'filter' => ['name' => [$scenario_name]]
+            ]);
+            $scenario_refs = [];
+            foreach ($rows as $row) {
+                $scenario_refs[] = [
+                    'id' => (string) ($row['httptestid'] ?? ''),
+                    'hostid' => (string) ($row['hostid'] ?? $hostid),
+                    'name' => (string) ($row['name'] ?? '')
+                ];
+            }
+            usort($scenario_refs, static function(array $a, array $b): int {
+                return strnatcmp($a['id'], $b['id']);
+            });
+            if ($tool_name === 'create_web_scenario_trigger' && count($scenario_refs) !== 1) {
+                throw new RuntimeException('The web-scenario trigger target must resolve to exactly one scenario.');
+            }
+            $bindings['web_scenarios'] = [$hostname.' / '.$scenario_name => $scenario_refs];
+        }
+
+        if ($tool_name === 'create_sla_service') {
+            $name = trim((string) ($params['name'] ?? ''));
+            $existing = $api->getServicesByExactName($name, 50);
+            $name_refs = [];
+            foreach ($existing as $service) {
+                $name_refs[] = [
+                    'id' => (string) ($service['serviceid'] ?? ''),
+                    'name' => (string) ($service['name'] ?? '')
+                ];
+            }
+            usort($name_refs, static function(array $a, array $b): int {
+                return strnatcmp($a['id'], $b['id']);
+            });
+            $bindings['new_service_names'] = [$name => $name_refs];
+
+            $service_ids = [];
+            $parent = trim((string) ($params['parent_service'] ?? ''));
+            if ($parent !== '') {
+                if (preg_match('/^\d+$/D', $parent)) {
+                    $service_ids[] = $parent;
+                }
+                else {
+                    $parents = $api->getServicesByExactName($parent, 50);
+                    if (count($parents) !== 1) {
+                        throw new RuntimeException('The parent service must resolve to exactly one immutable ID before confirmation.');
+                    }
+                    $service_ids[] = (string) ($parents[0]['serviceid'] ?? '');
+                }
+            }
+            foreach ((array) ($params['child_serviceids'] ?? []) as $child_id) {
+                $service_ids[] = trim((string) $child_id);
+            }
+            $service_ids = array_values(array_unique(array_filter($service_ids, static function($id) {
+                return preg_match('/^\d+$/D', (string) $id) === 1;
+            })));
+            if ($service_ids) {
+                $names = $api->getServiceNamesByIds($service_ids);
+                if (count($names) !== count($service_ids)) {
+                    throw new RuntimeException('One or more SLA parent/child service targets disappeared before confirmation.');
+                }
+                $service_bindings = [];
+                foreach ($service_ids as $service_id) {
+                    $service_bindings[$service_id] = (string) $names[$service_id];
+                }
+                ksort($service_bindings, SORT_NATURAL);
+                $bindings['sla_hierarchy'] = $service_bindings;
+            }
+        }
+
+        return $bindings;
+    }
+
+    private static function resolveHostBindings(array $names, ZabbixApiClient $api, bool $allow_missing): array {
+        $bindings = [];
+        $seen_ids = [];
+        foreach (self::uniqueBindingNames($names) as $name) {
+            $rows = $api->call('host.get', [
+                'output' => ['hostid', 'host', 'name'],
+                'filter' => ['host' => [$name]]
+            ]);
+            if (!$rows) {
+                if (!$allow_missing) {
+                    throw new RuntimeException('Host "'.$name.'" was not found while binding the confirmation target.');
+                }
+                $bindings[$name] = ['state' => 'absent'];
+                continue;
+            }
+            if (count($rows) !== 1) {
+                throw new RuntimeException('Host "'.$name.'" did not resolve uniquely while binding the confirmation target.');
+            }
+            $hostid = (string) ($rows[0]['hostid'] ?? '');
+            if ($hostid === '' || isset($seen_ids[$hostid])) {
+                throw new RuntimeException(
+                    $hostid === ''
+                        ? 'Host "'.$name.'" resolved without an ID.'
+                        : 'Multiple host names resolved to the same target ID '.$hostid.'.'
+                );
+            }
+            $seen_ids[$hostid] = true;
+            $bindings[$name] = [
+                'id' => $hostid,
+                'technical_name' => (string) ($rows[0]['host'] ?? ''),
+                'visible_name' => (string) ($rows[0]['name'] ?? '')
+            ];
+        }
+
+        return $bindings;
+    }
+
+    private static function resolveHostGroupBindings(array $names, ZabbixApiClient $api, bool $allow_missing): array {
+        $bindings = [];
+        foreach (self::uniqueBindingNames($names) as $name) {
+            $rows = $api->call('hostgroup.get', [
+                'output' => ['groupid', 'name'],
+                'filter' => ['name' => [$name]]
+            ]);
+            if (!$rows) {
+                if (!$allow_missing) {
+                    throw new RuntimeException('Host group "'.$name.'" was not found while binding the confirmation target.');
+                }
+                $bindings[$name] = ['state' => 'absent'];
+                continue;
+            }
+            if (count($rows) !== 1) {
+                throw new RuntimeException('Host group "'.$name.'" did not resolve uniquely while binding the confirmation target.');
+            }
+            $bindings[$name] = [
+                'id' => (string) ($rows[0]['groupid'] ?? ''),
+                'name' => (string) ($rows[0]['name'] ?? '')
+            ];
+        }
+
+        return $bindings;
+    }
+
+    private static function resolveTemplateBindings(array $names, ZabbixApiClient $api): array {
+        $bindings = [];
+        $seen_ids = [];
+        foreach (self::uniqueBindingNames($names) as $name) {
+            $templateid = $api->getTemplateIdByName($name);
+            if ($templateid === null || $templateid === '') {
+                throw new RuntimeException('Template "'.$name.'" was not found uniquely while binding the confirmation target.');
+            }
+            $rows = $api->call('template.get', [
+                'templateids' => [$templateid],
+                'output' => ['templateid', 'host', 'name']
+            ]);
+            if (count($rows) !== 1) {
+                throw new RuntimeException('Template "'.$name.'" disappeared while binding the confirmation target.');
+            }
+            $resolved_id = (string) ($rows[0]['templateid'] ?? '');
+            if ($resolved_id === '' || isset($seen_ids[$resolved_id])) {
+                throw new RuntimeException(
+                    $resolved_id === ''
+                        ? 'Template "'.$name.'" resolved without an ID.'
+                        : 'Multiple template names resolved to the same target ID '.$resolved_id.'.'
+                );
+            }
+            $seen_ids[$resolved_id] = true;
+            $bindings[$name] = [
+                'id' => $resolved_id,
+                'technical_name' => (string) ($rows[0]['host'] ?? ''),
+                'visible_name' => (string) ($rows[0]['name'] ?? '')
+            ];
+        }
+
+        return $bindings;
+    }
+
+    private static function uniqueBindingNames(array $names): array {
+        $out = [];
+        foreach ($names as $name) {
+            $name = trim((string) $name);
+            if ($name !== '') {
+                $out[$name] = true;
+            }
+        }
+        $names = array_keys($out);
+        sort($names, SORT_STRING);
+
+        return $names;
+    }
+
+    private static function canonicalSlaServiceRefs(array $services): array {
+        $refs = [];
+        foreach ($services as $service) {
+            $serviceid = trim((string) ($service['serviceid'] ?? ''));
+            if ($serviceid === '') {
+                throw new RuntimeException('SLA scope resolution returned a service without an ID.');
+            }
+            $refs[] = [
+                'serviceid' => $serviceid,
+                'name' => (string) ($service['name'] ?? ''),
+                'algorithm' => (int) ($service['algorithm'] ?? 0)
+            ];
+        }
+        usort($refs, static function(array $a, array $b): int {
+            return strnatcmp($a['serviceid'], $b['serviceid']);
+        });
+
+        return $refs;
+    }
+
+    private static function assertConfirmedSlaScope(string $kind, array $services, $confirmed_scope): void {
+        if (!is_array($confirmed_scope)
+            || (string) ($confirmed_scope['kind'] ?? '') !== $kind
+            || !is_array($confirmed_scope['services'] ?? null)) {
+            throw new RuntimeException('The SLA action has no valid server-confirmed scope. Review a fresh preview.');
+        }
+
+        $current = [
+            'kind' => $kind,
+            'services' => self::canonicalSlaServiceRefs($services)
+        ];
+        $expected = [
+            'kind' => $kind,
+            'services' => self::canonicalSlaServiceRefs($confirmed_scope['services'])
+        ];
+        if ($current !== $expected) {
+            throw new RuntimeException('SLA scope changed after confirmation; review a fresh preview.');
+        }
+    }
+
     /**
      * Execute a tool call and return the result as a formatted string.
      *
      * @param array $context Optional execution context. Recognized keys:
      *   - 'config' (array)         Module config, required for tools that persist files.
      *   - 'server_session' (string) Server session id for binding generated artifacts.
+     *   - 'netbox_client' (NetBoxClient) Optional shared NetBox client. Interactive
+     *     NetBox results are intersected with hosts visible through $zabbix_api.
      */
     public static function execute(string $tool_name, array $params, ZabbixApiClient $zabbix_api, array $context = []): string {
         switch ($tool_name) {
@@ -1513,10 +3161,10 @@ class ZabbixActionExecutor {
                 return self::executeListZabbixHosts($params, $zabbix_api);
 
             case 'list_netbox_devices':
-                return self::executeListNetBoxDevices($params, $context);
+                return self::executeListNetBoxDevices($params, $zabbix_api, $context);
 
             case 'get_netbox_info':
-                return self::executeGetNetBoxInfo($params, $context);
+                return self::executeGetNetBoxInfo($params, $zabbix_api, $context);
 
             case 'get_host_info':
                 return self::executeGetHostInfo($params, $zabbix_api);
@@ -1594,7 +3242,7 @@ class ZabbixActionExecutor {
                 return self::executeUpdateHostInterface($params, $zabbix_api);
 
             case 'create_web_scenario':
-                return self::executeCreateWebScenario($params, $zabbix_api);
+                return self::executeCreateWebScenario($params, $zabbix_api, $context);
 
             case 'create_web_scenario_trigger':
                 return self::executeCreateWebScenarioTrigger($params, $zabbix_api);
@@ -1616,9 +3264,6 @@ class ZabbixActionExecutor {
 
             case 'create_host':
                 return self::executeCreateHost($params, $zabbix_api);
-
-            case 'create_trigger':
-                return self::executeCreateTrigger($params, $zabbix_api);
 
             case 'get_proxy_assigned_hosts':
                 return self::executeGetProxyAssignedHosts($params, $zabbix_api);
@@ -1739,10 +3384,10 @@ class ZabbixActionExecutor {
                 return self::executeGetServices($params, $zabbix_api);
 
             case 'create_sla_service':
-                return self::executeCreateSlaService($params, $zabbix_api);
+                return self::executeCreateSlaService($params, $zabbix_api, $context);
 
             case 'create_sla':
-                return self::executeCreateSla($params, $zabbix_api);
+                return self::executeCreateSla($params, $zabbix_api, $context);
 
             case 'add_template_tag':
                 return self::executeAddTemplateTag($params, $zabbix_api);
@@ -2196,7 +3841,7 @@ class ZabbixActionExecutor {
         $filters = [
             'host_group' => (string) ($params['host_group'] ?? ''),
             'search' => (string) ($params['search'] ?? ''),
-            'status' => (string) ($params['status'] ?? ''),
+            'status' => (string) ($params['status'] ?? 'enabled'),
             'tag' => (string) ($params['tag'] ?? ''),
             'limit' => (int) ($params['limit'] ?? 200)
         ];
@@ -2230,7 +3875,7 @@ class ZabbixActionExecutor {
      * Bulk-list NetBox VMs / devices with optional filters. Used by the AI
      * to build inventory and capacity reports.
      */
-    private static function executeListNetBoxDevices(array $params, array $context): string {
+    private static function executeListNetBoxDevices(array $params, ZabbixApiClient $api, array $context): string {
         $netbox = $context['netbox_client'] ?? null;
 
         if (!($netbox instanceof NetBoxClient)) {
@@ -2249,7 +3894,16 @@ class ZabbixActionExecutor {
         ];
 
         try {
-            $rows = $netbox->listDevicesAndVMs($filters);
+            $visible_hosts = $api->getHosts();
+            $allowed_hostnames = [];
+            foreach ($visible_hosts as $host) {
+                $name = trim((string) ($host['host'] ?? ''));
+                if ($name !== '') {
+                    $allowed_hostnames[] = $name;
+                }
+            }
+
+            $rows = $netbox->listDevicesAndVMs($filters, $allowed_hostnames);
         }
         catch (\Throwable $e) {
             return 'Error listing NetBox VMs/devices: '.$e->getMessage();
@@ -2318,7 +3972,7 @@ class ZabbixActionExecutor {
     /**
      * Deep-dive on a single host in NetBox (VM or device).
      */
-    private static function executeGetNetBoxInfo(array $params, array $context): string {
+    private static function executeGetNetBoxInfo(array $params, ZabbixApiClient $api, array $context): string {
         $netbox = $context['netbox_client'] ?? null;
 
         if (!($netbox instanceof NetBoxClient)) {
@@ -2332,6 +3986,9 @@ class ZabbixActionExecutor {
         }
 
         try {
+            if ($api->getHostIdByName($hostname) === null) {
+                return 'No Zabbix-visible host matched "'.$hostname.'"; NetBox lookup was not performed.';
+            }
             $context_text = $netbox->getContextForHostname($hostname);
         }
         catch (\Throwable $e) {
@@ -3363,12 +5020,12 @@ class ZabbixActionExecutor {
 
         $services = $impact['services'] ?? [];
         if (!$services) {
-            return 'No services are configured. The Services module may be unused on this Zabbix instance.';
+            return 'No services map to this event\'s tags. Either no services are configured, or none has problem tags matching the event.';
         }
 
         $status_labels = ['-1' => 'OK', '0' => 'Not classified', '1' => 'Information', '2' => 'Warning', '3' => 'Average', '4' => 'High', '5' => 'Disaster'];
 
-        $lines = ['Service tree ('.count($services).' service(s)):', ''];
+        $lines = ['Services mapped to this event ('.count($services).' service(s)):', ''];
 
         foreach ($services as $svc) {
             $status = $status_labels[(string) ($svc['status'] ?? '-1')] ?? $svc['status'];
@@ -3737,14 +5394,11 @@ class ZabbixActionExecutor {
                 return 'Error: "'.$name.'" is not a valid Zabbix user macro name (expected {$NAME}).';
             }
             $type = isset($m['type']) ? (int) $m['type'] : 0;
-            if (!in_array($type, [0, 1, 2], true)) {
-                return 'Error: macro "'.$name.'" has invalid type '.$type.' (0=text, 1=secret, 2=vault).';
+            if ($type !== 0) {
+                return 'Error: macro "'.$name.'" is secret/vault type. AI chat accepts only type 0; set secret values through a trusted Zabbix/Vault workflow.';
             }
             if (!array_key_exists('value', $m)) {
                 return 'Error: macro "'.$name.'" is missing a value.';
-            }
-            if (($type === 1 || $type === 2) && trim((string) $m['value']) === '') {
-                return 'Error: refusing to set secret/vault macro "'.$name.'" to an empty value.';
             }
         }
 
@@ -3816,13 +5470,19 @@ class ZabbixActionExecutor {
         return 'Interface '.$interfaceid.' updated: '.implode(', ', $desc).'.';
     }
 
-    private static function executeCreateWebScenario(array $params, ZabbixApiClient $api): string {
+    private static function executeCreateWebScenario(array $params, ZabbixApiClient $api, array $context): string {
         $hostname = trim((string) ($params['hostname'] ?? ($params['host'] ?? '')));
         $name = trim((string) ($params['name'] ?? ''));
         $url = trim((string) ($params['url'] ?? ''));
         if ($hostname === '' || $name === '' || $url === '') {
             return 'Error: hostname, name and url are required.';
         }
+
+        $config = is_array($context['config'] ?? null) ? $context['config'] : [];
+        Util::assertAllowedWebScenarioUrl(
+            $url,
+            $config['zabbix_actions']['web_scenario_allowed_origins'] ?? ''
+        );
 
         $opts = [
             'delay' => (string) ($params['delay'] ?? '60s'),
@@ -3835,32 +5495,8 @@ class ZabbixActionExecutor {
 
         $api->createWebScenario($hostname, $name, $url, $opts);
 
-        $msg = 'Web scenario "'.$name.'" created on "'.$hostname.'" — '.$url.' every '.$opts['delay'].', expecting HTTP '.$opts['status_codes'].'.';
-
-        if (Util::truthy($params['add_failure_trigger'] ?? false)) {
-            $priority = 3;
-            if (isset($params['trigger_priority']) && $params['trigger_priority'] !== '') {
-                $tp = (int) $params['trigger_priority'];
-                if ($tp >= 0 && $tp <= 5) {
-                    $priority = $tp;
-                }
-            }
-            // The scenario already exists; if the trigger fails, keep the
-            // scenario-created message and just note the trigger problem.
-            try {
-                $tname = self::webScenarioTriggerName($hostname, $name);
-                $api->createTrigger($tname, self::webScenarioFailExpression($hostname, $name), [
-                    'priority' => $priority,
-                    'comments' => 'Web scenario "'.$name.'" failed. See web.test.error['.$name.'] for the error.'
-                ]);
-                $msg .= ' A failure trigger "'.$tname.'" was also created (severity '.$priority.').';
-            }
-            catch (\Throwable $e) {
-                $msg .= ' (The scenario was created, but the failure trigger could not be: '.$e->getMessage().')';
-            }
-        }
-
-        return $msg;
+        return 'Web scenario "'.$name.'" created on "'.$hostname.'" — '.$url.' every '.$opts['delay']
+            .', expecting HTTP '.$opts['status_codes'].' (redirects disabled). Use create_web_scenario_trigger as a separate confirmed action if alerting is required.';
     }
 
     private static function executeCreateWebScenarioTrigger(array $params, ZabbixApiClient $api): string {
@@ -3883,6 +5519,8 @@ class ZabbixActionExecutor {
             }
             $priority = $p;
         }
+
+        $api->assertConfirmedWebScenario($hostname, $scenario);
 
         $result = $api->createTrigger($name, self::webScenarioFailExpression($hostname, $scenario), [
             'priority' => $priority,
@@ -3986,8 +5624,7 @@ class ZabbixActionExecutor {
             'templates' => (isset($params['templates']) && is_array($params['templates'])) ? $params['templates'] : [],
             'interface_ip' => (string) ($params['interface_ip'] ?? ''),
             'interface_dns' => (string) ($params['interface_dns'] ?? ''),
-            'interface_port' => (string) ($params['interface_port'] ?? '10050'),
-            'create_missing_groups' => Util::truthy($params['create_missing_groups'] ?? false)
+            'interface_port' => (string) ($params['interface_port'] ?? '10050')
         ];
 
         $result = $api->createHost($hostname, $groups, $opts);
@@ -3998,34 +5635,6 @@ class ZabbixActionExecutor {
             $msg .= '. Templates: '.implode(', ', array_map('strval', $opts['templates']));
         }
         return $msg.'.';
-    }
-
-    private static function executeCreateTrigger(array $params, ZabbixApiClient $api): string {
-        $desc = trim((string) ($params['description'] ?? ''));
-        $expr = trim((string) ($params['expression'] ?? ''));
-        if ($desc === '' || $expr === '') {
-            return 'Error: both description (trigger name) and expression are required.';
-        }
-
-        $opts = [];
-        if (isset($params['priority']) && $params['priority'] !== '') {
-            $p = (int) $params['priority'];
-            if ($p < 0 || $p > 5) {
-                return 'Error: priority must be between 0 (Not classified) and 5 (Disaster).';
-            }
-            $opts['priority'] = $p;
-        }
-        if (!empty($params['comments'])) {
-            $opts['comments'] = (string) $params['comments'];
-        }
-        if (!empty($params['recovery_expression'])) {
-            $opts['recovery_expression'] = (string) $params['recovery_expression'];
-        }
-
-        $result = $api->createTrigger($desc, $expr, $opts);
-        $id = is_array($result) ? (string) ($result['triggerids'][0] ?? '') : '';
-
-        return 'Trigger "'.$desc.'" created'.($id !== '' ? ' (triggerid '.$id.')' : '').'.';
     }
 
     private static function executeGetProxyAssignedHosts(array $params, ZabbixApiClient $api): string {
@@ -4757,6 +6366,9 @@ class ZabbixActionExecutor {
         $data_collection = array_key_exists('data_collection', $params)
             ? (bool) $params['data_collection']
             : true;
+        if (!$data_collection) {
+            return 'Error: tag-scoped maintenance requires data_collection=true. Zabbix 7.0 rejects problem tags on no-data maintenance, where tag scoping would have no effect.';
+        }
 
         $tags_evaltype = isset($params['tags_evaltype']) ? (int) $params['tags_evaltype'] : 0;
 
@@ -4785,11 +6397,11 @@ class ZabbixActionExecutor {
 
         if (!$maintenances) {
             return $only_active
-                ? 'No maintenance windows are currently active.'
+                ? 'No maintenance records have an active date envelope at this time.'
                 : 'No maintenance windows are configured.';
         }
 
-        $lines = [count($maintenances).' maintenance window(s):', ''];
+        $lines = [count($maintenances).' maintenance record(s)'.($only_active ? ' inside their active date envelope' : '').':', ''];
 
         foreach ($maintenances as $m) {
             $start = (int) ($m['active_since'] ?? 0);
@@ -4817,6 +6429,12 @@ class ZabbixActionExecutor {
             }
             if ($tag_strs) {
                 $lines[] = '  Tag scope: '.implode(', ', $tag_strs);
+            }
+            foreach ((array) ($m['timeperiods'] ?? []) as $period) {
+                if ((int) ($period['timeperiod_type'] ?? 0) !== 0) {
+                    $lines[] = '  Note: recurring schedule; this listing does not evaluate whether an occurrence is active at this exact minute.';
+                    break;
+                }
             }
         }
 
@@ -4852,7 +6470,7 @@ class ZabbixActionExecutor {
             return 'Error: maintenance_id is required.';
         }
 
-        $delete = !empty($params['delete']);
+        $delete = Util::truthy($params['delete'] ?? false);
 
         $result = $api->endMaintenance($maintenance_id, $delete);
 
@@ -5281,7 +6899,7 @@ class ZabbixActionExecutor {
         return implode("\n", $lines);
     }
 
-    private static function executeCreateSlaService(array $params, ZabbixApiClient $api): string {
+    private static function executeCreateSlaService(array $params, ZabbixApiClient $api, array $context = []): string {
         $name = trim((string) ($params['name'] ?? ''));
         if ($name === '') {
             return 'Error: name is required.';
@@ -5422,25 +7040,54 @@ class ZabbixActionExecutor {
         $parent_ids = [];
         $parent_label = '';
         $parent_ref = trim((string) ($params['parent_service'] ?? ''));
+        $confirmed_targets = is_array($context['confirmed_target_bindings'] ?? null)
+            ? $context['confirmed_target_bindings']
+            : [];
+        $confirmed_hierarchy = is_array($confirmed_targets['sla_hierarchy'] ?? null)
+            ? $confirmed_targets['sla_hierarchy']
+            : [];
         if ($parent_ref !== '') {
             try {
-                if (preg_match('/^\d+$/', $parent_ref)) {
+                $parent_is_id = preg_match('/^\d+$/D', $parent_ref) === 1;
+                if ($parent_is_id) {
                     $names = $api->getServiceNamesByIds([$parent_ref]);
-                    if (isset($names[$parent_ref])) {
-                        $parent_ids = [$parent_ref];
-                        $parent_label = $names[$parent_ref].' (ID '.$parent_ref.')';
+                    if (!isset($names[$parent_ref])) {
+                        return 'Error: confirmed parent service ID '.$parent_ref.' no longer exists. Review a fresh preview.';
                     }
+                    if ($confirmed_hierarchy
+                        && (!array_key_exists($parent_ref, $confirmed_hierarchy)
+                            || (string) $confirmed_hierarchy[$parent_ref] !== (string) $names[$parent_ref])) {
+                        return 'Error: confirmed parent service ID '.$parent_ref.' changed after preview. Review a fresh preview.';
+                    }
+                    $parent_ids = [$parent_ref];
+                    $parent_label = $names[$parent_ref].' (ID '.$parent_ref.')';
                 }
-                if (!$parent_ids) {
-                    $candidates = $api->getServicesByExactName($parent_ref);
+                else {
+                    $bound_parent_ids = [];
+                    foreach ($confirmed_hierarchy as $service_id => $service_name) {
+                        if ((string) $service_name === $parent_ref) {
+                            $bound_parent_ids[] = (string) $service_id;
+                        }
+                    }
+                    if ($confirmed_hierarchy && count($bound_parent_ids) !== 1) {
+                        return 'Error: confirmed parent service "'.$parent_ref.'" no longer resolves uniquely. Review a fresh preview.';
+                    }
+                    $candidates = $confirmed_hierarchy
+                        ? [['serviceid' => $bound_parent_ids[0], 'name' => $parent_ref]]
+                        : $api->getServicesByExactName($parent_ref);
                     if (!$candidates) {
-                        return 'Error: parent service "'.$parent_ref.'" not found (checked as '.(preg_match('/^\d+$/', $parent_ref) ? 'serviceid and ' : '').'exact name). Create it first (a parent needs child_serviceids, not problem_tags) or find it with get_services.';
+                        return 'Error: parent service "'.$parent_ref.'" not found by exact name. Create it first (a parent needs child_serviceids, not problem_tags) or find it with get_services.';
                     }
                     if (count($candidates) > 1) {
                         return 'Error: '.count($candidates).' services are named "'.$parent_ref.'": '.self::formatServiceRefs($candidates, 5).'. Pass the serviceid of the intended parent instead of the name.';
                     }
                     $parent_ids = [(string) $candidates[0]['serviceid']];
-                    $parent_label = $candidates[0]['name'].' (ID '.$candidates[0]['serviceid'].')';
+                    $current_parent = $api->getServiceNamesByIds($parent_ids);
+                    if (!isset($current_parent[$parent_ids[0]])
+                        || (string) $current_parent[$parent_ids[0]] !== (string) $candidates[0]['name']) {
+                        return 'Error: confirmed parent service "'.$parent_ref.'" changed after preview. Review a fresh preview.';
+                    }
+                    $parent_label = $current_parent[$parent_ids[0]].' (ID '.$parent_ids[0].')';
                 }
 
                 // A parent that is itself a LEAF (has problem_tags) cannot
@@ -5471,6 +7118,14 @@ class ZabbixActionExecutor {
             $missing = array_diff($child_ids, array_keys($found));
             if ($missing) {
                 return 'Error: child service ID(s) not found: '.implode(', ', $missing).'. Create the child services first (create_sla_service per host), then the parent with their serviceids.';
+            }
+            if ($confirmed_hierarchy) {
+                foreach ($child_ids as $cid) {
+                    if (!array_key_exists($cid, $confirmed_hierarchy)
+                        || (string) $confirmed_hierarchy[$cid] !== (string) $found[$cid]) {
+                        return 'Error: confirmed child service ID '.$cid.' changed after preview. Review a fresh preview.';
+                    }
+                }
             }
             foreach ($child_ids as $cid) {
                 $child_names[] = $found[$cid].' (ID '.$cid.')';
@@ -5529,16 +7184,47 @@ class ZabbixActionExecutor {
         if (count($scope_matchers) > 1) {
             return 'Error: service_tags must contain exactly ONE sla_scope entry — the single SLA selection handle for this service; got '.count($scope_matchers).'. Extra identity belongs in descriptive tags (service, env, host, …), not in additional sla_scope values.';
         }
+        try {
+            // Always resolve holders, including for the explicit sharing
+            // override. This live set is compared with the confirmed preview
+            // immediately before service.create.
+            $holders = $api->getServicesDetailed($scope_matchers);
+        }
+        catch (\Throwable $e) {
+            return 'Error: could not verify sla_scope uniqueness (service.get failed: '.$e->getMessage().'). Refusing to create a service with an unverified SLA handle.';
+        }
+        if (array_key_exists('confirmed_sla_scope', $context)) {
+            self::assertConfirmedSlaScope('colliding', $holders, $context['confirmed_sla_scope']);
+        }
         if (!self::truthyParam($params, 'allow_shared_service_tag')) {
-            try {
-                $holders = $api->getServicesDetailed($scope_matchers);
-            }
-            catch (\Throwable $e) {
-                return 'Error: could not verify sla_scope uniqueness (service.get failed: '.$e->getMessage().'). Refusing to create a service with an unverified SLA handle.';
-            }
             if ($holders) {
                 return 'Error: the sla_scope value you chose is already carried by '.count($holders).' existing service(s): '.self::formatServiceRefs($holders, 10).'. '
                     .'An SLA selecting this tag would measure those too. Pick a UNIQUE sla_scope value (e.g. add the environment/host: filezilla.prod.prod-app-01), or — only if one SLA should deliberately cover this service AND the listed ones — retry with allow_shared_service_tag=true.';
+            }
+        }
+
+        $confirmed_name_sets = is_array($confirmed_targets['new_service_names'] ?? null)
+            ? $confirmed_targets['new_service_names']
+            : [];
+        if (array_key_exists($name, $confirmed_name_sets)) {
+            try {
+                $live_same_name = $api->getServicesByExactName($name, 50);
+            }
+            catch (\Throwable $e) {
+                return 'Error: could not revalidate the confirmed service name immediately before creation.';
+            }
+            $live_name_refs = [];
+            foreach ($live_same_name as $service) {
+                $live_name_refs[] = [
+                    'id' => (string) ($service['serviceid'] ?? ''),
+                    'name' => (string) ($service['name'] ?? '')
+                ];
+            }
+            usort($live_name_refs, static function(array $a, array $b): int {
+                return strnatcmp($a['id'], $b['id']);
+            });
+            if ($live_name_refs !== $confirmed_name_sets[$name]) {
+                return 'Error: a service named "'.$name.'" appeared or changed after confirmation. Review a fresh preview.';
             }
         }
 
@@ -5595,7 +7281,7 @@ class ZabbixActionExecutor {
         return implode("\n", $lines);
     }
 
-    private static function executeCreateSla(array $params, ZabbixApiClient $api): string {
+    private static function executeCreateSla(array $params, ZabbixApiClient $api, array $context = []): string {
         $name = trim((string) ($params['name'] ?? ''));
         if ($name === '') {
             return 'Error: name is required.';
@@ -5682,6 +7368,10 @@ class ZabbixActionExecutor {
         }
         catch (\Throwable $e) {
             return 'Error: could not resolve which services these service_tags match (service.get failed: '.$e->getMessage().'). Refusing to create an SLA with an unverified scope.';
+        }
+
+        if (array_key_exists('confirmed_sla_scope', $context)) {
+            self::assertConfirmedSlaScope('matched', $matched, $context['confirmed_sla_scope']);
         }
 
         if (!$matched) {
@@ -5789,7 +7479,7 @@ class ZabbixActionExecutor {
         $lines[] = 'Timezone: '.($r['timezone'] ?? 'UTC');
         $lines[] = 'Status: '.(((int) ($r['status'] ?? 1)) === 1 ? 'enabled' : 'disabled');
         if (!empty($r['effective_date'])) {
-            $lines[] = 'Effective from: '.date('Y-m-d', (int) $r['effective_date']);
+            $lines[] = 'Effective from: '.gmdate('Y-m-d', (int) $r['effective_date']);
         }
 
         $st = [];
@@ -5861,6 +7551,11 @@ class ZabbixActionExecutor {
 
         if (!$changes) {
             return 'Error: changes parameter is required.';
+        }
+        foreach (['expression', 'recovery_expression'] as $field) {
+            if (array_key_exists($field, $changes)) {
+                throw new RuntimeException('Trigger '.$field.' changes are forbidden in AI chat; edit expressions directly in Zabbix.');
+            }
         }
 
         // Safety: fetch current trigger state before updating so we can report what changed.
@@ -5935,11 +7630,11 @@ class ZabbixActionExecutor {
             return 'Error: username parameter is required.';
         }
 
-        $passwd = (string) ($params['passwd'] ?? '');
-
-        if (strlen($passwd) < 8) {
-            return 'Error: passwd must be at least 8 characters.';
+        if (array_key_exists('passwd', $params)) {
+            return 'Error: passwords are never accepted from AI parameters. The server generates a temporary password after confirmation.';
         }
+
+        $passwd = self::generateTemporaryPassword();
 
         $usrgrpids = (array) ($params['usrgrpids'] ?? []);
 
@@ -5958,7 +7653,34 @@ class ZabbixActionExecutor {
 
         $userid = $result['userids'][0] ?? 'unknown';
 
-        return 'User "'.$username.'" created successfully with ID: '.$userid;
+        return self::SENSITIVE_OUTPUT_SENTINEL
+            .'User "'.$username.'" created successfully with ID '.$userid.'.' ."\n\n"
+            .'Temporary password (shown once): `'.$passwd.'`' ."\n\n"
+            .'Copy it now, deliver it through an approved secure channel, and rotate it after first use. This value was generated server-side and was not sent to the AI provider or written to the audit payload.';
+    }
+
+    private static function generateTemporaryPassword(int $length = 24): string {
+        $lower = 'abcdefghijkmnopqrstuvwxyz';
+        $upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+        $digits = '23456789';
+        $symbols = '!@#$%*-_=+';
+        $all = $lower.$upper.$digits.$symbols;
+        $chars = [
+            $lower[random_int(0, strlen($lower) - 1)],
+            $upper[random_int(0, strlen($upper) - 1)],
+            $digits[random_int(0, strlen($digits) - 1)],
+            $symbols[random_int(0, strlen($symbols) - 1)]
+        ];
+
+        while (count($chars) < max(16, $length)) {
+            $chars[] = $all[random_int(0, strlen($all) - 1)];
+        }
+        for ($i = count($chars) - 1; $i > 0; $i--) {
+            $j = random_int(0, $i);
+            [$chars[$i], $chars[$j]] = [$chars[$j], $chars[$i]];
+        }
+
+        return implode('', $chars);
     }
 
     private static function executeAcknowledgeProblem(array $params, ZabbixApiClient $api): string {
@@ -6005,9 +7727,7 @@ class ZabbixActionExecutor {
             return 'Error: group_name parameter is required.';
         }
 
-        $create_group = !empty($params['create_group']);
-
-        $result = $api->addHostsToGroup($hostnames, $group_name, $create_group);
+        $result = $api->addHostsToGroup($hostnames, $group_name);
 
         $lines = [];
 

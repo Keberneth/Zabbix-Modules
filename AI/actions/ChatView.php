@@ -6,6 +6,7 @@ require_once __DIR__.'/../lib/bootstrap.php';
 
 use CController,
     CControllerResponseData,
+    CWebUser,
     Modules\AI\Lib\AuditLogger,
     Modules\AI\Lib\Config,
     Modules\AI\Lib\Util,
@@ -26,7 +27,7 @@ class ChatView extends CController {
     }
 
     protected function checkPermissions(): bool {
-        return $this->getUserType() >= USER_TYPE_ZABBIX_USER;
+        return $this->getUserType() >= USER_TYPE_ZABBIX_USER && !CWebUser::isGuest();
     }
 
 

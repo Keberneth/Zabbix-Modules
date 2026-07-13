@@ -42,6 +42,13 @@ class AuditLogger {
                 unset($entry['security']['mapping_details']);
             }
 
+            // Redaction aliases are not a complete secret scrubber: tool JSON,
+            // provider errors and nested metadata can carry credentials under
+            // well-known keys. Scrub every record recursively before truncation
+            // and serialization, even when payload logging was explicitly
+            // enabled by an administrator.
+            $entry = self::scrubSensitive($entry);
+
             $record = [
                 'ts' => gmdate('c'),
                 'request_id' => self::requestId(),
@@ -88,6 +95,103 @@ class AuditLogger {
         catch (\Throwable $e) {
             // Logging must never break the module.
         }
+    }
+
+    /** @return mixed */
+    private static function scrubSensitive($value, string $key = '') {
+        if (self::isSensitiveKey($key)) {
+            return '[REDACTED]';
+        }
+
+        if (is_array($value)) {
+            $secret_macro = isset($value['type']) && in_array((int) $value['type'], [1, 2], true)
+                && array_key_exists('value', $value);
+            $out = [];
+
+            foreach ($value as $child_key => $child_value) {
+                $child_key_string = is_string($child_key) ? $child_key : '';
+                if ($secret_macro && $child_key_string === 'value') {
+                    $out[$child_key] = '[REDACTED]';
+                }
+                else {
+                    $out[$child_key] = self::scrubSensitive($child_value, $child_key_string);
+                }
+            }
+
+            return $out;
+        }
+
+        if (is_object($value)) {
+            return self::scrubSensitive((array) $value, $key);
+        }
+
+        if (is_string($value)) {
+            return self::scrubSensitiveString($value);
+        }
+
+        return $value;
+    }
+
+    private static function isSensitiveKey(string $key): bool {
+        if ($key === '') {
+            return false;
+        }
+
+        return (bool) preg_match(
+            '/(?:^|[_-])(?:pass(?:word|wd)?|secret|token|api[_-]?key|authorization|cookie|credential|private[_-]?key|client[_-]?secret|headers?[_-]?json)(?:$|[_-])/i',
+            $key
+        );
+    }
+
+    private static function scrubSensitiveString(string $value): string {
+        // When a payload field is itself JSON (tool/provider output commonly
+        // is), decode it and apply the same recursive key-aware scrubber.
+        $decoded = json_decode($value, true);
+        if (is_array($decoded) && json_last_error() === JSON_ERROR_NONE) {
+            $scrubbed = self::scrubSensitive($decoded);
+            $encoded = json_encode($scrubbed, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            if (is_string($encoded)) {
+                return $encoded;
+            }
+        }
+
+        // Scrub credential-bearing JSON fragments embedded in prose/code fences.
+        $value = preg_replace(
+            '/("(?:password|passwd|pass|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|x[_-]?api[_-]?key|authorization|cookie|client[_-]?secret|private[_-]?key)"\s*:\s*)"(?:\\\\.|[^"\\\\])*"/i',
+            '$1"[REDACTED]"',
+            $value
+        );
+
+        // Scrub common header and key=value forms without erasing the rest of a
+        // diagnostic message.
+        $value = preg_replace(
+            '/\b(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\s,;]+/i',
+            '$1[REDACTED]',
+            $value
+        );
+        $value = preg_replace(
+            '/\b(password|passwd|api[_ -]?key|access[_ -]?token|client[_ -]?secret|webhook[_ -]?secret)\s*(?:[:=]|\bis\b)\s*([^\s,;]+)/i',
+            '$1=[REDACTED]',
+            $value
+        );
+
+        // Userinfo in a URL is a credential even when the surrounding field is
+        // named only "url".
+        $value = Util::sanitizeUrlForDisplay($value);
+
+        // Secret/vault macro objects can be embedded as a JSON string where the
+        // generic key name "value" alone is not enough to identify the secret.
+        $value = preg_replace_callback('/\{[^{}]{0,400}"type"\s*:\s*[12][^{}]{0,400}\}/i', static function(array $m): string {
+            $decoded = json_decode($m[0], true);
+            if (!is_array($decoded) || !array_key_exists('value', $decoded)) {
+                return $m[0];
+            }
+            $decoded['value'] = '[REDACTED]';
+
+            return (string) json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        }, $value);
+
+        return $value;
     }
 
     private const QUERY_MAX_SCAN = 20000;

@@ -7,11 +7,11 @@ A self-contained Zabbix frontend module that adds:
 - **Monitoring > AI > Logs** for local audit log review
 - **Inline AI buttons on the Problems page** with a side-drawer chat for instant problem analysis
 - **AI-powered Zabbix actions** via natural language (query problems, create maintenance, modify triggers, manage host groups, etc.)
-- **`zabbix.php?action=ai.webhook`** as an internal webhook endpoint for problem enrichment and AI-generated guidance
+- **`/ai-webhook`** as a standalone webhook endpoint for problem enrichment and AI-generated guidance
 - **Problem update posting** back to the originating event through the Zabbix API
 - **Item history / trend analysis** on demand for deeper AI-driven diagnostics
 - **Local outbound redaction / inbound restore** for hostnames, IPs, domains, URLs, OS hints and custom replacements
-- **Server-side pending write confirmations** so write-action parameters are not trusted from the browser
+- **Encrypted server-side confirmations** for writes and privacy-sensitive reads, so executable parameters and external source identities are not trusted from the browser
 - **Per-provider temperature and max token controls** for fine-grained model tuning
 - **Local JSONL audit logging** with retention and archive support
 - **Optional NetBox enrichment** for VM/device/service context
@@ -37,7 +37,7 @@ A self-contained Zabbix frontend module that adds:
 - No server-side chat persistence is implemented by the module
 - A separate server-side alias map is used only when redaction is enabled so masked values can be restored safely during the same chat session
 - Optional context fields: Event ID, hostname, problem summary, extra operator context
-- **Include history** button fetches item history for the selected event and loads it into the message field for review before sending
+- **Include history** fetches item history for the selected event, displays it locally as non-forwardable monitoring data, and sends it through the untrusted-data channel only with a fixed operator instruction
 - Button to post the **last AI answer** back to a Zabbix event as problem update comments
 - **AI-powered Zabbix actions**: ask questions or give commands in natural language
 - Full conversation transfer from the problem drawer via localStorage bridge
@@ -52,20 +52,27 @@ A self-contained Zabbix frontend module that adds:
 
 When enabled, you can type natural language commands in the chat and the AI will interact with Zabbix on your behalf. Examples:
 
-**Read actions** (execute immediately):
+**Routine read actions** (execute immediately):
 
-- "Show me all unacknowledged problems with severity High or above"
-- "Give me a list of all unsupported items"
 - "What is the uptime for server1"
 - "What OS does DB-server5 have"
+- "Summarize CPU utilization for server1"
+
+**Privacy-sensitive reads** (show a source/provider preview and ask for confirmation):
+
+- "Give me a list of all unsupported items"
+- "Show me all unacknowledged problems with severity High or above"
+- "Show noisy triggers or active maintenance across the environment"
+- "Show the event timeline or related problems for event 12345"
 - "Show me all triggers for host web-01"
 - "List items on host db-01 that contain 'cpu'"
+- "List the NetBox inventory"
 
 **Write actions** (always ask for confirmation first):
 
 - "Create a maintenance window for host db-01 for 2 hours"
 - "Create a maintenance window for host db-01 for 2 hours on 2026-05-21 starting at 16:00"
-- "This trigger is set to trigger a problem after 60 days. Change it to 65 days."
+- "Change trigger 12345 severity to High"
 - "Acknowledge problem event 12345 with message 'Investigating'"
 - "Disable item 'CPU idle time' on host web-01"
 - "Add all hosts with the MSSQL template to a 'Microsoft SQL Servers' host group"
@@ -73,12 +80,13 @@ When enabled, you can type natural language commands in the chat and the AI will
 
 #### How it works
 
-1. The AI receives tool definitions in its system prompt describing available Zabbix operations
-2. When you ask something that requires Zabbix data, the AI outputs a structured tool call
-3. For **read** actions, the module executes the call immediately and formats the result
-4. For **write** actions, the module shows a confirmation message with **Confirm / Cancel** buttons
-5. Only after you click Confirm does the write action execute
-6. Raw tool call JSON is automatically stripped from responses so users only see human-readable text
+1. The selected provider receives the enabled Zabbix operations through its native tool/function schema
+2. When you ask for Zabbix data or an action, the model requests exactly one provider-native tool call
+3. Routine **read** actions execute immediately
+4. Privacy-sensitive reads show the exact provider, Zabbix identity and applicable NetBox source before **Confirm / Cancel**; confirmed output is shown once and not retained in provider-forwardable chat history
+5. **Write** actions show a deterministic server-generated preview with the exact Zabbix execution identity/destination and **Confirm / Cancel**; high-impact operations require a second click
+6. Only the encrypted, hash-bound pending action can execute after confirmation
+7. Native tool metadata is not rendered as chat text; JSON-looking assistant prose is ordinary text and can never execute
 
 #### Available tools
 
@@ -102,10 +110,10 @@ Representative examples — reads: `get_problems`, `get_host_info`, `get_items`,
 
 #### Permission model
 
-- **Read tools**: Available to any Zabbix user when Zabbix actions are enabled
+- **Read tools**: Available to logged-in, non-Guest Zabbix users when Zabbix actions are enabled; fleet problem/maintenance, event-comment, inventory, item/trigger, contact, macro, NetBox, audit and bulk-preview reads pause for privacy confirmation
 - **Write tools**: Require all of the following:
   - Mode set to "Read & Write" in settings
-  - The specific write category enabled (maintenance, items, triggers, users, problems, hostgroups)
+  - The corresponding write category shown in AI Settings enabled
   - Super Admin role (configurable, enabled by default)
 - The AI only sees tools the current user is permitted to use
 - All permissions are enforced server-side as a second layer
@@ -131,7 +139,7 @@ You can add/remove/manage:
 
 ### Provider types supported
 
-- `openai_compatible` - OpenAI, Azure OpenAI, vLLM, LocalAI, any `/chat/completions` endpoint (defaults to `api.openai.com` when endpoint is left blank)
+- `openai_compatible` - OpenAI, Azure OpenAI, vLLM, LocalAI, any `/chat/completions` endpoint (defaults to `api.openai.com` when endpoint is left blank). AI actions require native `tools`/function-calling support.
 - `ollama` - Local or remote Ollama instances (defaults to `localhost:11434`)
 - `anthropic` - Anthropic Claude API (native Messages API support, defaults to `api.anthropic.com`)
 
@@ -145,9 +153,10 @@ Quick summary:
 2. Set ownership and permissions
 3. Configure SELinux if applicable
 4. **Create writable directories** for redaction state and logging (see `INSTALL.md` section 6)
-5. In Zabbix frontend: Administration > General > Modules > Scan directory > Enable AI
-6. Open Monitoring > AI > Settings and configure at least one provider
-7. **Enable logging** in Settings > Logging if you want audit logs (disabled by default)
+5. Configure vault/secret references. Basic chat can run with `env:NAME`/`file:NAME` credentials alone; set `ZABBIX_AI_ENCRYPTION_KEY_FILE` (or the legacy direct key) on every PHP frontend node when storing inline secrets in the database or using confirmed writes, sensitive reads, or bulk previews
+6. In Zabbix frontend: Administration > General > Modules > Scan directory > Enable AI
+7. Open Monitoring > AI > Settings and configure at least one provider
+8. **Enable logging** in Settings > Logging if you want audit logs (disabled by default; payload bodies are also off by default)
 
 ## Recommended initial configuration
 
@@ -158,7 +167,7 @@ For OpenAI-compatible APIs:
 - **Type:** `openai_compatible`
 - **Endpoint:** Leave blank for `https://api.openai.com/v1` (or set a custom endpoint)
 - **Model:** e.g. `gpt-4.1-mini`
-- **API key:** use the field or preferably an environment variable
+- **API key:** preferably use an `env:NAME` or `file:NAME` vault/secret reference; inline values are encrypted in the database
 - **Temperature:** Leave blank to use global default, or set per-provider (0-2)
 - **Max tokens:** Leave blank for provider default, or set a specific limit
 - **Test connection:** Click the button on each provider row to verify connectivity. On success, the model field becomes an autocomplete populated with the provider's available models. Picking a model that requires the default temperature (e.g. GPT-5, o1/o3/o4 series) auto-sets temperature to 1.
@@ -167,30 +176,32 @@ For Ollama:
 
 - **Type:** `ollama`
 - **Endpoint:** Leave blank for `http://localhost:11434/api/chat` (or set a custom URL)
-- **Model:** e.g. `llama3.1:8b`, `qwen2.5:7b`, `mistral-nemo`. Small `gemma*` and `phi*` models are weak at emitting strict tool-call JSON.
-- **Context window (Ollama):** sets Ollama's `num_ctx`. Defaults to 16384 — required because Ollama's own default (2048) silently truncates the tools system prompt, leaving the model unable to call anything.
+- **Model:** e.g. `llama3.1:8b`, `qwen2.5:7b`, `mistral-nemo`. Choose an Ollama model/version with native tool support when Zabbix Actions are enabled.
+- **Context window (Ollama):** sets Ollama's `num_ctx`. Defaults to 16384 so the policy and native tool definitions fit without truncation.
 
 For Anthropic (Claude):
 
 - **Type:** `anthropic`
 - **Endpoint:** Leave blank for `https://api.anthropic.com` (or set a custom URL)
 - **Model:** e.g. `claude-sonnet-4-20250514`
-- **API key:** your Anthropic API key or env var
+- **API key:** preferably use an `env:NAME` or `file:NAME` vault/secret reference
 - **Max tokens:** defaults to 4096 if not set
 
 ### 2. Zabbix API
 
 For logged-in frontend users, the module prefers Zabbix's internal frontend API path for chat actions, problem-page context, item history, host/problem lookup, and user-confirmed writes. This uses the current frontend user's Zabbix permissions and avoids a fragile HTTP call back to `api_jsonrpc.php` in split frontend deployments.
 
-Configure a Zabbix API URL and token for webhook/standalone automation and as a fallback when the internal frontend API path is not available. The URL must point to the Zabbix web frontend's `api_jsonrpc.php`, not the Zabbix server daemon.
+Configure a Zabbix API URL and token for webhook/standalone automation. The URL must be an explicit HTTPS URL pointing to the Zabbix web frontend's `api_jsonrpc.php`, not the Zabbix server daemon; it is never derived from the incoming request host.
+
+Interactive reads fail closed if the current frontend user's API identity is unavailable. For a split or token-only deployment, an administrator can explicitly enable **Allow interactive reads to use the shared service token**. This changes those reads to the service token owner's Zabbix scope, so enable it only when that broader identity is intended.
 
 Example:
 
 - **API URL:** `https://zabbix.example.se/api_jsonrpc.php`
-- **Auth mode:** `auto`
-- **Token env var:** `ZABBIX_API_TOKEN`
+- **Auth mode:** `bearer`
+- **Token secret reference:** `env:ZABBIX_API_TOKEN` or a confined `file:NAME`
 
-**Important:** Write permissions are still controlled by AI Settings > Zabbix Actions before any write is executed. When using the internal frontend API path, Zabbix also enforces the logged-in user's normal frontend/API permissions. When using the HTTP token fallback or webhook path, the token needs sufficient read/write access for the allowed operations.
+**Important:** Write permissions are still controlled by AI Settings > Zabbix Actions before any write is executed. When using the internal frontend API path, Zabbix also enforces the logged-in user's normal frontend/API permissions. When using the explicitly enabled HTTP token fallback or webhook path, the token needs sufficient read/write access for the allowed operations. `auto` authentication never retries mutating calls and only falls back for read-only `*.get` methods after an explicit authentication rejection.
 
 ### 3. Zabbix Actions
 
@@ -198,18 +209,23 @@ In AI Settings > Zabbix Actions:
 
 - **Enabled:** Check to allow AI-powered Zabbix interactions
 - **Mode:** "Read only" (default) or "Read & Write"
-- **Write permissions:** Enable per category (maintenance, items, triggers, users, problems, hostgroups)
+- **Write permissions:** Enable the corresponding category shown in AI Settings (including maintenance, items, triggers, users, problems, host groups, hosts, interfaces, web, dashboards, templates, discovery, bulk and SLA)
 - **Require Super Admin for write:** Enabled by default. When checked, only Super Admin users can execute write actions
+- **Web scenario allowed origins:** Required before the AI can create an HTTP web scenario. Scheme and port are enforced; loopback, link-local and metadata destinations remain blocked.
+
+Tool execution uses each provider's native structured-tool protocol. JSON-looking assistant prose is never executable. Every write is rendered into a deterministic server-side preview, bound by SHA-256 to the exact parameters, Zabbix execution identity/destination and server-resolved target identities, encrypted at rest, revalidated against Zabbix before execution, and consumed atomically. Bulk, destructive, and SLA scope-widening writes require a second explicit confirmation. Fleet problem/maintenance, event-comment, broad inventory, contact, macro, NetBox, and audit reads require a privacy confirmation. A key supplied through `ZABBIX_AI_ENCRYPTION_KEY_FILE` or the legacy direct variable is therefore mandatory for confirmed actions and bulk previews.
+
+For AI-created web scenarios, also enforce outbound network policy on the Zabbix servers/proxies which execute the check. The application allowlist and restricted-address checks are defense in depth; an egress firewall/proxy remains the final protection against DNS rebinding or later DNS changes.
 
 ### 4. Provider defaults
 
 You can set different default providers for:
 
-- **Chat** - used for normal troubleshooting conversations
+- **Chat** - used for chat turns when Zabbix Actions are disabled for that turn
 - **Webhook** - used for automated webhook responses
-- **Zabbix actions** - used for AI-powered Zabbix queries and modifications
+- **Zabbix actions** - used for every action-enabled chat turn, whether or not the model ultimately calls a Zabbix tool
 
-This lets you use a faster/cheaper model for chat and a more capable model for Zabbix actions, or vice versa.
+An operator's explicit provider-selector choice overrides these defaults. This routing makes the provider that receives an action-enabled turn predictable before the model decides whether a tool is needed.
 
 ### 5. Chat settings
 
@@ -224,17 +240,19 @@ This lets you use a faster/cheaper model for chat and a more capable model for Z
 
 ### 7. NetBox
 
-Optional. If enabled, the module enriches context with VM/device/service data from NetBox.
+Interactive NetBox records are never prefetched into the initial AI prompt. NetBox tools require an explicit sensitive-read confirmation and are scoped to hostnames visible through the current Zabbix API identity. Single-host lookups fail closed unless the exact technical hostname is visible in Zabbix, and bulk NetBox inventory is intersected with that identity's visible Zabbix host list. Normally this is the caller's frontend identity; when the administrator enables split-deployment service-token fallback, it is the token owner's scope. The NetBox endpoint, TLS policy and opaque token identity are bound to the confirmation. The webhook path remains an explicitly configured automation identity protected by the webhook secret.
+
+Optional. If enabled, confirmed interactive tools can retrieve VM/device/service data from NetBox; webhook automation can include the same data as explicitly configured context.
 
 ### 8. Webhook
 
-The internal webhook URL is:
+The standalone webhook URL is:
 
 ```text
-https://your-zabbix-frontend/zabbix.php?action=ai.webhook
+https://your-zabbix-frontend/ai-webhook
 ```
 
-You can protect it with a shared secret.
+Configure the web-server mapping in `INSTALL.md` before importing the media type. The endpoint does not need a Zabbix frontend session and must be protected with the shared secret (required by default). Do not enable the Zabbix Guest user or grant Guest access to this module for webhook delivery.
 
 ## Suggested media type wiring
 
@@ -265,11 +283,13 @@ The module accepts either:
 
 ## Security notes
 
-- Prefer **environment variables** for secrets over storing them directly in module config.
+- Prefer **`env:NAME` or confined `file:NAME` vault/secret references** over storing credentials in module config. Inline values are encrypted with the deployment key; the warned plaintext setting is for isolated development only.
 - Enable TLS verification unless you have a specific internal reason not to.
 - The webhook endpoint does **not** require a logged-in Zabbix UI session, so use a shared secret if you expose it beyond localhost/internal networks.
-- Write actions are protected by multiple layers: settings mode, per-category permissions, user role checks, server-side pending action storage, and mandatory user confirmation.
-- When Security / redaction is enabled, outbound AI requests can replace hostnames, IPs, FQDNs, URLs, OS hints, and any custom rules you define. Replies are restored locally before operators see them.
+- Write actions are protected by multiple layers: settings mode, per-category permissions, user role checks, encrypted server-side pending action storage, deterministic target/value previews, and mandatory user confirmation. Generic AI-authored trigger-expression creation or editing is intentionally unavailable; use Zabbix directly for arbitrary expressions.
+- Privacy-sensitive reads use the same encrypted pending store and bind the provider plus source identity before retrieving data.
+- When Security / redaction is enabled, outbound AI requests can replace hostnames, IPs, FQDNs, URLs, OS hints, and any custom rules you define. Replies are restored locally before operators see them. Enabled administrator reference-link URLs are an intentional exception: they are placed in the system prompt verbatim, so never put credentials or secret query parameters in them.
+- The configuration/history assistant sends its displayed form and API context only after an explicit pre-send consent prompt. Depending on the page, this can include preprocessing JavaScript, interface addresses, item/history values, trigger definitions, macro values and recent problem metadata. Secret/vault macros are masked. Untrusted-data fencing prevents instruction confusion but is not data minimization; configure redaction for the selected chat channel as needed.
 - Problem page AI buttons are only injected for users with module access (user type check in `getAssets()`).
 - Problem context enrichment (trigger, items, templates) is resolved server-side — the browser only passes the event ID, never raw trigger data.
 - Logging is local file-based and redacted by default. Storing alias-to-original mapping details is available but intentionally off by default because it is higher risk.
@@ -279,18 +299,18 @@ The module accepts either:
 - No chat persistence by design
 - No external FastAPI service required
 - The module does **not** create any new Zabbix DB tables
-- Local redaction state and pending write confirmations are stored as files under the configured state path (default `/tmp/zabbix-ai-module/state`)
+- Local redaction state and encrypted pending confirmations (writes, sensitive reads and bulk previews) are stored as files under the configured state path (default `/tmp/zabbix-ai-module/state`)
 - Local logs are stored as JSONL files under the configured log path (default `/tmp/zabbix-ai-module/logs`) with optional archive path (default `/tmp/zabbix-ai-module/archive`)
 - **Logging is disabled by default.** Enable it in Settings > Logging after setting up writable directories.
 - **Writable directories must exist and be accessible by the web server process.** On systems with `PrivateTmp=yes` (common on RHEL/systemd), the default `/tmp` paths may not work. See `INSTALL.md` section 6 for setup instructions.
-- AI-powered Zabbix actions depend on the AI model correctly interpreting your request and generating valid tool calls. More capable models (GPT-5, Claude Sonnet/Opus) produce better results than smaller models.
-- Item history fetching uses the Zabbix `history.get` API and auto-detects the correct history type (numeric float, unsigned, string, text).
+- AI-powered Zabbix actions require a provider/model that implements native structured tool calling. JSON-looking model prose is treated only as text and never executed. More capable tool-capable models generally produce better results.
+- Item history fetching uses the Zabbix `history.get` API and auto-detects the correct history type (numeric float, unsigned, string, text, or log).
 
 ## Quick webhook smoke test
 
 ```bash
 curl -k -X POST \
-  'https://your-zabbix-frontend/zabbix.php?action=ai.webhook' \
+  'https://your-zabbix-frontend/ai-webhook' \
   -H 'Content-Type: application/json' \
   -H 'X-AI-Webhook-Secret: your-shared-secret' \
   -d '{

@@ -6,6 +6,7 @@ require_once __DIR__.'/../lib/bootstrap.php';
 
 use CController,
     CControllerResponseData,
+    CWebUser,
     Modules\AI\Lib\Config,
     Modules\AI\Lib\Util,
     Modules\AI\Lib\ZabbixApiClient;
@@ -21,7 +22,7 @@ class ProblemContext extends CController {
     }
 
     protected function checkPermissions(): bool {
-        return $this->getUserType() >= USER_TYPE_ZABBIX_USER;
+        return $this->getUserType() >= USER_TYPE_ZABBIX_USER && !CWebUser::isGuest();
     }
 
     protected function doAction(): void {

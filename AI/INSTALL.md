@@ -49,6 +49,12 @@ Some distributions use a different frontend root. The key requirement is that `m
 <zabbix-frontend-root>/modules/AI/manifest.json
 ```
 
+Deploy the complete directory to every frontend node before serving requests,
+then reload PHP-FPM/Apache to clear OPcache and hard-refresh the browser so PHP,
+the settings view, and `ai.settings.js` all come from the same release. A mixed
+deployment is rejected by the settings save/version handshake instead of being
+reported as a successful save.
+
 ## 2. Set ownership and permissions
 
 For Apache/httpd on RHEL:
@@ -81,13 +87,20 @@ The `httpd_can_network_connect` boolean is required for the module to make outbo
 
 ## 4. Required PHP modules
 
-The module uses cURL and JSON. Verify:
+The module uses cURL, JSON, and mbstring. Secure inline storage and every
+confirmed write, sensitive read, and bulk preview also require **either Sodium
+or OpenSSL in the PHP SAPI that actually serves Zabbix**. Verify the serving
+PHP-FPM/mod_php installation:
 
 ```bash
-php -m | egrep 'curl|json|mbstring'
+php -m | egrep 'curl|json|mbstring|openssl|sodium'
 ```
 
-All three should be listed. These are typically installed by default with Zabbix's PHP dependencies.
+`curl`, `json`, and `mbstring` should be listed, plus at least one of `openssl`
+or `sodium`. The CLI command is only a first-pass check: distributions can load
+different extensions for CLI and the web SAPI. Confirm with the AI Settings
+storage banner (or a temporary `phpinfo()` page served by the same pool), then
+remove any diagnostic page.
 
 ## 5. Enable the module in Zabbix
 
@@ -103,54 +116,71 @@ Then:
 
 That is all. No database migrations, no external services, no additional packages.
 
-## 5b. (Recommended) Encrypt stored secrets at rest
+## 5b. Configure secret references and encryption
 
-By default the API keys, Zabbix/NetBox tokens and the webhook shared secret you
-enter in **AI settings** are stored **unencrypted** in the Zabbix `module`
-configuration row, so anyone with database, backup or configuration-export
-access can read them.
+The recommended setup keeps provider/tokens out of the database entirely:
 
-To encrypt them at rest, set the `ZABBIX_AI_ENCRYPTION_KEY` environment variable
-for the **PHP/web process** to a long random passphrase, then open AI settings
-and click **Save** once (existing plaintext secrets are migrated to ciphertext
-on save). The key is hashed to a 256-bit key and never stored in the database, so
-a DB dump no longer exposes the secrets. AES-256-GCM (libsodium, OpenSSL
-fallback) is used automatically.
+- `env:NAME` reads a deployment-managed environment variable.
+- `file:NAME` reads a protected runtime file beneath the server-admin-set
+  `ZABBIX_AI_SECRET_DIR`. A local encrypted deployment file (for example Ansible
+  Vault) or any vault agent can materialize these files.
 
-```bash
-# Generate a strong key value
-openssl rand -base64 48
-```
+The PHP module does not decrypt Ansible Vault files and must never receive the
+Ansible vault password. Ansible decrypts at deployment/boot time and writes the
+specific runtime files PHP may read.
 
-Make it visible to the PHP worker. Examples:
+`file:` accepts a logical name only—never an arbitrary path. Missing references
+fail closed and do not fall back to old database credentials.
+
+Read & Write actions, sensitive reads, and bulk previews additionally require a
+master key. Prefer materializing that key into a protected runtime file and set
+only its path for PHP-FPM:
 
 ```ini
-; php-fpm pool (e.g. /etc/php-fpm.d/www.conf) — note env[] entries
-env[ZABBIX_AI_ENCRYPTION_KEY] = "PASTE_GENERATED_VALUE"
+env[ZABBIX_AI_SECRET_DIR] = "/run/zabbix-ai-provider-secrets"
+env[ZABBIX_AI_ENCRYPTION_KEY_FILE] = "/run/zabbix-ai-master/db_encryption_key"
 ```
 
-```yaml
-# Docker / docker-compose — set on every frontend container
-services:
-  zabbix-web:
-    environment:
-      ZABBIX_AI_ENCRYPTION_KEY: "PASTE_GENERATED_VALUE"
+Reload the serving pool after changing this block:
+
+```bash
+sudo systemctl reload php-fpm
 ```
 
-Important for multi-server and Docker deployments: set the **same** value on
-**every** frontend node/container. A node with a different (or missing) key
-cannot decrypt secrets saved elsewhere — it fails safe (the affected feature
-reports the secret as unavailable) rather than corrupting anything, but the
-secret will not work there until the matching key is present. If you ever lose
-the key, simply re-enter the secrets after setting a new one.
+Keep the master key outside `ZABBIX_AI_SECRET_DIR`; that directory contains
+only credentials which module settings may reference by logical name. Generic
+environment references are likewise restricted to standard module names,
+`ZABBIX_AI_SECRET_*`, or exact names in the server-side
+`ZABBIX_AI_ALLOWED_SECRET_ENV_VARS` allowlist.
 
-Alternative (no encryption needed): leave a secret field blank and set its
-**Secret environment variable** name instead. The value is then resolved from
-the environment at request time (e.g. a Vault-populated variable) and never
-touches the database at all.
+Use the identical key on every frontend node. Keep its authoritative copy and
+backup in a durable encrypted source; `/run/zabbix-ai-master/...` is only a
+separately materialized runtime copy and is not a backup. Inline secrets are
+authenticated and stored as `enc:v1:...` ciphertext. If legacy plaintext values
+exist, AI Settings first shows **Encryption ready — plaintext migration
+pending**. Click **Save settings** once, reopen the page, and verify the green
+**Secret storage: encrypted at rest** banner. Then untick the persisted
+plaintext compatibility option and remove
+`ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS` from the PHP environment, reload PHP-FPM,
+and verify neither override is reported active. The direct
+`ZABBIX_AI_ENCRYPTION_KEY` variable remains supported for existing deployments
+but no longer needs to be placed as plaintext in the pool file.
 
-For full step-by-step instructions (php-fpm, Apache mod_php, Docker, multi-server,
-verification, key rotation and troubleshooting), see [ENCRYPTION.md](ENCRYPTION.md).
+On SELinux-enforcing hosts, label the read-only runtime secret/master-key paths
+`httpd_sys_content_t` and run `restorecon` after each boot-time materialization;
+reserve `httpd_sys_rw_content_t` for the separate writable state/log/report
+paths. Apache mod_php and Docker/Compose variants are documented in
+[ENCRYPTION.md](ENCRYPTION.md).
+
+For isolated development only, a Super Admin can enable the warned **Allow
+plaintext secrets** compatibility option in AI Settings (or use the legacy
+`ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS=1` server override). This can expose
+credentials in the database, dumps, backups, and exports. It never enables
+encrypted pending confirmations.
+
+See [ENCRYPTION.md](ENCRYPTION.md) for the complete local-vault/reference setup,
+Ansible-style example, database encryption, multi-node rules, rotation, and
+troubleshooting.
 
 ## 6. Create writable directories for security state and logging
 
@@ -290,7 +320,12 @@ Configure at least one provider.
 - Type: `openai_compatible`
 - Endpoint: `https://api.openai.com/v1` or full `/chat/completions` URL
 - Model: your model name
-- API key: direct secret or env var
+- API key: preferably an `env:NAME` or `file:NAME` vault/secret reference; an inline value is encrypted in the database
+
+The provider **Test connection** button can use a freshly entered inline key for
+that one request even when no encryption key is configured; it is not saved.
+Save a new/changed secret reference and provider destination before testing the
+reference.
 
 ### Ollama
 - Type: `ollama`
@@ -301,37 +336,53 @@ Configure at least one provider.
 - Type: `anthropic`
 - Endpoint: `https://api.anthropic.com` (or leave empty for default)
 - Model: e.g. `claude-sonnet-4-20250514`
-- API key: your Anthropic API key or env var
+- API key: preferably an `env:NAME` or `file:NAME` vault/secret reference; an inline value is encrypted in the database
 
 ### Provider defaults
 
 You can set different default providers for each purpose:
-- **Default for chat** - normal troubleshooting conversations
+- **Default for chat** - chat turns where Zabbix Actions are disabled for that turn
 - **Default for webhook** - automated webhook responses
-- **Default for Zabbix actions** - AI-powered Zabbix queries and modifications
+- **Default for Zabbix actions** - every action-enabled chat turn, even if the model ultimately does not call a tool
+
+An operator's explicit provider-selector choice overrides these defaults.
 
 ### Zabbix API
 
-Logged-in chat/problem-page actions use Zabbix's internal frontend API path when available. Configure the HTTP API URL and token for webhook/standalone automation and as a fallback:
-- API URL must point to the Zabbix web frontend `api_jsonrpc.php`
-- Token or token env var is required for webhook posting and HTTP fallback
+Logged-in chat/problem-page actions use Zabbix's internal frontend API path and the caller's permissions. Configure the service-token API URL and token for webhook/standalone automation:
+- API URL must be an explicit HTTPS URL pointing to the Zabbix web frontend `api_jsonrpc.php`; it is never derived from the request host
+- Token or `env:NAME`/`file:NAME` secret reference is required for webhook posting
 - The token needs read permissions for read actions and write permissions for allowed write actions on the relevant Zabbix objects
+- Interactive reads fail closed if the frontend identity is unavailable. Split/token-only deployments can explicitly enable the shared-token read fallback in AI Settings; this makes those reads use the token owner's scope.
 
 ### Zabbix Actions
 
 In AI Settings > Zabbix Actions:
 - **Enabled**: Allow AI to interact with Zabbix via natural language
 - **Mode**: "Read only" (safe default) or "Read & Write"
-- **Write permissions**: Enable per category (maintenance, items, triggers, users, problems)
+- **Write permissions**: Enable the corresponding category shown in AI Settings
 - **Require Super Admin for write**: Enabled by default
+- **Web scenario allowed origins**: Add exact origins before enabling AI-created web checks; keep Zabbix server/proxy egress rules as the final outbound boundary
+
+The module validates the origin and current DNS answers before creating a web
+scenario, but the HTTP request is later made by a Zabbix server or proxy. Enforce
+an outbound firewall/proxy policy on every executing server/proxy as the final
+control against DNS rebinding and future address changes. Prefer exact origins;
+use wildcard origins only for DNS zones fully controlled by your administrators.
 
 Optional integrations:
-- NetBox URL/token for CMDB enrichment
+- NetBox URL/token for confirmed interactive CMDB reads and optional webhook enrichment
 - Webhook shared secret for internal webhook protection
+
+The same test rule applies to NetBox: a freshly entered inline token is
+request-local, while a new/changed `env:`/`file:` token reference and NetBox URL
+must be saved before **Test connection** uses them.
 
 ## 9. Enable security / redaction
 
-Security/redaction is **enabled by default** in the module config. When enabled, outbound AI requests will have hostnames, IPs, FQDNs, URLs, and OS hints replaced with safe aliases. Replies are restored locally before you see them.
+Security/redaction is **enabled by default** in the module config. When enabled, outbound AI requests can have hostnames, IPs, FQDNs, URLs, and OS hints replaced with safe aliases. Replies are restored locally before you see them. Enabled administrator reference-link URLs are deliberately inserted into the system prompt verbatim; never store credentials or signed/secret query parameters in them.
+
+The configuration/history assistant shows a separate consent prompt before sending its displayed form/API context to the selected provider. That context can include preprocessing JavaScript, interface addresses, item/history values, triggers, non-secret macro values, and recent problem metadata. Secret/vault macros are masked. The untrusted-data fence is an instruction boundary, not a substitute for data minimization or configured redaction.
 
 To configure, go to **AI Settings > Security / redaction**:
 
@@ -370,10 +421,10 @@ View logs in the Zabbix frontend at **Monitoring > AI > Logs**.
 ## 11. Webhook endpoint
 
 ```text
-https://<your-zabbix-frontend>/zabbix.php?action=ai.webhook
+https://<your-zabbix-frontend>/ai-webhook
 ```
 
-Media type files are included under `mediatype/`.
+Media type files are included under `mediatype/`. This standalone endpoint does not require a Zabbix frontend session. Configure the nginx mapping in section 14 before importing the media type, and keep the shared secret enabled. Do not enable the Zabbix Guest user or grant Guest access to the module for webhook delivery.
 
 ## 12. Troubleshooting
 
@@ -388,22 +439,22 @@ Usually means one of these:
 `ai.settings` is intentionally limited to Super Admin. The controller checks:
 
 - `USER_TYPE_SUPER_ADMIN` for settings
-- `USER_TYPE_ZABBIX_USER` or higher for chat
+- non-Guest `USER_TYPE_ZABBIX_USER` or higher for chat
 
 ### Write actions denied for a user
 Write actions require:
 1. Zabbix Actions mode set to "Read & Write"
-2. The specific category enabled (maintenance, items, triggers, users, or problems)
+2. The corresponding write category enabled in AI Settings
 3. Super Admin role (if "Require Super Admin for write" is checked)
 
 ### AI does not execute Zabbix actions
 Check:
 - Zabbix Actions is enabled in settings
 - For logged-in chat, the request is running inside a valid Zabbix frontend session
-- For webhook/standalone/fallback, the Zabbix API URL and token are configured
+- For webhook/standalone or an explicitly enabled split-deployment fallback, an HTTPS Zabbix API URL and token are configured
 - The current frontend user or API token has sufficient permissions
-- **Ollama provider only:** the per-provider "Context window (Ollama)" field is at least ~8000. Ollama's native default `num_ctx=2048` is too small for the module's tools system prompt — the tools section at the end of the prompt is silently truncated and the model has no idea it can call anything. The module now defaults to 16384, but if you customised this, raise it. Symptom: the "Tools" tab in **Monitoring > AI > Logs** stays at 0 and the AI replies "I cannot do it" to questions like "list all active problems".
-- The AI model is capable enough. `gemma`-family and small `phi`-family models are weak at emitting strict tool-call JSON. Try `llama3.1:8b`, `qwen2.5:7b` or larger to confirm.
+- **Ollama provider only:** keep the per-provider "Context window (Ollama)" at least ~8000. Ollama's native default `num_ctx=2048` is often too small for the policy, conversation context, monitoring evidence, and native tool schemas. The module defaults to 16384; raise a customized lower value if the model stops selecting tools. Symptom: the "Tools" tab in **Monitoring > AI > Logs** stays at 0 and the AI replies "I cannot do it" to questions like "list all active problems".
+- The provider/model must support native tool calling and select functions reliably. Small models may ignore or misuse a large tool catalog; try a tool-capable `llama3.1:8b`, `qwen2.5:7b`, or larger model to confirm.
 
 ### Logging shows no entries / log directory does not exist
 
@@ -413,11 +464,12 @@ Check:
 4. **Is PrivateTmp enabled?** If `systemctl show php-fpm | grep PrivateTmp` shows `yes`, the web process uses a private `/tmp`. Use a persistent path like `/var/log/zabbix-ai/` instead (see section 6).
 5. **Is SELinux blocking writes?** Check `ausearch -m avc -ts recent` for denials. Apply the SELinux context per section 6.
 
-### Security redaction causes AI to output invalid tool calls
+### The model prints tool-call JSON instead of calling a tool
 
-If the AI outputs `{"tool": "tool_name", ...}` or similar generic placeholders instead of real tool names, check:
-1. This was a bug in earlier versions where the hostname redactor treated snake_case programming identifiers (like `get_problems`) as hostnames. Update to the latest module code.
-2. If using custom replacement rules, make sure they don't match tool names or JSON keywords.
+JSON-looking assistant text is deliberately never executable. If the model prints `{"tool": ...}` instead of issuing a native call:
+1. Confirm the provider and model implement native tool/function calling; Actions cannot be used with a prose-only model.
+2. For Ollama, increase `num_ctx` and use a model version with tool support.
+3. If using custom replacement rules, make sure they do not rewrite operation names in the conversation or policy text.
 
 ### Static assets not loading
 Check web server file permissions and SELinux context.
@@ -426,7 +478,7 @@ Check web server file permissions and SELinux context.
 Check:
 - frontend server can reach provider URL / Ollama URL / Anthropic URL / NetBox URL
 - TLS validation setting matches the endpoint certificate state
-- tokens and env vars are visible to php-fpm/httpd
+- token references resolve for php-fpm/httpd (`env:NAME` is visible, or `file:NAME` exists under `ZABBIX_AI_SECRET_DIR`)
 
 ## 13. Notes on chat storage
 
@@ -434,7 +486,7 @@ Chat history is stored in browser `sessionStorage` only. The module does not cre
 
 ## 14. Nginx conf
 
-If using the standalone webhook endpoint, verify this is in `/etc/nginx/conf.d/zabbix.conf`:
+The bundled media type uses the standalone webhook endpoint. Verify this is in `/etc/nginx/conf.d/zabbix.conf`:
 
 ```nginx
 location = /ai-webhook {

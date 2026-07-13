@@ -101,8 +101,8 @@
         }
 
         var apiKeyEnvPlaceholders = {
-            openai_compatible: 'OPENAI_API_KEY',
-            anthropic: 'ANTHROPIC_API_KEY',
+            openai_compatible: 'env:OPENAI_API_KEY',
+            anthropic: 'env:ANTHROPIC_API_KEY',
             ollama: ''
         };
 
@@ -116,7 +116,7 @@
                 return;
             }
             var placeholder = apiKeyEnvPlaceholders[typeSelect.value];
-            envInput.placeholder = (placeholder === undefined) ? 'OPENAI_API_KEY' : placeholder;
+            envInput.placeholder = (placeholder === undefined) ? 'env:OPENAI_API_KEY' : placeholder;
         }
 
         root.addEventListener('change', function (event) {
@@ -152,6 +152,29 @@
             });
         }
 
+        // The settings-page plaintext override is deliberately two-step. The
+        // server repeats this validation so a crafted POST cannot bypass it.
+        var plaintextToggle = document.getElementById('ai-allow-plaintext-secrets');
+        var plaintextAckBlock = document.getElementById('ai-plaintext-risk-ack');
+        var plaintextAck = document.getElementById('ai-plaintext-risk-acknowledged');
+
+        function updatePlaintextRiskAcknowledgement() {
+            if (!plaintextToggle || !plaintextAckBlock) {
+                return;
+            }
+
+            var wasEnabled = plaintextToggle.getAttribute('data-initially-enabled') === '1';
+            plaintextAckBlock.style.display = plaintextToggle.checked && !wasEnabled ? '' : 'none';
+            if ((!plaintextToggle.checked || wasEnabled) && plaintextAck) {
+                plaintextAck.checked = false;
+            }
+        }
+
+        if (plaintextToggle) {
+            plaintextToggle.addEventListener('change', updatePlaintextRiskAcknowledgement);
+            updatePlaintextRiskAcknowledgement();
+        }
+
         // AJAX form submission
         var form = document.getElementById('ai-settings-form');
 
@@ -159,16 +182,44 @@
             form.addEventListener('submit', function (event) {
                 event.preventDefault();
 
+                var requestedPlaintext = !!(plaintextToggle && plaintextToggle.checked);
+                var requestedPlaintextAck = !!(plaintextAck && plaintextAck.checked);
+
+                if (plaintextToggle
+                        && requestedPlaintext
+                        && plaintextToggle.getAttribute('data-initially-enabled') !== '1'
+                        && !requestedPlaintextAck) {
+                    showStatus(
+                        'Confirm the plaintext-credential warning before enabling unsafe compatibility mode.',
+                        true
+                    );
+                    return;
+                }
+
                 var submitBtn = form.querySelector('button[type="submit"]');
                 if (submitBtn) {
                     submitBtn.disabled = true;
                     submitBtn.textContent = 'Saving\u2026';
                 }
 
+                var formData = new FormData(form);
+                if (plaintextToggle) {
+                    formData.set(
+                        'secret_storage[allow_plaintext_secrets]',
+                        requestedPlaintext ? '1' : '0'
+                    );
+                }
+                if (plaintextAck) {
+                    formData.set(
+                        'secret_storage[plaintext_risk_acknowledged]',
+                        requestedPlaintextAck ? '1' : '0'
+                    );
+                }
+
                 fetch(form.action, {
                     method: 'POST',
                     credentials: 'same-origin',
-                    body: new FormData(form)
+                    body: formData
                 })
                     .then(function (response) {
                         return response.text().then(function (text) {
@@ -187,6 +238,16 @@
                     })
                     .then(function (data) {
                         if (data.ok) {
+                            if (data.settings_schema_version !== 1
+                                    || data.plaintext_secrets_enabled !== requestedPlaintext) {
+                                showStatus(
+                                    'The server did not confirm the saved secret-storage setting. '
+                                    + 'Deploy the complete AI module to every frontend node, reload PHP-FPM/Apache '
+                                    + 'to clear OPcache, then hard-refresh this page and save again.',
+                                    true
+                                );
+                                return;
+                            }
                             window.location.reload();
                         }
                         else {

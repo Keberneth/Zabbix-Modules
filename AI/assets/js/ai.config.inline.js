@@ -32,14 +32,18 @@
     var activeDrawer = null;
     var activeFormType = null;
     var configChats = {};
+    var configContextGeneration = 0;
+    var configContextAbortController = null;
+    var configDrawerSequence = 0;
 
-    function getConfigChat(formType, hostid) {
-        var key = formType + '_' + (hostid || 'unknown');
+    function getConfigChat(formType, hostid, contextKey) {
+        var key = contextKey || (formType + '_' + (hostid || 'unknown'));
         if (!configChats[key]) {
             configChats[key] = {
                 history: [],
                 sessionId: 'config_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8),
-                context: null
+                context: null,
+                contextEgressConsent: false
             };
         }
         return configChats[key];
@@ -453,7 +457,25 @@
 
         activeFormType = formType;
         var hostid = extractHostId();
-        var chat = getConfigChat(formType, hostid);
+        var formIds = {};
+        try { formIds = extractFormIds(); } catch (e) { formIds = { itemid: '', triggerid: '', discoveryid: '' }; }
+        var parentDiscoveryId = extractParentDiscoveryId();
+        var objectId = formType === 'trigger' || formType === 'trigger_prototype'
+            ? (formIds.triggerid || '')
+            : (formType === 'discovery'
+                ? (formIds.discoveryid || '')
+                : (formIds.itemid || ''));
+        var contextKey = [
+            formType,
+            hostid || 'unknown',
+            objectId || ('new-open-' + (++configDrawerSequence)),
+            parentDiscoveryId || ''
+        ].join(':');
+        var chat = getConfigChat(formType, hostid, contextKey);
+        // Never allow a newly opened object to inherit another object's loaded
+        // context or consent while its own same-origin context fetch is pending.
+        chat.context = null;
+        chat.contextEgressConsent = false;
         var formInfo = FORM_TYPES[formType] || FORM_TYPES['item'];
 
         var drawer = document.createElement('div');
@@ -507,11 +529,12 @@
             '<form class="ai-drawer-compose" id="ai-config-compose">' +
                 '<textarea class="ai-drawer-input" id="ai-config-message" rows="4" placeholder="' + escapeHtml(formInfo.placeholder) + '"></textarea>' +
                 '<div class="ai-drawer-actions">' +
-                    '<button type="submit" class="btn ai-drawer-send" id="ai-config-send">Send</button>' +
+                    '<button type="submit" class="btn ai-drawer-send" id="ai-config-send" disabled>Send</button>' +
                 '</div>' +
             '</form>';
 
         document.body.appendChild(drawer);
+        drawer.dataset.contextKey = contextKey;
         activeDrawer = drawer;
 
         drawer.querySelector('.ai-drawer-close').addEventListener('click', closeDrawer);
@@ -522,14 +545,14 @@
 
         form.addEventListener('submit', function (e) {
             e.preventDefault();
-            sendConfigMessage(formType, hostid, msgField, sendBtn);
+            sendConfigMessage(formType, hostid, contextKey, msgField, sendBtn);
         });
 
         // Enable Ctrl+Enter to send.
         msgField.addEventListener('keydown', function (e) {
             if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
-                sendConfigMessage(formType, hostid, msgField, sendBtn);
+                sendConfigMessage(formType, hostid, contextKey, msgField, sendBtn);
             }
         });
 
@@ -538,14 +561,14 @@
             var reloadBtn = document.getElementById('ai-history-reload');
             if (reloadBtn) {
                 reloadBtn.addEventListener('click', function () {
-                    loadConfigContext(formType, hostid);
+                    loadConfigContext(formType, hostid, contextKey, drawer, formIds, parentDiscoveryId);
                 });
             }
             updateHistoryInfo();
         }
 
-        renderTranscript(formType, hostid);
-        loadConfigContext(formType, hostid);
+        renderTranscript(formType, hostid, contextKey);
+        loadConfigContext(formType, hostid, contextKey, drawer, formIds, parentDiscoveryId);
     }
 
     /**
@@ -637,6 +660,11 @@
     }
 
     function closeDrawer() {
+        configContextGeneration += 1;
+        if (configContextAbortController) {
+            configContextAbortController.abort();
+            configContextAbortController = null;
+        }
         if (activeDrawer) {
             activeDrawer.remove();
             activeDrawer = null;
@@ -644,13 +672,31 @@
         }
     }
 
-    function loadConfigContext(formType, hostid) {
-        var contextEl = document.getElementById('ai-config-context');
+    function loadConfigContext(formType, hostid, contextKey, drawer, formIds, parentDiscoveryId) {
+        if (!drawer || drawer !== activeDrawer || drawer.dataset.contextKey !== contextKey) return;
+        var contextEl = drawer.querySelector('#ai-config-context');
         if (!contextEl) return;
 
-        // Extract the specific item/trigger/discovery ID from the form.
-        var formIds = {};
-        try { formIds = extractFormIds(); } catch (e) { formIds = { itemid: '', triggerid: '', discoveryid: '' }; }
+        var chat = getConfigChat(formType, hostid, contextKey);
+        chat.context = null;
+        chat.contextEgressConsent = false;
+        var sendButton = drawer.querySelector('#ai-config-send');
+        if (sendButton) sendButton.disabled = true;
+        contextEl.innerHTML = '<div class="ai-drawer-loading">Loading configuration context...</div>';
+
+        if (configContextAbortController) {
+            configContextAbortController.abort();
+        }
+        configContextAbortController = typeof AbortController !== 'undefined'
+            ? new AbortController()
+            : null;
+        var requestController = configContextAbortController;
+        var requestGeneration = ++configContextGeneration;
+        function isCurrentRequest() {
+            return requestGeneration === configContextGeneration
+                && activeDrawer === drawer
+                && drawer.dataset.contextKey === contextKey;
+        }
 
         // Extract current form field values from the DOM.
         var formValues = null;
@@ -684,13 +730,15 @@
             }
         }
 
-        var parentDiscoveryId = extractParentDiscoveryId();
         if (parentDiscoveryId) {
             url += '&parent_discoveryid=' + encodeURIComponent(parentDiscoveryId);
         }
 
-        fetch(url, { method: 'GET', credentials: 'same-origin' })
+        var fetchOptions = { method: 'GET', credentials: 'same-origin' };
+        if (requestController) fetchOptions.signal = requestController.signal;
+        fetch(url, fetchOptions)
             .then(function (resp) {
+                if (!isCurrentRequest()) return null;
                 // Guard: if the response is a redirect to login or HTML page,
                 // detect it before trying to parse JSON.
                 var contentType = resp.headers.get('content-type') || '';
@@ -700,6 +748,7 @@
                 return handleJsonResponse(resp);
             })
             .then(function (response) {
+              if (!isCurrentRequest() || response === null) return;
               try {
                 if (!response || !response.ok) {
                     var errMsg = (response && typeof response.error === 'string')
@@ -729,11 +778,11 @@
                     defaultProviderId = response.default_provider_id;
                 }
 
-                var chat = getConfigChat(formType, hostid);
                 // Attach both API context and DOM-extracted form values.
                 response.form_values = formValues;
                 response.form_ids = formIds;
                 chat.context = response;
+                chat.contextEgressConsent = false;
 
                 var html = '';
                 var host = response.host;
@@ -850,6 +899,7 @@
               }
             })
             .catch(function (err) {
+                if (!isCurrentRequest() || (err && err.name === 'AbortError')) return;
                 var msg = (err && typeof err.message === 'string') ? err.message : 'Failed to load context.';
                 console.error('[AI Config] Context fetch error:', err);
                 if (contextEl) {
@@ -861,6 +911,13 @@
                 if (!csrfTokens['ai.chat.send']) {
                     fetchCsrfFallback();
                 }
+            })
+            .finally(function () {
+                if (!isCurrentRequest()) return;
+                if (requestController === configContextAbortController) {
+                    configContextAbortController = null;
+                }
+                if (sendButton) sendButton.disabled = false;
             });
     }
 
@@ -914,27 +971,47 @@
             });
     }
 
-    function sendConfigMessage(formType, hostid, msgField, sendBtn) {
+    function sendConfigMessage(formType, hostid, contextKey, msgField, sendBtn) {
         var message = (msgField.value || '').trim();
         if (!message) return;
 
-        var chat = getConfigChat(formType, hostid);
+        if (!activeDrawer || activeDrawer.dataset.contextKey !== contextKey || sendBtn.disabled) return;
+        var requestDrawer = activeDrawer;
+        var chat = getConfigChat(formType, hostid, contextKey);
+        if (chat.context && !chat.contextEgressConsent) {
+            var approved = window.confirm(
+                'Send the displayed Zabbix configuration context to the selected AI provider?\n\n'
+                + 'Depending on this page, it can include host/item/trigger names, item keys, '
+                + 'preprocessing code, interface addresses, history values, macro values (secret and vault macros are masked), '
+                + 'and recent problem metadata. The data is fenced as untrusted, but fencing does not redact it.'
+            );
+            if (!approved) {
+                showStatus('Context was not sent.', false);
+                return;
+            }
+            chat.contextEgressConsent = true;
+        }
         chat.history.push({ role: 'user', content: message });
-        renderTranscript(formType, hostid);
+        renderTranscript(formType, hostid, contextKey);
         msgField.value = '';
         sendBtn.disabled = true;
         showConfigTypingIndicator(true);
         showStatus('Sending...', false);
 
-        doSend(formType, hostid, message, function () {
+        doSend(formType, hostid, contextKey, message, requestDrawer, function () {
             sendBtn.disabled = false;
             showConfigTypingIndicator(false);
             msgField.focus();
         });
     }
 
-    function doSend(formType, hostid, message, onDone) {
-        var chat = getConfigChat(formType, hostid);
+    function doSend(formType, hostid, contextKey, message, requestDrawer, onDone) {
+        var chat = getConfigChat(formType, hostid, contextKey);
+        function isCurrentDrawer() {
+            return activeDrawer === requestDrawer
+                && requestDrawer
+                && requestDrawer.dataset.contextKey === contextKey;
+        }
 
         var requestHistory = chat.history.slice(0, -1).filter(function (m) {
             return m.role === 'user' || m.role === 'assistant';
@@ -948,9 +1025,11 @@
 
         if (!csrf) {
             chat.history.push({ role: 'assistant', content: '[Error] CSRF token not available. Try closing and reopening the AI drawer.' });
-            renderTranscript(formType, hostid);
-            showStatus('CSRF token missing.', true);
-            if (onDone) onDone();
+            if (isCurrentDrawer()) {
+                renderTranscript(formType, hostid, contextKey);
+                showStatus('CSRF token missing.', true);
+                if (onDone) onDone();
+            }
             return;
         }
 
@@ -963,9 +1042,17 @@
         params.set('eventid', '');
         params.set('hostname', (chat.context && chat.context.host) ? (chat.context.host.host || '') : '');
         params.set('problem_summary', '');
-        params.set('extra_context', contextPrefix);
+        // This blob contains API/DOM-scraped Zabbix data, including trigger
+        // text and preprocessing JavaScript. Route it through the server's
+        // untrusted monitoring-data channel, never the trusted operator field.
+        params.set('extra_context', '');
+        params.set('untrusted_monitoring_context', contextPrefix);
+        // The configuration-assistant surface has no confirmation UI. Keep it
+        // advisory-only so scraped form data cannot trigger read or write tools.
+        params.set('disable_actions', '1');
         params.set('chat_session_id', chat.sessionId);
         params.set('provider_id', defaultProviderId);
+        params.set('provider_user_override', '0');
         params.set(CSRF_FIELD, csrf);
 
         fetch(zbxUrl('ai.chat.send'), {
@@ -981,17 +1068,21 @@
                 }
 
                 chat.history.push({ role: 'assistant', content: response.reply || '' });
-                renderTranscript(formType, hostid);
-                showStatus('Reply received from ' + (response.provider_name || 'AI') + '.', false);
+                if (isCurrentDrawer()) {
+                    renderTranscript(formType, hostid, contextKey);
+                    showStatus('Reply received from ' + (response.provider_name || 'AI') + '.', false);
+                }
             })
             .catch(function (err) {
                 var msg = (err && typeof err.message === 'string') ? err.message : String(err);
                 chat.history.push({ role: 'assistant', content: '[Error] ' + msg });
-                renderTranscript(formType, hostid);
-                showStatus(msg, true);
+                if (isCurrentDrawer()) {
+                    renderTranscript(formType, hostid, contextKey);
+                    showStatus(msg, true);
+                }
             })
             .finally(function () {
-                if (onDone) onDone();
+                if (isCurrentDrawer() && onDone) onDone();
             });
     }
 
@@ -1459,11 +1550,11 @@
     }
 
     // ── Transcript rendering ──
-    function renderTranscript(formType, hostid) {
+    function renderTranscript(formType, hostid, contextKey) {
         var transcript = document.getElementById('ai-config-transcript');
         if (!transcript) return;
 
-        var chat = getConfigChat(formType, hostid);
+        var chat = getConfigChat(formType, hostid, contextKey);
         transcript.innerHTML = '';
 
         if (!chat.history.length) {

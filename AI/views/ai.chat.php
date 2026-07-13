@@ -97,9 +97,9 @@ ob_start();
 
             <label class="ai-label" for="ai-provider-id"><?= $h(_('Provider')) ?></label>
             <select id="ai-provider-id" class="ai-input" <?= $providers ? '' : 'disabled' ?>>
+                <option value=""><?= $h(_('Use configured chat/action default')) ?></option>
                 <?php foreach ($providers as $provider): ?>
                     <?php
-                        $selected = (($provider['id'] ?? '') === ($data['default_provider_id'] ?? '')) ? 'selected' : '';
                         $disabled = !($provider['enabled'] ?? false) ? 'disabled' : '';
                         $label = trim((string) ($provider['name'] ?? $provider['id'] ?? ''));
                         $model = trim((string) ($provider['model'] ?? ''));
@@ -110,9 +110,10 @@ ob_start();
                             $label .= ' ['._('disabled').']';
                         }
                     ?>
-                    <option value="<?= $h($provider['id'] ?? '') ?>" <?= $selected ?> <?= $disabled ?>><?= $h($label) ?></option>
+                    <option value="<?= $h($provider['id'] ?? '') ?>" <?= $disabled ?>><?= $h($label) ?></option>
                 <?php endforeach; ?>
             </select>
+            <div class="ai-muted"><?= $h(_('Changing this selector overrides the configured per-context default for this browser-tab session.')) ?></div>
 
             <label class="ai-label" for="ai-hostname-search"><?= $h(_('Hostname (optional)')) ?></label>
             <div class="ai-searchable-dropdown" id="ai-hostname-dropdown">

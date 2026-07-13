@@ -11,6 +11,10 @@ use APP,
 class Module extends CModule {
 
     public function init(): void {
+        if (!$this->userHasModuleAccess()) {
+            return;
+        }
+
         APP::Component()->get('menu.main')
             ->findOrAdd(_('Monitoring'))
             ->getSubmenu()
@@ -26,12 +30,14 @@ class Module extends CModule {
     }
 
     public function getAssets(): array {
-        $assets = parent::getAssets();
-
         if (!$this->userHasModuleAccess()) {
-            return $assets;
+            return [
+                'css' => [],
+                'js' => []
+            ];
         }
 
+        $assets = parent::getAssets();
         $action = $this->getCurrentAction();
 
         // Inject inline problem assets on the Problems page.
@@ -59,6 +65,6 @@ class Module extends CModule {
 
         $user_type = (int) (CWebUser::$data['type'] ?? 0);
 
-        return $user_type >= USER_TYPE_ZABBIX_USER;
+        return $user_type >= USER_TYPE_ZABBIX_USER && !CWebUser::isGuest();
     }
 }

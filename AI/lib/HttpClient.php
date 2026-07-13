@@ -7,6 +7,7 @@ use RuntimeException;
 class HttpClient {
 
     public static function request(string $method, string $url, array $options = []): array {
+        Util::assertNoEmbeddedUrlCredentials($url);
         $headers = self::normalizeHeaders($options['headers'] ?? []);
         $timeout = (int) ($options['timeout'] ?? 30);
         $verify_peer = array_key_exists('verify_peer', $options) ? (bool) $options['verify_peer'] : true;
@@ -75,10 +76,10 @@ class HttpClient {
             }
 
             if ($curl_error !== '') {
-                $parts[] = $curl_error;
+                $parts[] = Util::sanitizeSensitiveTextForDisplay($curl_error);
             }
 
-            $parts[] = 'URL: '.$effective_url;
+            $parts[] = 'URL: '.Util::sanitizeUrlForDisplay($effective_url !== '' ? $effective_url : $url);
 
             throw new RuntimeException(implode(' — ', $parts));
         }
@@ -121,9 +122,10 @@ class HttpClient {
             if ($error_detail === '') {
                 $error_detail = Util::truncate((string) $response['body'], 600);
             }
+            $error_detail = Util::sanitizeSensitiveTextForDisplay((string) $error_detail);
 
             throw new RuntimeException(
-                'HTTP '.$response['status'].' from '.$url.': '.$error_detail
+                'HTTP '.$response['status'].' from '.Util::sanitizeUrlForDisplay($url).': '.$error_detail
             );
         }
 

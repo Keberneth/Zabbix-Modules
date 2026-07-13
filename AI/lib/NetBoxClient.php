@@ -11,12 +11,6 @@ class NetBoxClient {
     private bool $verify_peer;
     private int $timeout;
 
-    /** @var array<int, array>|null */
-    private ?array $vm_cache = null;
-
-    /** @var array<int, array>|null */
-    private ?array $device_cache = null;
-
     public function __construct(string $url, string $token, bool $verify_peer = true, int $timeout = 10) {
         $this->url = rtrim(trim($url), '/');
         $this->token = trim($token);
@@ -32,7 +26,11 @@ class NetBoxClient {
         }
 
         $url = trim((string) ($config['netbox']['url'] ?? ''));
-        $token = Config::resolveSecret($config['netbox']['token'] ?? '', $config['netbox']['token_env'] ?? '');
+        $token = Config::resolveSecret(
+            $config['netbox']['token'] ?? '',
+            $config['netbox']['token_env'] ?? '',
+            Config::allowsPlaintextSecrets($config)
+        );
 
         if ($url === '' || $token === '') {
             return null;
@@ -44,6 +42,18 @@ class NetBoxClient {
             (bool) ($config['netbox']['verify_peer'] ?? true),
             (int) ($config['netbox']['timeout'] ?? 10)
         );
+    }
+
+    /** Non-secret endpoint and opaque credential identity for confirmation binding. */
+    public function confirmationIdentityFingerprint(): array {
+        Util::assertNoEmbeddedUrlCredentials($this->url);
+
+        return [
+            'url' => Util::sanitizeUrlForDisplay($this->url),
+            'verify_peer' => $this->verify_peer,
+            'timeout' => $this->timeout,
+            'token_hmac' => Crypto::keyedFingerprint($this->token, 'NetBox token identity')
+        ];
     }
 
     /**
@@ -59,17 +69,27 @@ class NetBoxClient {
             return null;
         }
 
-        $vm = $this->findVirtualMachine($hostname);
-        if ($vm !== null) {
-            return ['kind' => 'vm', 'record' => $vm];
+        $target = strtolower($hostname);
+        $matches = [];
+        foreach ([
+            'vm' => '/api/virtualization/virtual-machines/',
+            'device' => '/api/dcim/devices/'
+        ] as $kind => $endpoint) {
+            $data = $this->get($endpoint, ['name' => $hostname, 'limit' => 2]);
+            foreach (($data['results'] ?? []) as $record) {
+                if (strtolower(trim((string) ($record['name'] ?? ''))) === $target) {
+                    $matches[] = ['kind' => $kind, 'record' => $record];
+                }
+            }
+            if ((int) ($data['count'] ?? count($data['results'] ?? [])) > count($data['results'] ?? [])) {
+                // More exact-filtered results exist than were inspected.
+                return null;
+            }
         }
 
-        $device = $this->findDevice($hostname);
-        if ($device !== null) {
-            return ['kind' => 'device', 'record' => $device];
-        }
-
-        return null;
+        // NetBox names may collide across tenants/clusters or between VM and
+        // device objects. A shared-token lookup must never pick the first one.
+        return count($matches) === 1 ? $matches[0] : null;
     }
 
     /**
@@ -90,14 +110,34 @@ class NetBoxClient {
      *
      * @return array<int, array{kind: string, ...}>
      */
-    public function listDevicesAndVMs(array $filters = []): array {
+    public function listDevicesAndVMs(array $filters = [], ?array $allowed_hostnames = null): array {
         $kind = strtolower(trim((string) ($filters['kind'] ?? 'both')));
-        if (!in_array($kind, ['vm', 'device', 'both'], true)) {
+        if ($kind === '') {
             $kind = 'both';
+        }
+        if (!in_array($kind, ['vm', 'device', 'both'], true)) {
+            throw new RuntimeException('NetBox kind filter must be "vm", "device", or "both".');
         }
 
         $limit = (int) ($filters['limit'] ?? 200);
         $limit = max(1, min($limit, 1000));
+
+        // Interactive callers pass the hostnames visible through the current
+        // Zabbix identity. An empty scope deliberately returns no NetBox data;
+        // it must never be interpreted as an unfiltered/global query.
+        $allowed = null;
+        if ($allowed_hostnames !== null) {
+            $allowed = [];
+            foreach ($allowed_hostnames as $hostname) {
+                $hostname = strtolower(trim((string) $hostname));
+                if ($hostname !== '') {
+                    $allowed[$hostname] = true;
+                }
+            }
+            if (!$allowed) {
+                return [];
+            }
+        }
 
         $needles = [];
         foreach (['search', 'platform', 'role', 'site', 'status', 'tenant'] as $key) {
@@ -110,13 +150,50 @@ class NetBoxClient {
         // Filters are applied client-side below, so fetching only $limit rows
         // would silently under-return matches that sit past the first page.
         // Pull a larger (hard-capped) page when any filter is active.
-        $fetch_limit = $needles ? min(1000, max($limit * 5, 200)) : $limit;
+        $fetch_limit = ($needles || $allowed !== null)
+            ? min(1000, max($limit * 5, 200))
+            : $limit;
 
         $rows = [];
+        $vm_results = [];
+        $device_results = [];
+
+        if ($allowed !== null) {
+            // Authorization uniqueness is global across VM+device namespaces,
+            // independent of the output kind. Inspect complete paginated sets.
+            $vm_results = $this->getAllPages('/api/virtualization/virtual-machines/');
+            $device_results = $this->getAllPages('/api/dcim/devices/');
+        }
+        else {
+            if ($kind === 'vm' || $kind === 'both') {
+                $vms = $this->get('/api/virtualization/virtual-machines/', ['limit' => $fetch_limit]);
+                $vm_results = is_array($vms['results'] ?? null) ? $vms['results'] : [];
+            }
+            if ($kind === 'device' || $kind === 'both') {
+                $devices = $this->get('/api/dcim/devices/', ['limit' => $fetch_limit]);
+                $device_results = is_array($devices['results'] ?? null) ? $devices['results'] : [];
+            }
+        }
+
+        $canonical_counts = [];
+        if ($allowed !== null) {
+            foreach (array_merge($vm_results, $device_results) as $record) {
+                $canonical_name = strtolower(trim((string) ($record['name'] ?? '')));
+                if ($canonical_name !== '' && isset($allowed[$canonical_name])) {
+                    $canonical_counts[$canonical_name] = ($canonical_counts[$canonical_name] ?? 0) + 1;
+                }
+            }
+        }
 
         if ($kind === 'vm' || $kind === 'both') {
-            $vms = $this->get('/api/virtualization/virtual-machines/', ['limit' => $fetch_limit]);
-            foreach (($vms['results'] ?? []) as $vm) {
+            foreach ($vm_results as $vm) {
+                $canonical_name = strtolower(trim((string) ($vm['name'] ?? '')));
+                if ($allowed !== null && !isset($allowed[strtolower(trim((string) ($vm['name'] ?? '')))])) {
+                    continue;
+                }
+                if ($allowed !== null && ($canonical_counts[$canonical_name] ?? 0) !== 1) {
+                    continue;
+                }
                 if (!$this->matchesFilters($vm, $needles, 'vm')) {
                     continue;
                 }
@@ -128,8 +205,14 @@ class NetBoxClient {
         }
 
         if ($kind === 'device' || $kind === 'both') {
-            $devices = $this->get('/api/dcim/devices/', ['limit' => $fetch_limit]);
-            foreach (($devices['results'] ?? []) as $device) {
+            foreach ($device_results as $device) {
+                $canonical_name = strtolower(trim((string) ($device['name'] ?? '')));
+                if ($allowed !== null && !isset($allowed[strtolower(trim((string) ($device['name'] ?? '')))])) {
+                    continue;
+                }
+                if ($allowed !== null && ($canonical_counts[$canonical_name] ?? 0) !== 1) {
+                    continue;
+                }
                 if (!$this->matchesFilters($device, $needles, 'device')) {
                     continue;
                 }
@@ -232,17 +315,15 @@ class NetBoxClient {
             return '';
         }
 
-        $vm = $this->findVirtualMachine($hostname);
-
-        if ($vm) {
+        $match = $this->lookupByHostname($hostname);
+        if (($match['kind'] ?? '') === 'vm') {
+            $vm = $match['record'];
             $services = $this->getServices(['virtual_machine_id' => $vm['id'] ?? 0]);
 
             return $this->formatVirtualMachine($vm, $services);
         }
-
-        $device = $this->findDevice($hostname);
-
-        if ($device) {
+        if (($match['kind'] ?? '') === 'device') {
+            $device = $match['record'];
             $services = $this->getServices(['device_id' => $device['id'] ?? 0]);
 
             return $this->formatDevice($device, $services);
@@ -251,86 +332,22 @@ class NetBoxClient {
         return 'No NetBox VM or device match found.';
     }
 
-    private function getAllVMs(): array {
-        if ($this->vm_cache !== null) {
-            return $this->vm_cache;
-        }
-
-        try {
-            $data = $this->get('/api/virtualization/virtual-machines/', ['limit' => 1000]);
-            $this->vm_cache = is_array($data['results'] ?? null) ? $data['results'] : [];
-        }
-        catch (\Throwable $e) {
-            $this->vm_cache = [];
-        }
-
-        return $this->vm_cache;
-    }
-
-    private function getAllDevices(): array {
-        if ($this->device_cache !== null) {
-            return $this->device_cache;
-        }
-
-        try {
-            $data = $this->get('/api/dcim/devices/', ['limit' => 1000]);
-            $this->device_cache = is_array($data['results'] ?? null) ? $data['results'] : [];
-        }
-        catch (\Throwable $e) {
-            $this->device_cache = [];
-        }
-
-        return $this->device_cache;
-    }
-
-    private function findVirtualMachine(string $hostname): ?array {
-        $target = strtolower(trim($hostname));
-        if ($target === '') {
-            return null;
-        }
-
-        foreach ($this->getAllVMs() as $vm) {
-            $name = strtolower((string) ($vm['name'] ?? ''));
-            $display = strtolower((string) ($vm['display'] ?? ''));
-
-            if (strpos($name, $target) !== false || strpos($display, $target) !== false) {
-                return $vm;
-            }
-        }
-
-        return null;
-    }
-
-    private function findDevice(string $hostname): ?array {
-        $target = strtolower(trim($hostname));
-        if ($target === '') {
-            return null;
-        }
-
-        foreach ($this->getAllDevices() as $device) {
-            $name = strtolower((string) ($device['name'] ?? ''));
-            $display = strtolower((string) ($device['display'] ?? ''));
-
-            if (strpos($name, $target) !== false || strpos($display, $target) !== false) {
-                return $device;
-            }
-        }
-
-        return null;
-    }
-
     /**
      * Scan a free-form text (typically a user chat message) for tokens that
      * look like server hostnames and resolve those that exist in NetBox.
      *
      * Returns an array of [hostname => formatted-NetBox-record] for hostnames
-     * that matched a VM or device. Uses the cached VM/device list so a chat
-     * turn that mentions several hostnames still incurs only one VM + one
-     * device API call.
+     * that matched exactly one VM or device. Each candidate is resolved with
+     * exact server-side name filters so pagination and cross-kind duplicates
+     * fail closed instead of selecting the first record.
      *
      * @return array<string, string>
      */
-    public function detectAndLookupHostnames(string $text, int $max_candidates = 5): array {
+    public function detectAndLookupHostnames(
+        string $text,
+        int $max_candidates = 5,
+        ?array $allowed_hostnames = null
+    ): array {
         $text = trim($text);
         if ($text === '' || $max_candidates < 1) {
             return [];
@@ -341,19 +358,36 @@ class NetBoxClient {
             return [];
         }
 
+        // Interactive callers pass exact technical hostnames returned
+        // by Zabbix under the current user's identity. Filter before any NetBox
+        // query so an unauthorized hostname in chat cannot probe shared-token
+        // inventory. null is reserved for trusted non-interactive callers.
+        if ($allowed_hostnames !== null) {
+            $allowed = [];
+            foreach ($allowed_hostnames as $allowed_hostname) {
+                $allowed[strtolower(trim((string) $allowed_hostname))] = true;
+            }
+            $candidates = array_values(array_filter($candidates, static function($candidate) use ($allowed) {
+                return isset($allowed[strtolower(trim((string) $candidate))]);
+            }));
+            if (!$candidates) {
+                return [];
+            }
+        }
+
         $matches = [];
         foreach ($candidates as $candidate) {
             // Use single-pass: only call getContextForHostname when we have a
             // match candidate, so we don't pay the formatting cost for tokens
             // that don't exist in NetBox.
-            $vm = $this->findVirtualMachine($candidate);
-            if ($vm !== null) {
+            $match = $this->lookupByHostname($candidate);
+            if (($match['kind'] ?? '') === 'vm') {
+                $vm = $match['record'];
                 $services = $this->getServices(['virtual_machine_id' => $vm['id'] ?? 0]);
                 $matches[$candidate] = $this->formatVirtualMachine($vm, $services);
-                continue;
             }
-            $device = $this->findDevice($candidate);
-            if ($device !== null) {
+            elseif (($match['kind'] ?? '') === 'device') {
+                $device = $match['record'];
                 $services = $this->getServices(['device_id' => $device['id'] ?? 0]);
                 $matches[$candidate] = $this->formatDevice($device, $services);
             }
@@ -462,6 +496,32 @@ class NetBoxClient {
         $data = $this->get('/api/ipam/services/', $filtered);
 
         return $data['results'] ?? [];
+    }
+
+    /** Fetch a complete NetBox result set with a hard safety ceiling. */
+    private function getAllPages(string $endpoint, int $max_records = 10000): array {
+        $results = [];
+        $offset = 0;
+        $page_size = 500;
+
+        do {
+            $data = $this->get($endpoint, ['limit' => $page_size, 'offset' => $offset]);
+            $page = is_array($data['results'] ?? null) ? $data['results'] : [];
+            $total = max(count($results) + count($page), (int) ($data['count'] ?? 0));
+            if ($total > $max_records) {
+                throw new RuntimeException(
+                    'NetBox inventory exceeds the '.$max_records.'-record security-scoping limit; narrow inventory or raise a reviewed policy limit.'
+                );
+            }
+
+            $results = array_merge($results, $page);
+            $offset += count($page);
+            if (!$page && $offset < $total) {
+                throw new RuntimeException('NetBox pagination ended before the full authorization scope was inspected.');
+            }
+        } while ($offset < $total);
+
+        return $results;
     }
 
     private function get(string $endpoint, array $params = []): array {

@@ -4,6 +4,13 @@ namespace Modules\AI\Lib;
 
 use RuntimeException;
 
+/**
+ * Raised only when Zabbix explicitly rejects the supplied authentication.
+ * Keeping this distinct from transport/API failures prevents unsafe retries.
+ */
+class ZabbixApiAuthenticationException extends RuntimeException {
+}
+
 class ZabbixApiClient {
 
     private string $url;
@@ -13,27 +20,44 @@ class ZabbixApiClient {
     private string $auth_mode;
     private string $transport;
     private ?string $frontend_url_cache = null;
+    private array $confirmed_target_bindings = [];
 
-    public function __construct(string $url, string $token, bool $verify_peer = true, int $timeout = 15, string $auth_mode = 'auto', string $transport = 'http') {
+    public function __construct(string $url, string $token, bool $verify_peer = true, int $timeout = 15, string $auth_mode = 'bearer', string $transport = 'http') {
         $this->url = trim($url);
         $this->token = trim($token);
         $this->verify_peer = $verify_peer;
         $this->timeout = $timeout;
-        $this->auth_mode = $auth_mode !== '' ? $auth_mode : 'auto';
+        $this->auth_mode = $auth_mode !== '' ? $auth_mode : 'bearer';
         $this->transport = $transport === 'frontend' ? 'frontend' : 'http';
+
+        if ($this->transport === 'http' && $this->token !== '' && !self::isValidServiceTokenUrl($this->url)) {
+            throw new RuntimeException('The Zabbix API service-token URL must be an absolute HTTPS URL without embedded credentials.');
+        }
     }
 
     public static function fromConfig(array $config): ?self {
         $config = Config::mergeWithDefaults($config);
-        $token = Config::resolveSecret($config['zabbix_api']['token'] ?? '', $config['zabbix_api']['token_env'] ?? '');
+        $token = Config::resolveSecret(
+            $config['zabbix_api']['token'] ?? '',
+            $config['zabbix_api']['token_env'] ?? '',
+            Config::allowsPlaintextSecrets($config)
+        );
         $url = trim((string) ($config['zabbix_api']['url'] ?? ''));
-
-        if ($url === '') {
-            $url = self::deriveApiUrl();
-        }
 
         if ($token === '') {
             return null;
+        }
+
+        // A service token must never be sent to a destination derived from the
+        // request Host header. Requiring one fixed HTTPS URL also makes the
+        // configured host the effective allowlist; HttpClient does not follow
+        // redirects, so credentials cannot be redirected elsewhere.
+        if ($url === '') {
+            throw new RuntimeException('An explicit HTTPS Zabbix API URL is required when a service token is configured.');
+        }
+
+        if (!self::isValidServiceTokenUrl($url)) {
+            throw new RuntimeException('The Zabbix API service-token URL must be an absolute HTTPS URL without embedded credentials.');
         }
 
         return new self(
@@ -41,14 +65,15 @@ class ZabbixApiClient {
             $token,
             (bool) ($config['zabbix_api']['verify_peer'] ?? true),
             (int) ($config['zabbix_api']['timeout'] ?? 15),
-            (string) ($config['zabbix_api']['auth_mode'] ?? 'auto')
+            (string) ($config['zabbix_api']['auth_mode'] ?? 'bearer')
         );
     }
 
     /**
      * Prefer Zabbix's in-process frontend API facade for authenticated frontend
-     * controllers, falling back to the HTTP JSON-RPC client only when the module
-     * is not running inside a valid Zabbix frontend user session.
+     * controllers. By default, interactive reads fail closed when the current
+     * user's frontend API identity is unavailable. Split/token-only deployments
+     * may explicitly opt into the configured service-token fallback.
      *
      * This avoids a fragile frontend -> HTTP -> frontend loop in split
      * deployments. Webhook/standalone automation should keep using fromConfig()
@@ -59,6 +84,11 @@ class ZabbixApiClient {
 
         if ($frontend !== null) {
             return $frontend;
+        }
+
+        $config = Config::mergeWithDefaults($config);
+        if (!Util::truthy($config['zabbix_api']['allow_service_token_read_fallback'] ?? false)) {
+            return null;
         }
 
         return self::fromConfig($config);
@@ -113,16 +143,6 @@ class ZabbixApiClient {
         );
     }
 
-    public static function deriveApiUrl(): string {
-        $https = !empty($_SERVER['HTTPS']) && strtolower((string) $_SERVER['HTTPS']) !== 'off';
-        $scheme = $https ? 'https' : 'http';
-        $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-        $script_name = $_SERVER['SCRIPT_NAME'] ?? '/zabbix.php';
-        $base_path = rtrim(str_replace('\\', '/', dirname($script_name)), '/.');
-
-        return $scheme.'://'.$host.$base_path.'/api_jsonrpc.php';
-    }
-
     public function call(string $method, array $params = []): array {
         if ($this->transport === 'frontend') {
             return $this->callWithFrontendApi($method, $params);
@@ -139,12 +159,171 @@ class ZabbixApiClient {
         try {
             return $this->callWithBearer($method, $params);
         }
-        catch (\Throwable $e) {
+        catch (ZabbixApiAuthenticationException $e) {
+            // `auto` exists only for compatibility with old Zabbix versions.
+            // Never issue a second request for a mutating method: the first
+            // request may have committed even if its response was lost.
+            if (!self::isReadOnlyMethod($method)) {
+                throw $e;
+            }
+
             return $this->callWithLegacyAuthField($method, $params);
         }
     }
 
+    private static function isReadOnlyMethod(string $method): bool {
+        return substr($method, -4) === '.get';
+    }
+
+    private static function isValidServiceTokenUrl(string $url): bool {
+        $parts = parse_url($url);
+        $valid = is_array($parts)
+            && strtolower((string) ($parts['scheme'] ?? '')) === 'https'
+            && trim((string) ($parts['host'] ?? '')) !== ''
+            && !isset($parts['user'])
+            && !isset($parts['pass'])
+            && !isset($parts['fragment']);
+        if (!$valid) {
+            return false;
+        }
+        try {
+            Util::assertNoEmbeddedUrlCredentials($url);
+        }
+        catch (\Throwable $e) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Install the encrypted, confirmation-bound target registry for one write
+     * execution. Name-based helpers below then query the frozen immutable ID
+     * and verify its human-visible fingerprint instead of resolving a fresh
+     * same-name object after confirmation.
+     */
+    public function bindConfirmedTargets(array $bindings): void {
+        if (($bindings['version'] ?? '') !== 'zabbix-ai-targets-v1') {
+            throw new RuntimeException('Confirmed write target registry is missing or unsupported.');
+        }
+        $this->confirmed_target_bindings = $bindings;
+    }
+
+    /** Non-secret display fields plus an opaque service-token identity digest. */
+    public function confirmationIdentityFingerprint(): array {
+        if ($this->transport === 'frontend') {
+            $userid = '';
+            if (class_exists('CWebUser') && isset(\CWebUser::$data) && is_array(\CWebUser::$data)) {
+                $userid = (string) (\CWebUser::$data['userid'] ?? '');
+            }
+            return [
+                'transport' => 'frontend_user',
+                'userid' => $userid
+            ];
+        }
+
+        return [
+            'transport' => 'service_token',
+            'api_url' => Util::sanitizeUrlForDisplay($this->url),
+            'verify_peer' => $this->verify_peer,
+            'auth_mode' => $this->auth_mode,
+            'token_hmac' => Crypto::keyedFingerprint(
+                $this->token,
+                'Zabbix service-token identity'
+            )
+        ];
+    }
+
+    private function confirmedTarget(string $kind, string $name): ?array {
+        $targets = $this->confirmed_target_bindings[$kind] ?? null;
+        if (!is_array($targets) || !array_key_exists($name, $targets)) {
+            return null;
+        }
+
+        return is_array($targets[$name]) ? $targets[$name] : null;
+    }
+
+    private function assertConfirmedMaintenance(array $maintenance): void {
+        $maintenanceid = (string) ($maintenance['maintenanceid'] ?? '');
+        $confirmed = $this->confirmedTarget('maintenances', $maintenanceid);
+        if ($confirmed === null) {
+            return;
+        }
+        $period_json = json_encode(
+            $maintenance['timeperiods'] ?? [],
+            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION
+        );
+        if ($period_json === false
+            || (string) ($confirmed['id'] ?? '') !== $maintenanceid
+            || (string) ($confirmed['name'] ?? '') !== (string) ($maintenance['name'] ?? '')
+            || (string) ($confirmed['active_since'] ?? '') !== (string) ($maintenance['active_since'] ?? '')
+            || (string) ($confirmed['active_till'] ?? '') !== (string) ($maintenance['active_till'] ?? '')
+            || (string) ($confirmed['timeperiods_sha256'] ?? '') !== hash('sha256', $period_json)) {
+            throw new RuntimeException('Confirmed maintenance target changed after preview. Review a fresh preview.');
+        }
+    }
+
+    /** Recheck an exact web-scenario name set against the staged host ID. */
+    public function assertConfirmedWebScenario(string $hostname, string $scenario_name): void {
+        $key = $hostname.' / '.$scenario_name;
+        $scenarios = $this->confirmed_target_bindings['web_scenarios'] ?? null;
+        if (!is_array($scenarios) || !array_key_exists($key, $scenarios)) {
+            return;
+        }
+        $expected = is_array($scenarios[$key]) ? $scenarios[$key] : [];
+        $hostid = $this->getHostIdByName($hostname);
+        if ($hostid === null) {
+            throw new RuntimeException('Confirmed web-scenario host disappeared. Review a fresh preview.');
+        }
+        $rows = $this->call('httptest.get', [
+            'hostids' => [$hostid],
+            'output' => ['httptestid', 'hostid', 'name'],
+            'filter' => ['name' => [$scenario_name]]
+        ]);
+        $current = [];
+        foreach ($rows as $row) {
+            $current[] = [
+                'hostid' => (string) ($row['hostid'] ?? $hostid),
+                'id' => (string) ($row['httptestid'] ?? ''),
+                'name' => (string) ($row['name'] ?? '')
+            ];
+        }
+        usort($current, static function(array $a, array $b): int {
+            return strnatcmp($a['id'], $b['id']);
+        });
+        if ($current !== $expected) {
+            throw new RuntimeException('Confirmed web-scenario target changed after preview. Review a fresh preview.');
+        }
+    }
+
     public function getHostIdByName(string $hostname): ?string {
+        $confirmed = $this->confirmedTarget('hosts', $hostname);
+        if ($confirmed !== null) {
+            if (($confirmed['state'] ?? '') === 'absent') {
+                $current = $this->call('host.get', [
+                    'output' => ['hostid'],
+                    'filter' => ['host' => [$hostname]]
+                ]);
+                if ($current) {
+                    throw new RuntimeException('Host "'.$hostname.'" appeared after confirmation. Review a fresh preview.');
+                }
+                return null;
+            }
+
+            $hostid = trim((string) ($confirmed['id'] ?? ''));
+            $current = $hostid !== '' ? $this->call('host.get', [
+                'hostids' => [$hostid],
+                'output' => ['hostid', 'host', 'name']
+            ]) : [];
+            if (count($current) !== 1
+                || (string) ($current[0]['host'] ?? '') !== (string) ($confirmed['technical_name'] ?? '')
+                || (string) ($current[0]['name'] ?? '') !== (string) ($confirmed['visible_name'] ?? '')) {
+                throw new RuntimeException('Confirmed host target "'.$hostname.'" changed or disappeared. Review a fresh preview.');
+            }
+
+            return $hostid;
+        }
+
         $result = $this->call('host.get', [
             'output' => ['hostid'],
             'filter' => [
@@ -280,12 +459,18 @@ class ZabbixApiClient {
             $params['searchByAny'] = true;
         }
 
-        $status = strtolower(trim((string) ($filters['status'] ?? '')));
+        $status = strtolower(trim((string) ($filters['status'] ?? 'enabled')));
+        if ($status === '') {
+            $status = 'enabled';
+        }
         if ($status === 'enabled') {
             $params['filter']['status'] = 0;
         }
         elseif ($status === 'disabled') {
             $params['filter']['status'] = 1;
+        }
+        else {
+            throw new RuntimeException('Host status filter must be "enabled" or "disabled".');
         }
 
         $tag = trim((string) ($filters['tag'] ?? ''));
@@ -457,9 +642,10 @@ class ZabbixApiClient {
 
         if (!empty($params['host'])) {
             $host_id = $this->getHostIdByName((string) $params['host']);
-            if ($host_id !== null) {
-                $api_params['hostids'] = [$host_id];
+            if ($host_id === null) {
+                return [];
             }
+            $api_params['hostids'] = [$host_id];
         }
 
         if (!empty($params['search'])) {
@@ -500,9 +686,10 @@ class ZabbixApiClient {
                 'filter' => ['name' => [$host_group]]
             ]);
 
-            if ($groups) {
-                $params['groupids'] = array_column($groups, 'groupid');
+            if (!$groups) {
+                return [];
             }
+            $params['groupids'] = array_column($groups, 'groupid');
         }
 
         $items = $this->call('item.get', $params);
@@ -527,13 +714,17 @@ class ZabbixApiClient {
      * Get host details including inventory, groups, interfaces.
      */
     public function getHostInfo(string $hostname): ?array {
+        $hostid = $this->getHostIdByName($hostname);
+        if ($hostid === null) {
+            return null;
+        }
         $result = $this->call('host.get', [
             'output' => ['hostid', 'host', 'name', 'status', 'description', 'maintenance_status'],
             'selectHostGroups' => ['groupid', 'name'],
             'selectInterfaces' => ['ip', 'dns', 'port', 'type', 'main'],
             'selectInventory' => 'extend',
             'selectTags' => ['tag', 'value'],
-            'filter' => ['host' => [$hostname]]
+            'hostids' => [$hostid]
         ]);
 
         $host = $result[0] ?? null;
@@ -619,6 +810,7 @@ class ZabbixApiClient {
             'hosts' => $host_ids,
             'timeperiods' => [[
                 'timeperiod_type' => 0,
+                'start_date' => $window['active_since'],
                 'period' => $window['period']
             ]],
             'description' => $description
@@ -676,6 +868,7 @@ class ZabbixApiClient {
             'groups' => $group_ids,
             'timeperiods' => [[
                 'timeperiod_type' => 0,
+                'start_date' => $window['active_since'],
                 'period' => $window['period']
             ]],
             'description' => $description
@@ -790,6 +983,7 @@ class ZabbixApiClient {
             'tags' => $normalized_tags,
             'timeperiods' => [[
                 'timeperiod_type' => 0,
+                'start_date' => $window['active_since'],
                 'period' => $window['period']
             ]],
             'description' => $description
@@ -864,6 +1058,12 @@ class ZabbixApiClient {
         if ($maintenance_id === '' || $additional_hours <= 0) {
             throw new RuntimeException('Maintenance id and positive additional_hours are required.');
         }
+        $raw_additional_seconds = $additional_hours * 3600;
+        $additional_seconds = (int) round($raw_additional_seconds);
+        if (abs($raw_additional_seconds - $additional_seconds) > 0.01
+            || $additional_seconds < 60 || $additional_seconds % 60 !== 0) {
+            throw new RuntimeException('additional_hours must represent at least one exact whole minute.');
+        }
 
         $existing = $this->call('maintenance.get', [
             'maintenanceids' => [$maintenance_id],
@@ -876,25 +1076,72 @@ class ZabbixApiClient {
         }
 
         $m = $existing[0];
+        $this->assertConfirmedMaintenance($m);
         $old_till = (int) ($m['active_till'] ?? 0);
-        $now = time();
+        $now = (int) floor(time() / 60) * 60;
         $base = max($old_till, $now);
-        $new_till = $base + (int) ($additional_hours * 3600);
+        $new_till = $base + $additional_seconds;
+
+        // maintenance.update replaces the whole timeperiods set, so periods must
+        // be sent back complete.  A maintenance with multiple/mixed one-time
+        // periods has no unambiguous period to extend: stretching every one to
+        // the envelope end would silently turn separated windows into continuous
+        // maintenance.  Support only this module's simple one-time shape, or a
+        // recurring-only schedule whose envelope alone is extended.
+        $source_periods = is_array($m['timeperiods'] ?? null) ? $m['timeperiods'] : [];
+        if (!$source_periods) {
+            throw new RuntimeException('This maintenance has no schedule periods and cannot be extended safely in AI chat.');
+        }
+        $one_time_periods = array_values(array_filter($source_periods, static function($tp): bool {
+            return is_array($tp) && (int) ($tp['timeperiod_type'] ?? 0) === 0;
+        }));
+        if ($one_time_periods && (count($one_time_periods) !== 1 || count($source_periods) !== 1)) {
+            throw new RuntimeException('Maintenance with mixed or multiple one-time periods must be extended directly in Zabbix.');
+        }
 
         $timeperiods = [];
-        foreach ($m['timeperiods'] ?? [] as $tp) {
-            $timeperiods[] = [
-                'timeperiod_type' => (int) ($tp['timeperiod_type'] ?? 0),
-                'period' => max($new_till - (int) ($m['active_since'] ?? $now), (int) ($tp['period'] ?? 0))
-            ];
+        foreach ($source_periods as $tp) {
+            if (!is_array($tp)) {
+                throw new RuntimeException('This maintenance has an invalid schedule period and cannot be extended safely.');
+            }
+            $type = (int) ($tp['timeperiod_type'] ?? 0);
+            if ($type === 0) {
+                $tp_start = (int) ($tp['start_date'] ?? ($m['active_since'] ?? $now));
+                $old_period = (int) ($tp['period'] ?? 0);
+                if ($tp_start <= 0 || $old_period <= 0 || $tp_start + $old_period !== $old_till) {
+                    throw new RuntimeException('This one-time maintenance period does not end at active_till and cannot be extended safely in AI chat.');
+                }
+                $new_period = $new_till - $tp_start;
+                if ($new_period > 86399940) {
+                    throw new RuntimeException('Extending this maintenance would exceed Zabbix\'s maximum one-time period.');
+                }
+                $timeperiods[] = [
+                    'timeperiod_type' => 0,
+                    'start_date' => $tp_start,
+                    'period' => $new_period
+                ];
+            }
+            else {
+                // The API rejects fields that do not apply to the period type
+                // ("unexpected parameter"), so only round-trip the valid ones:
+                // daily (2), weekly (3), monthly (4).
+                $fields_by_type = [
+                    2 => ['every', 'start_time', 'period'],
+                    3 => ['every', 'dayofweek', 'start_time', 'period'],
+                    4 => ['every', 'month', 'dayofweek', 'day', 'start_time', 'period']
+                ];
+                if (!isset($fields_by_type[$type])) {
+                    throw new RuntimeException('This maintenance uses an unsupported recurring schedule type and cannot be extended safely.');
+                }
+                $clean = ['timeperiod_type' => $type];
+                foreach ($fields_by_type[$type] as $field) {
+                    if (isset($tp[$field])) {
+                        $clean[$field] = (int) $tp[$field];
+                    }
+                }
+                $timeperiods[] = $clean;
+            }
         }
-        if (!$timeperiods) {
-            $timeperiods = [[
-                'timeperiod_type' => 0,
-                'period' => $new_till - (int) ($m['active_since'] ?? $now)
-            ]];
-        }
-
         $this->call('maintenance.update', [
             'maintenanceid' => $maintenance_id,
             'active_till' => $new_till,
@@ -923,7 +1170,8 @@ class ZabbixApiClient {
 
         $existing = $this->call('maintenance.get', [
             'maintenanceids' => [$maintenance_id],
-            'output' => ['maintenanceid', 'name', 'active_since', 'active_till']
+            'output' => ['maintenanceid', 'name', 'active_since', 'active_till'],
+            'selectTimeperiods' => 'extend'
         ]);
 
         if (!$existing) {
@@ -931,6 +1179,7 @@ class ZabbixApiClient {
         }
 
         $m = $existing[0];
+        $this->assertConfirmedMaintenance($m);
 
         if ($delete) {
             $this->call('maintenance.delete', [$maintenance_id]);
@@ -941,16 +1190,26 @@ class ZabbixApiClient {
             ];
         }
 
-        $now = time();
+        // Zabbix stores maintenance boundaries at minute precision.  Freeze
+        // "now" to the same boundary so the confirmed/result time is exact.
+        $now = (int) floor(time() / 60) * 60;
+        $now_minute = (int) floor($now / 60) * 60;
         $active_since = (int) ($m['active_since'] ?? $now);
 
-        // active_till must be strictly greater than active_since.
-        $new_till = max($now, $active_since + 60);
-
-        $this->call('maintenance.update', [
+        // active_till must be strictly greater than active_since. If the
+        // window starts in the future (or less than one minute ago), move the
+        // tiny envelope wholly into the past so "end now" cannot activate it
+        // later merely to satisfy that invariant.
+        $update = [
             'maintenanceid' => $maintenance_id,
-            'active_till' => $new_till
-        ]);
+            'active_till' => $now_minute
+        ];
+        if ($active_since + 60 > $now_minute) {
+            $update['active_since'] = $now_minute - 60;
+        }
+        $new_till = $now_minute;
+
+        $this->call('maintenance.update', $update);
 
         return [
             'maintenanceid' => $maintenance_id,
@@ -970,10 +1229,18 @@ class ZabbixApiClient {
             : time();
 
         if ($active_since === false) {
-            $active_since = time();
+            throw new RuntimeException('start_time is invalid. Use an ISO 8601 timestamp or YYYY-MM-DD HH:MM.');
         }
 
-        $period = (int) ($duration_hours * 3600);
+        $raw_period = $duration_hours * 3600;
+        $period = (int) round($raw_period);
+        if (abs($raw_period - $period) > 0.01 || $period % 60 !== 0) {
+            throw new RuntimeException('Maintenance duration must represent an exact whole number of minutes.');
+        }
+        if ($period < 300 || $period > 86399940) {
+            throw new RuntimeException('Maintenance duration must be a whole-minute period between 300 and 86399940 seconds.');
+        }
+        $active_since = (int) floor($active_since / 60) * 60;
         $active_till = $active_since + $period;
 
         return [
@@ -987,34 +1254,47 @@ class ZabbixApiClient {
      * Get a template ID by template name (technical name).
      */
     public function getTemplateIdByName(string $template_name): ?string {
-        // Try exact match first.
-        $result = $this->call('template.get', [
-            'output' => ['templateid'],
-            'filter' => ['host' => [$template_name]]
-        ]);
+        $confirmed = $this->confirmedTarget('templates', $template_name);
+        if ($confirmed !== null) {
+            $templateid = trim((string) ($confirmed['id'] ?? ''));
+            $current = $templateid !== '' ? $this->call('template.get', [
+                'templateids' => [$templateid],
+                'output' => ['templateid', 'host', 'name']
+            ]) : [];
+            if (count($current) !== 1
+                || (string) ($current[0]['host'] ?? '') !== (string) ($confirmed['technical_name'] ?? '')
+                || (string) ($current[0]['name'] ?? '') !== (string) ($confirmed['visible_name'] ?? '')) {
+                throw new RuntimeException('Confirmed template target "'.$template_name.'" changed or disappeared. Review a fresh preview.');
+            }
 
-        if ($result) {
-            return $result[0]['templateid'] ?? null;
+            return $templateid;
         }
 
-        // Try visible name match.
-        $result = $this->call('template.get', [
-            'output' => ['templateid'],
-            'filter' => ['name' => [$template_name]]
-        ]);
+        $matches = [];
 
-        if ($result) {
-            return $result[0]['templateid'] ?? null;
+        // Resolve exact technical and visible names, then require one unique
+        // template across both namespaces. Partial search must never select a
+        // write target or silently broaden a scoped read.
+        foreach (['host', 'name'] as $field) {
+            $result = $this->call('template.get', [
+                'output' => ['templateid', 'host', 'name'],
+                'filter' => [$field => [$template_name]]
+            ]);
+            foreach ($result as $template) {
+                $template_id = trim((string) ($template['templateid'] ?? ''));
+                if ($template_id !== '') {
+                    $matches[$template_id] = $template;
+                }
+            }
         }
 
-        // Try search (partial match).
-        $result = $this->call('template.get', [
-            'output' => ['templateid'],
-            'search' => ['host' => $template_name],
-            'limit' => 5
-        ]);
+        if (count($matches) !== 1) {
+            return null;
+        }
 
-        return $result[0]['templateid'] ?? null;
+        $match = reset($matches);
+
+        return is_array($match) ? (string) ($match['templateid'] ?? '') : null;
     }
 
     /**
@@ -1035,15 +1315,17 @@ class ZabbixApiClient {
 
         if ($template_name !== '') {
             $tid = $this->getTemplateIdByName($template_name);
-            if ($tid !== null) {
-                $params['templateids'] = [$tid];
+            if ($tid === null) {
+                return null;
             }
+            $params['templateids'] = [$tid];
         }
         elseif ($hostname !== '') {
             $hid = $this->getHostIdByName($hostname);
-            if ($hid !== null) {
-                $params['hostids'] = [$hid];
+            if ($hid === null) {
+                return null;
             }
+            $params['hostids'] = [$hid];
         }
 
         $triggers = $this->call('trigger.get', $params);
@@ -1091,9 +1373,10 @@ class ZabbixApiClient {
 
         if ($hostname !== '') {
             $hid = $this->getHostIdByName($hostname);
-            if ($hid !== null) {
-                $params['hostids'] = [$hid];
+            if ($hid === null) {
+                return [];
             }
+            $params['hostids'] = [$hid];
         }
 
         if (!empty($filters['search'])) {
@@ -1136,12 +1419,11 @@ class ZabbixApiClient {
      */
     public function createUser(string $username, string $name, string $surname, string $passwd, array $usrgrps, int $roleid): array {
         $groups = [];
-        foreach ($usrgrps as $grp) {
-            if (is_array($grp)) {
-                $groups[] = $grp;
-            } else {
-                $groups[] = ['usrgrpid' => (string) $grp];
+        foreach ($usrgrps as $index => $grp) {
+            if (!is_string($grp) || !preg_match('/^[1-9]\d*$/D', $grp)) {
+                throw new RuntimeException('User group ID at index '.$index.' must be a positive decimal string.');
             }
+            $groups[] = ['usrgrpid' => $grp];
         }
 
         return $this->call('user.create', [
@@ -1190,15 +1472,17 @@ class ZabbixApiClient {
 
         if ($template_name !== '') {
             $tid = $this->getTemplateIdByName($template_name);
-            if ($tid !== null) {
-                $params['templateids'] = [$tid];
+            if ($tid === null) {
+                return [];
             }
+            $params['templateids'] = [$tid];
         }
         elseif ($hostname !== '') {
             $hid = $this->getHostIdByName($hostname);
-            if ($hid !== null) {
-                $params['hostids'] = [$hid];
+            if ($hid === null) {
+                return [];
             }
+            $params['hostids'] = [$hid];
         }
 
         if (!empty($filters['search'])) {
@@ -1221,7 +1505,7 @@ class ZabbixApiClient {
      * Get recent history values for an item.
      *
      * Returns the last $limit values with timestamps. Tries numeric history
-     * first (history=0), then falls back to text/string types.
+     * first (history=0), then falls back to unsigned/string/text/log types.
      */
     public function getItemHistory(string $itemid, int $limit = 50, int $history_type = 0, int $period_hours = 0): array {
         $params = [
@@ -1239,16 +1523,15 @@ class ZabbixApiClient {
 
         $result = $this->call('history.get', $params);
 
-        // If numeric float returned nothing, try unsigned int, then text.
+        // If numeric float returned nothing, try unsigned int, string, text, log.
         if (!$result && $history_type === 0) {
-            $result = $this->getItemHistory($itemid, $limit, 3, $period_hours); // unsigned
-            if (!$result) {
-                $result = $this->getItemHistory($itemid, $limit, 1, $period_hours); // string
-                if (!$result) {
-                    $result = $this->getItemHistory($itemid, $limit, 4, $period_hours); // text
+            foreach ([3, 1, 4, 2] as $alt) {
+                $result = $this->getItemHistory($itemid, $limit, $alt, $period_hours);
+                if ($result) {
+                    break;
                 }
             }
-            return $result;
+            return $result; // already oldest-first from the recursive call
         }
 
         return array_reverse($result); // oldest first
@@ -1274,7 +1557,7 @@ class ZabbixApiClient {
                 continue;
             }
 
-            $history = $this->getItemHistory($itemid, $limit_per_item, 0, $period_hours);
+            $history = $this->getItemHistory($itemid, $limit_per_item, (int) ($item['value_type'] ?? 0), $period_hours);
             $label = ($item['name'] ?? 'Item '.$itemid).' ('.$item['key_'].')';
 
             $values = [];
@@ -1342,7 +1625,7 @@ class ZabbixApiClient {
             'triggerids' => [$triggerid],
             'output' => ['triggerid', 'description', 'expression', 'comments', 'priority', 'status', 'value'],
             'selectHosts' => ['hostid', 'host', 'name'],
-            'selectItems' => ['itemid', 'name', 'key_', 'description'],
+            'selectItems' => ['itemid', 'name', 'key_', 'description', 'value_type'],
             'expandDescription' => true,
             'expandExpression' => true,
             'limit' => 1
@@ -1364,7 +1647,8 @@ class ZabbixApiClient {
                     'itemid' => $item['itemid'] ?? '',
                     'name' => $item['name'] ?? '',
                     'key_' => $item['key_'] ?? '',
-                    'description' => $item['description'] ?? ''
+                    'description' => $item['description'] ?? '',
+                    'value_type' => (int) ($item['value_type'] ?? 0)
                 ];
             }
         }
@@ -1385,6 +1669,32 @@ class ZabbixApiClient {
      * Get a host group by name. Returns the group or null.
      */
     public function getHostGroupByName(string $name): ?array {
+        $confirmed = $this->confirmedTarget('host_groups', $name);
+        if ($confirmed !== null) {
+            if (($confirmed['state'] ?? '') === 'absent') {
+                $current = $this->call('hostgroup.get', [
+                    'output' => ['groupid', 'name'],
+                    'filter' => ['name' => [$name]]
+                ]);
+                if ($current) {
+                    throw new RuntimeException('Host group "'.$name.'" appeared after confirmation. Review a fresh preview.');
+                }
+                return null;
+            }
+
+            $groupid = trim((string) ($confirmed['id'] ?? ''));
+            $current = $groupid !== '' ? $this->call('hostgroup.get', [
+                'groupids' => [$groupid],
+                'output' => ['groupid', 'name']
+            ]) : [];
+            if (count($current) !== 1
+                || (string) ($current[0]['name'] ?? '') !== (string) ($confirmed['name'] ?? '')) {
+                throw new RuntimeException('Confirmed host-group target "'.$name.'" changed or disappeared. Review a fresh preview.');
+            }
+
+            return $current[0];
+        }
+
         $result = $this->call('hostgroup.get', [
             'output' => ['groupid', 'name'],
             'filter' => ['name' => [$name]]
@@ -1403,52 +1713,60 @@ class ZabbixApiClient {
     }
 
     /**
-     * Add hosts to a host group. Creates the group if it does not exist.
+     * Add hosts to an existing host group. Group creation is a separate,
+     * independently confirmed action.
      *
      * @param string[] $hostnames  Technical hostnames to add.
      * @param string   $group_name Host group name.
-     * @param bool     $create_if_missing  Create group if it doesn't exist.
-     *
      * @return array   Result with groupid, hosts added, and whether group was created.
      */
-    public function addHostsToGroup(array $hostnames, string $group_name, bool $create_if_missing = false): array {
+    public function addHostsToGroup(array $hostnames, string $group_name): array {
+        $group_name = trim($group_name);
+        if ($group_name === '') {
+            throw new RuntimeException('Host group name is required.');
+        }
+        // Freeze and reject duplicate technical names before any target lookup.
+        $canonical_hostnames = [];
+        $seen_names = [];
+        foreach ($hostnames as $index => $hostname) {
+            if (!is_string($hostname)) {
+                throw new RuntimeException('Hostname at index '.$index.' must be a string.');
+            }
+            $hostname = trim($hostname);
+            if ($hostname === '') {
+                throw new RuntimeException('Hostname at index '.$index.' must not be empty.');
+            }
+            if (isset($seen_names[$hostname])) {
+                throw new RuntimeException('Hostname "'.$hostname.'" is duplicated.');
+            }
+            $seen_names[$hostname] = true;
+            $canonical_hostnames[] = $hostname;
+        }
+        if (!$canonical_hostnames) {
+            throw new RuntimeException('At least one hostname is required.');
+        }
+
         $group = $this->getHostGroupByName($group_name);
-        $created = false;
-
         if ($group === null) {
-            if (!$create_if_missing) {
-                throw new RuntimeException(
-                    'Host group "'.$group_name.'" does not exist. '
-                    .'Set create_group=true to create it automatically.'
-                );
-            }
-
-            $result = $this->createHostGroup($group_name);
-            $groupid = $result['groupids'][0] ?? null;
-
-            if ($groupid === null) {
-                throw new RuntimeException('Failed to create host group "'.$group_name.'".');
-            }
-
-            $created = true;
-        }
-        else {
-            $groupid = $group['groupid'];
+            throw new RuntimeException(
+                'Host group "'.$group_name.'" does not exist. Create it with create_host_group first.'
+            );
         }
 
-        // Resolve host IDs.
+        // Resolve every existing host before a missing group is created. A
+        // stale host binding must not leave an otherwise-unused group behind.
         $host_ids = [];
         $resolved = [];
         $not_found = [];
 
-        foreach ($hostnames as $hostname) {
-            $hostname = trim((string) $hostname);
-            if ($hostname === '') {
-                continue;
-            }
-
+        $seen_ids = [];
+        foreach ($canonical_hostnames as $hostname) {
             $hid = $this->getHostIdByName($hostname);
             if ($hid !== null) {
+                if (isset($seen_ids[$hid])) {
+                    throw new RuntimeException('Multiple host names resolved to the same host ID '.$hid.'. No group change was made.');
+                }
+                $seen_ids[$hid] = true;
                 $host_ids[] = ['hostid' => $hid];
                 $resolved[] = $hostname;
             }
@@ -1460,6 +1778,11 @@ class ZabbixApiClient {
         if (!$host_ids) {
             throw new RuntimeException('None of the specified hosts were found.');
         }
+        if ($not_found) {
+            throw new RuntimeException('Host(s) not found: '.implode(', ', $not_found).'. No group change was made.');
+        }
+
+        $groupid = $group['groupid'];
 
         // Zabbix API: massadd to add hosts to the group without removing existing members.
         $this->call('hostgroup.massadd', [
@@ -1470,13 +1793,17 @@ class ZabbixApiClient {
         return [
             'groupid' => $groupid,
             'group_name' => $group_name,
-            'group_created' => $created,
+            'group_created' => false,
             'hosts_added' => $resolved,
             'hosts_not_found' => $not_found
         ];
     }
 
     public function addProblemComment(string $eventid, string $message, int $action = 4, int $chunk_size = 1900): array {
+        // Only close (1) / acknowledge (2) may accompany the mandatory
+        // add-message bit (4); severity/suppress/rank bits need parameters
+        // this method never sends and must go through their dedicated methods.
+        $action = ($action & 7) | 4;
         $chunks = Util::chunkText($message, max(200, $chunk_size - 32));
         $count = count($chunks);
 
@@ -1501,7 +1828,7 @@ class ZabbixApiClient {
      */
     public function getTriggerActions(int $limit = 200): array {
         return $this->call('action.get', [
-            'output' => ['actionid', 'name', 'status', 'esc_period', 'eventsource', 'evaltype'],
+            'output' => ['actionid', 'name', 'status', 'esc_period', 'eventsource'],
             'selectFilter' => 'extend',
             'selectOperations' => 'extend',
             'selectRecoveryOperations' => 'extend',
@@ -1651,7 +1978,7 @@ class ZabbixApiClient {
                 'status' => 'enabled',
                 'match_status' => $eval['status'],
                 'reasons' => $eval['reasons'],
-                'evaltype' => $action['evaltype'] ?? '0'
+                'evaltype' => (string) ($action['filter']['evaltype'] ?? '0')
             ];
         }
 
@@ -1675,6 +2002,7 @@ class ZabbixApiClient {
 
         $eval_type = (int) ($filter['evaltype'] ?? 0);
         $reasons = [];
+        $condition_results = [];
         $matched_count = 0;
         $undetermined_count = 0;
 
@@ -1712,8 +2040,8 @@ class ZabbixApiClient {
                     $label = 'severity '.($matched === true ? 'matches' : ($matched === false ? 'does not match' : 'check skipped'));
                     break;
 
-                case 16: // suppressed
-                    $matched = $operator === 11 ? $suppressed : !$suppressed;
+                case 16: // suppressed (operator 10 = Yes, 11 = No)
+                    $matched = $operator === 10 ? $suppressed : !$suppressed;
                     $label = $matched ? 'suppression state matches' : 'suppression state does not match';
                     break;
 
@@ -1732,6 +2060,8 @@ class ZabbixApiClient {
                     $label = 'condition type '.$type.' not evaluated';
             }
 
+            $condition_results[] = ['type' => $type, 'matched' => $matched];
+
             if ($matched === true) {
                 $matched_count++;
                 $reasons[] = $label;
@@ -1748,18 +2078,51 @@ class ZabbixApiClient {
         $total = count($conditions);
         $status = 'did_not_match';
 
-        // eval_type: 0 = AND/OR, 1 = AND, 2 = OR
+        // eval_type: 0 = AND/OR, 1 = AND, 2 = OR, 3 = custom expression
         if ($eval_type === 1) {
-            // AND: all must match
-            $status = ($matched_count + $undetermined_count) >= $total && $matched_count > 0 ? 'matched' : 'did_not_match';
+            // AND: all must match; any false condition decides, otherwise
+            // unresolved conditions leave the outcome undetermined.
+            $status = $matched_count === $total
+                ? 'matched'
+                : (($matched_count + $undetermined_count) >= $total ? 'undetermined' : 'did_not_match');
         }
         elseif ($eval_type === 2) {
             // OR: any matches
             $status = $matched_count > 0 ? 'matched' : ($undetermined_count > 0 ? 'undetermined' : 'did_not_match');
         }
+        elseif ($eval_type === 3) {
+            // Custom expression: conditions combine with and/or only (no
+            // negation), so the outcome is monotone — all matched means true,
+            // none matched means false, anything else needs the formula.
+            if ($matched_count === $total) {
+                $status = 'matched';
+            }
+            elseif ($matched_count === 0 && $undetermined_count === 0) {
+                $status = 'did_not_match';
+            }
+            else {
+                $status = 'undetermined';
+                $reasons[] = 'custom expression "'.(string) ($filter['eval_formula'] ?? $filter['formula'] ?? '').'" not fully evaluated';
+            }
+        }
         else {
-            // AND/OR (group conditions of same type with OR, others with AND) — approximate
-            $status = $matched_count >= 1 && $undetermined_count === 0 ? 'matched' : ($undetermined_count > 0 ? 'undetermined' : 'did_not_match');
+            // AND/OR: conditions of the same type are OR-ed, different types are AND-ed
+            $status = 'matched';
+            $groups = [];
+            foreach ($condition_results as $cr) {
+                $groups[$cr['type']][] = $cr['matched'];
+            }
+            foreach ($groups as $group) {
+                if (in_array(true, $group, true)) {
+                    continue; // at least one condition of this type matched
+                }
+                if (in_array(null, $group, true)) {
+                    $status = 'undetermined';
+                    continue;
+                }
+                $status = 'did_not_match';
+                break;
+            }
         }
 
         return ['status' => $status, 'reasons' => $reasons];
@@ -1955,7 +2318,7 @@ class ZabbixApiClient {
         $result = $this->call('history.get', $params);
 
         if (!$result && $history_type === 0) {
-            foreach ([3, 1, 4] as $alt) {
+            foreach ([3, 1, 4, 2] as $alt) {
                 $result = $this->call('history.get', array_merge($params, ['history' => $alt]));
                 if ($result) {
                     break;
@@ -2003,7 +2366,7 @@ class ZabbixApiClient {
         $events = $this->call('event.get', [
             'eventids' => [$eventid],
             'output' => ['eventid'],
-            'select_acknowledges' => ['acknowledgeid', 'userid', 'message', 'clock', 'action'],
+            'selectAcknowledges' => ['acknowledgeid', 'userid', 'message', 'clock', 'action'],
             'limit' => 1
         ]);
 
@@ -2054,7 +2417,7 @@ class ZabbixApiClient {
             'output' => 'extend',
             'selectHosts' => ['hostid', 'host', 'name'],
             'selectTags' => ['tag', 'value'],
-            'select_acknowledges' => ['acknowledgeid', 'userid', 'message', 'clock', 'action'],
+            'selectAcknowledges' => ['acknowledgeid', 'userid', 'message', 'clock', 'action'],
             'limit' => 1
         ]);
 
@@ -2150,7 +2513,7 @@ class ZabbixApiClient {
                         continue;
                     }
 
-                    $history = $this->getItemHistoryRange($itemid, $since, $until, 0, $history_per_item);
+                    $history = $this->getItemHistoryRange($itemid, $since, $until, (int) ($item['value_type'] ?? 0), $history_per_item);
                     $values = [];
                     foreach ($history as $h) {
                         $values[] = [
@@ -2321,7 +2684,7 @@ class ZabbixApiClient {
             'eventids' => [$eventid],
             'output' => ['eventid', 'clock', 'r_eventid', 'severity', 'name', 'acknowledged', 'suppressed'],
             'selectHosts' => ['hostid', 'host'],
-            'select_acknowledges' => ['acknowledgeid', 'userid', 'message', 'clock', 'action', 'old_severity', 'new_severity', 'suppress_until'],
+            'selectAcknowledges' => ['acknowledgeid', 'userid', 'message', 'clock', 'action', 'old_severity', 'new_severity', 'suppress_until'],
             'limit' => 1
         ]);
 
@@ -2486,12 +2849,14 @@ class ZabbixApiClient {
     }
 
     /**
-     * Service-tree impact for an event: the services that include the affected host.
+     * Service-tree impact for an event: the services whose problem tags match
+     * the event's tags (Zabbix's own problem-to-service mapping rule).
      */
     public function getServiceImpact(string $eventid): array {
         $events = $this->call('event.get', [
             'eventids' => [$eventid],
             'output' => ['eventid', 'objectid'],
+            'selectTags' => ['tag', 'value'],
             'limit' => 1
         ]);
 
@@ -2500,6 +2865,7 @@ class ZabbixApiClient {
         }
 
         $triggerid = (string) ($events[0]['objectid'] ?? '');
+        $event_tags = $events[0]['tags'] ?? [];
 
         if ($triggerid === '') {
             return [];
@@ -2517,10 +2883,45 @@ class ZabbixApiClient {
             return ['error' => 'service.get not available: '.$e->getMessage()];
         }
 
+        // A problem maps to a service when ALL of the service's problem tags
+        // match one of the event's tags (operator 0 = equals, 2 = contains;
+        // a contains-tag with empty value matches any value). Services without
+        // problem tags are structural nodes and never map to problems directly.
+        $tag_matches = static function (array $ptag) use ($event_tags): bool {
+            $pname = (string) ($ptag['tag'] ?? '');
+            $pval = (string) ($ptag['value'] ?? '');
+            $op = (int) ($ptag['operator'] ?? 0);
+
+            foreach ($event_tags as $et) {
+                if ((string) ($et['tag'] ?? '') !== $pname) {
+                    continue;
+                }
+                $eval = (string) ($et['value'] ?? '');
+                if ($op === 2 ? ($pval === '' || strpos($eval, $pval) !== false) : ($eval === $pval)) {
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        $impacted = array_values(array_filter($services, static function ($svc) use ($tag_matches) {
+            $ptags = $svc['problem_tags'] ?? [];
+            if (!$ptags) {
+                return false;
+            }
+            foreach ($ptags as $pt) {
+                if (!$tag_matches($pt)) {
+                    return false;
+                }
+            }
+            return true;
+        }));
+
         return [
             'eventid' => $eventid,
             'triggerid' => $triggerid,
-            'services' => $services
+            'services' => $impacted
         ];
     }
 
@@ -2612,9 +3013,18 @@ class ZabbixApiClient {
 
         $url = rtrim((string) $url, '/');
 
-        // Only accept http(s) URLs so we never inject something the chat can't link to.
-        if ($url !== '' && !preg_match('#^https?://#i', $url)) {
-            $url = '';
+        // Treat the macro as a base URL, never as a credential/query carrier.
+        // Runtime redaction is applied by ChatSend before this enters a prompt.
+        if ($url !== '') {
+            $parts = parse_url($url);
+            $scheme = is_array($parts) ? strtolower((string) ($parts['scheme'] ?? '')) : '';
+            if (!is_array($parts)
+                || !in_array($scheme, ['http', 'https'], true)
+                || trim((string) ($parts['host'] ?? '')) === ''
+                || isset($parts['user']) || isset($parts['pass'])
+                || isset($parts['query']) || isset($parts['fragment'])) {
+                $url = '';
+            }
         }
 
         $this->frontend_url_cache = $url;
@@ -2864,10 +3274,13 @@ class ZabbixApiClient {
     public function suppressProblem(string $eventid, int $until_unix = 0): array {
         // Zabbix requires suppress_until with the suppress action bit; 0 means
         // suppress indefinitely. Always send it so the API never rejects it.
+        if ($until_unix < 0) {
+            throw new RuntimeException('suppress_until must be non-negative; 0 means indefinite suppression.');
+        }
         return $this->call('event.acknowledge', [
             'eventids' => [$eventid],
             'action' => 32,
-            'suppress_until' => max(0, $until_unix)
+            'suppress_until' => $until_unix
         ]);
     }
 
@@ -3306,6 +3719,10 @@ class ZabbixApiClient {
         if ($name === '') {
             throw new RuntimeException('Service name is required.');
         }
+        $name_length = function_exists('mb_strlen') ? mb_strlen($name, 'UTF-8') : strlen($name);
+        if ($name_length > 128) {
+            throw new RuntimeException('Service name must be at most 128 characters.');
+        }
 
         $problems = $this->normalizeMatchTags($problem_tags);
         if (!$problems && !$child_serviceids) {
@@ -3317,14 +3734,17 @@ class ZabbixApiClient {
 
         $plain = $this->normalizePlainTags($service_tags);
 
-        if (!in_array($algorithm, [0, 1, 2], true)) {
-            $algorithm = $child_serviceids ? 2 : 1;
+        if (!in_array($algorithm, [1, 2], true)) {
+            throw new RuntimeException('Service algorithm must be 1 or 2.');
+        }
+        if ($sortorder < 0 || $sortorder > 999) {
+            throw new RuntimeException('sortorder must be between 0 and 999.');
         }
 
         $payload = [
-            'name' => Util::truncate($name, 128),
+            'name' => $name,
             'algorithm' => $algorithm,
-            'sortorder' => max(0, min(999, $sortorder))
+            'sortorder' => $sortorder
         ];
         if ($problems) {
             $payload['problem_tags'] = $problems;
@@ -3377,8 +3797,20 @@ class ZabbixApiClient {
         if ($slo < 0 || $slo > 100) {
             throw new RuntimeException('slo must be between 0 and 100.');
         }
+        if (abs($slo - round($slo, 4)) > 0.000000001) {
+            throw new RuntimeException('slo supports at most 4 fractional digits.');
+        }
         if (!in_array($period, [0, 1, 2, 3, 4], true)) {
             throw new RuntimeException('period must be 0=daily, 1=weekly, 2=monthly, 3=quarterly or 4=annually.');
+        }
+        if (!in_array($status, [0, 1], true)) {
+            throw new RuntimeException('SLA status must be 0 or 1.');
+        }
+        $description_length = function_exists('mb_strlen')
+            ? mb_strlen($description, 'UTF-8')
+            : strlen($description);
+        if ($description_length > 65535) {
+            throw new RuntimeException('SLA description must be at most 65535 characters.');
         }
 
         $tags = $this->normalizeMatchTags($service_tags);
@@ -3393,14 +3825,14 @@ class ZabbixApiClient {
             'slo' => $slo,
             'period' => $period,
             'timezone' => $timezone,
-            'status' => ($status === 0) ? 0 : 1,
+            'status' => $status,
             'service_tags' => $tags
         ];
         if ($effective_date !== null && $effective_date > 0) {
             $payload['effective_date'] = $effective_date;
         }
         if ($description !== '') {
-            $payload['description'] = Util::truncate($description, 65535);
+            $payload['description'] = $description;
         }
 
         $result = $this->call('sla.create', $payload);
@@ -3823,16 +4255,29 @@ class ZabbixApiClient {
             throw new RuntimeException('Host "'.$hostname.'" not found.');
         }
 
+        $operation = strtolower(trim($operation));
+        if (!in_array($operation, ['add', 'remove', 'replace'], true)) {
+            throw new RuntimeException('Host tag operation must be add, remove, or replace.');
+        }
+
         $input = [];
-        foreach ($tags as $t) {
+        foreach ($tags as $index => $t) {
             if (!is_array($t)) {
-                continue;
+                throw new RuntimeException('Host tag at index '.$index.' must be an object.');
             }
-            $name = trim((string) ($t['tag'] ?? ''));
+            foreach (array_keys($t) as $field) {
+                if (!in_array($field, ['tag', 'value'], true)) {
+                    throw new RuntimeException('Host tag at index '.$index.' has unexpected field "'.$field.'".');
+                }
+            }
+            if (!is_string($t['tag'] ?? null) || !is_string($t['value'] ?? '')) {
+                throw new RuntimeException('Host tag names and values must be strings.');
+            }
+            $name = trim($t['tag']);
             if ($name === '') {
-                continue;
+                throw new RuntimeException('Host tag at index '.$index.' needs a non-empty name.');
             }
-            $input[] = ['tag' => $name, 'value' => (string) ($t['value'] ?? '')];
+            $input[] = ['tag' => $name, 'value' => $t['value'] ?? ''];
         }
         if (!$input) {
             throw new RuntimeException('No valid tags provided (each tag needs a "tag" name).');
@@ -3902,11 +4347,13 @@ class ZabbixApiClient {
 
         $inventory = [];
         foreach ($fields as $k => $v) {
-            $k = trim((string) $k);
-            if ($k === '') {
-                continue;
+            if (!is_string($k) || trim($k) === '') {
+                throw new RuntimeException('Every inventory field name must be a non-empty string.');
             }
-            $inventory[$k] = (string) $v;
+            if (!is_string($v)) {
+                throw new RuntimeException('Inventory field "'.trim($k).'" must have a string value.');
+            }
+            $inventory[trim($k)] = $v;
         }
         if (!$inventory) {
             throw new RuntimeException('No inventory fields provided.');
@@ -3925,6 +4372,46 @@ class ZabbixApiClient {
      * are never touched or blanked. Returns metadata only — never macro values.
      */
     public function updateHostMacros(string $hostname, array $macros): array {
+        // Validate the complete batch before the first API write. Homogeneous
+        // creates or updates are submitted as one array-form API mutation;
+        // mixed batches are rejected below and must be confirmed separately.
+        if (!$macros) {
+            throw new RuntimeException('At least one host macro is required.');
+        }
+        $seen = [];
+        foreach ($macros as $index => $m) {
+            if (!is_array($m)) {
+                throw new RuntimeException('Host macro at index '.$index.' must be an object.');
+            }
+            foreach (array_keys($m) as $field) {
+                if (!in_array($field, ['macro', 'value', 'type'], true)) {
+                    throw new RuntimeException('Host macro at index '.$index.' has unexpected field "'.$field.'".');
+                }
+            }
+            $macro = $m['macro'] ?? null;
+            $value = $m['value'] ?? null;
+            $type = $m['type'] ?? 0;
+            if (!is_string($macro) || $macro !== trim($macro)
+                || !Util::isValidZabbixUserMacro($macro)) {
+                throw new RuntimeException('Host macro at index '.$index.' has an invalid name.');
+            }
+            if (!is_string($value)) {
+                throw new RuntimeException('Host macro "'.$macro.'" must have a string value.');
+            }
+            $name_length = function_exists('mb_strlen') ? mb_strlen($macro, 'UTF-8') : strlen($macro);
+            $value_length = function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
+            if ($name_length > 255 || $value_length > 2048) {
+                throw new RuntimeException('Host macro "'.$macro.'" exceeds the Zabbix name/value length limit.');
+            }
+            if (!is_int($type) || $type !== 0) {
+                throw new RuntimeException('Host macro "'.$macro.'" must be plain text type 0.');
+            }
+            if (isset($seen[$macro])) {
+                throw new RuntimeException('Host macro "'.$macro.'" is duplicated.');
+            }
+            $seen[$macro] = true;
+        }
+
         $hid = $this->getHostIdByName($hostname);
         if ($hid === null) {
             throw new RuntimeException('Host "'.$hostname.'" not found.');
@@ -3932,47 +4419,91 @@ class ZabbixApiClient {
 
         $existing = $this->call('usermacro.get', [
             'hostids' => [$hid],
-            'output' => ['hostmacroid', 'macro', 'type']
+            'output' => ['hostmacroid', 'macro', 'type', 'automatic']
         ]);
         $by_macro = [];
         foreach ($existing as $m) {
             $by_macro[(string) ($m['macro'] ?? '')] = $m;
         }
 
+        $confirmed_macros = $this->confirmed_target_bindings['host_macros'] ?? null;
+        if (is_array($confirmed_macros)) {
+            foreach ($confirmed_macros as $macro_name => $confirmed_macro) {
+                if (!is_array($confirmed_macro)) {
+                    throw new RuntimeException('Confirmed macro target registry is invalid.');
+                }
+                $current_macro = $by_macro[(string) $macro_name] ?? null;
+                if (($confirmed_macro['state'] ?? '') === 'absent') {
+                    if ($current_macro !== null) {
+                        throw new RuntimeException('Host macro "'.$macro_name.'" appeared after confirmation. Review a fresh preview.');
+                    }
+                    continue;
+                }
+                if (!is_array($current_macro)
+                    || (string) ($current_macro['hostmacroid'] ?? '') !== (string) ($confirmed_macro['id'] ?? '')
+                    || (int) ($current_macro['type'] ?? 0) !== (int) ($confirmed_macro['type'] ?? 0)
+                    || (int) ($current_macro['automatic'] ?? 0) !== (int) ($confirmed_macro['automatic'] ?? 0)) {
+                    throw new RuntimeException('Confirmed host macro "'.$macro_name.'" changed or disappeared. Review a fresh preview.');
+                }
+            }
+        }
+
+        // Inspect every existing target before issuing the first update.
+        foreach ($macros as $m) {
+            $macro = (string) $m['macro'];
+            if (!isset($by_macro[$macro])) {
+                continue;
+            }
+            if ((int) ($by_macro[$macro]['type'] ?? 0) !== 0) {
+                throw new RuntimeException('Host macro "'.$macro.'" already exists as secret/vault type and cannot be overwritten or converted through AI chat.');
+            }
+            if ((int) ($by_macro[$macro]['automatic'] ?? 0) !== 0) {
+                throw new RuntimeException('Host macro "'.$macro.'" is discovery-managed and cannot be changed through AI chat.');
+            }
+        }
+
+        $create_payloads = [];
+        $update_payloads = [];
         $created = [];
         $updated = [];
         foreach ($macros as $m) {
-            if (!is_array($m)) {
-                continue;
-            }
-            $macro = trim((string) ($m['macro'] ?? ''));
-            if ($macro === '') {
-                continue;
-            }
-            $value = (string) ($m['value'] ?? '');
-            $type = isset($m['type']) ? (int) $m['type'] : 0; // 0=text, 1=secret, 2=vault
+            $macro = $m['macro'];
+            $value = $m['value'];
+            $type = $m['type'] ?? 0;
 
             if (isset($by_macro[$macro])) {
-                $this->call('usermacro.update', [
+                $update_payloads[] = [
                     'hostmacroid' => $by_macro[$macro]['hostmacroid'],
                     'value' => $value,
                     'type' => $type
-                ]);
+                ];
                 $updated[] = ['macro' => $macro, 'type' => $type];
             }
             else {
-                $this->call('usermacro.create', [
+                $create_payloads[] = [
                     'hostid' => $hid,
                     'macro' => $macro,
                     'value' => $value,
                     'type' => $type
-                ]);
+                ];
                 $created[] = ['macro' => $macro, 'type' => $type];
             }
         }
 
-        if (!$created && !$updated) {
-            throw new RuntimeException('No valid macros provided (each needs a "macro" name like {$NAME}).');
+        // Zabbix supports array payloads for both methods, so a homogeneous
+        // batch is one server-side mutation. A mixed create+update would need
+        // two independent commits and is deliberately split into two separate
+        // confirmations to prevent partial success.
+        if ($create_payloads && $update_payloads) {
+            throw new RuntimeException(
+                'A single macro action cannot mix new and existing macros. Confirm the creates and updates separately.'
+            );
+        }
+        if ($update_payloads) {
+            $this->call('usermacro.update', $update_payloads);
+        }
+        elseif ($create_payloads) {
+            $this->call('usermacro.create', $create_payloads);
         }
 
         return ['created' => $created, 'updated' => $updated];
@@ -3987,7 +4518,7 @@ class ZabbixApiClient {
         $update = ['interfaceid' => $interfaceid];
         foreach ($changes as $k => $v) {
             if (in_array($k, $allowed, true)) {
-                $update[$k] = ($k === 'useip') ? (string) ((int) $v) : (string) $v;
+                $update[$k] = ($k === 'useip') ? (int) $v : (string) $v;
             }
         }
         if (count($update) <= 1) {
@@ -4020,6 +4551,8 @@ class ZabbixApiClient {
             throw new RuntimeException('Invalid HTTP status code list. Use e.g. 200 or 200,301.');
         }
 
+        $this->assertConfirmedWebScenario($hostname, $name);
+
         $params = [
             'name' => $name,
             'hostid' => $hid,
@@ -4028,16 +4561,32 @@ class ZabbixApiClient {
                 'name' => (string) ($opts['step_name'] ?? 'Check'),
                 'url' => $url,
                 'no' => 1,
+                // Never let an allowlisted URL redirect the Zabbix server or
+                // proxy to loopback, metadata or another non-allowlisted host.
+                'follow_redirects' => 0,
                 'status_codes' => $status_codes
             ]]
         ];
 
         if (!empty($opts['tags']) && is_array($opts['tags'])) {
             $tags = [];
-            foreach ($opts['tags'] as $t) {
-                if (is_array($t) && trim((string) ($t['tag'] ?? '')) !== '') {
-                    $tags[] = ['tag' => (string) $t['tag'], 'value' => (string) ($t['value'] ?? '')];
+            foreach ($opts['tags'] as $index => $t) {
+                if (!is_array($t)) {
+                    throw new RuntimeException('Web-scenario tag at index '.$index.' must be an object.');
                 }
+                foreach (array_keys($t) as $field) {
+                    if (!in_array($field, ['tag', 'value'], true)) {
+                        throw new RuntimeException('Web-scenario tag at index '.$index.' has unexpected field "'.$field.'".');
+                    }
+                }
+                if (!is_string($t['tag'] ?? null) || !is_string($t['value'] ?? '')) {
+                    throw new RuntimeException('Web-scenario tag names and values must be strings.');
+                }
+                $tag_name = trim($t['tag']);
+                if ($tag_name === '') {
+                    throw new RuntimeException('Web-scenario tag at index '.$index.' needs a non-empty name.');
+                }
+                $tags[] = ['tag' => $tag_name, 'value' => $t['value'] ?? ''];
             }
             if ($tags) {
                 $params['tags'] = $tags;
@@ -4164,67 +4713,163 @@ class ZabbixApiClient {
     }
 
     /**
-     * Create a new host. At least one group is required; missing groups are
-     * created. Templates are linked if provided (must already exist). An agent
+     * Create a new host in existing groups. Templates are linked if provided
+     * (and must already exist). An agent
      * interface is added only when an IP or DNS is given (otherwise agentless,
      * which is fine for web/URL monitoring or template-only hosts).
      */
     public function createHost(string $hostname, array $group_names, array $opts): array {
-        $groupids = [];
-        foreach ($group_names as $gn) {
-            $gn = trim((string) $gn);
-            if ($gn === '') {
-                continue;
-            }
-            $existing = $this->call('hostgroup.get', [
-                'output' => ['groupid'],
-                'filter' => ['name' => [$gn]]
-            ]);
-            $gid = $existing[0]['groupid'] ?? null;
-            if ($gid === null) {
-                if (empty($opts['create_missing_groups'])) {
-                    throw new RuntimeException('Host group "'.$gn.'" does not exist. Create it first (create_host_group) or set create_missing_groups=true.');
-                }
-                $res = $this->call('hostgroup.create', ['name' => $gn]);
-                $gid = $res['groupids'][0] ?? null;
-            }
-            if ($gid !== null) {
-                $groupids[] = ['groupid' => (string) $gid];
+        $length = static function(string $value): int {
+            return function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
+        };
+
+        // Validate and freeze the complete one-call host payload before any
+        // target lookup. Group creation is intentionally a separate confirmed
+        // tool; this method therefore performs exactly one API mutation.
+        $hostname = trim($hostname);
+        if ($hostname === '' || $length($hostname) > 128
+            || preg_match('/^[A-Za-z0-9._ -]+$/D', $hostname) !== 1) {
+            throw new RuntimeException(
+                'Host technical name must be 1-128 characters using letters, digits, spaces, dots, dashes, or underscores.'
+            );
+        }
+        $allowed_options = [
+            'visible_name', 'description', 'templates',
+            'interface_ip', 'interface_dns', 'interface_port'
+        ];
+        foreach (array_keys($opts) as $option) {
+            if (!in_array($option, $allowed_options, true)) {
+                throw new RuntimeException('Unexpected create-host option "'.$option.'".');
             }
         }
-        if (!$groupids) {
+
+        $canonical_groups = [];
+        $seen_groups = [];
+        foreach ($group_names as $index => $group_name) {
+            if (!is_string($group_name)) {
+                throw new RuntimeException('Host group at index '.$index.' must be a string.');
+            }
+            $group_name = trim($group_name);
+            if ($group_name === '' || $length($group_name) > 255) {
+                throw new RuntimeException('Host group names must be 1-255 characters.');
+            }
+            if (isset($seen_groups[$group_name])) {
+                throw new RuntimeException('Host group "'.$group_name.'" is duplicated.');
+            }
+            $seen_groups[$group_name] = true;
+            $canonical_groups[] = $group_name;
+        }
+        if (!$canonical_groups) {
             throw new RuntimeException('At least one valid host group is required.');
         }
 
-        $params = ['host' => $hostname, 'groups' => $groupids];
-
-        if (trim((string) ($opts['visible_name'] ?? '')) !== '') {
-            $params['name'] = (string) $opts['visible_name'];
+        $raw_templates = $opts['templates'] ?? [];
+        if (!is_array($raw_templates)) {
+            throw new RuntimeException('Host templates must be an array.');
         }
-        if (trim((string) ($opts['description'] ?? '')) !== '') {
-            $params['description'] = (string) $opts['description'];
+        $canonical_templates = [];
+        $seen_template_names = [];
+        foreach ($raw_templates as $index => $template_name) {
+            if (!is_string($template_name)) {
+                throw new RuntimeException('Template at index '.$index.' must be a string.');
+            }
+            $template_name = trim($template_name);
+            if ($template_name === '' || $length($template_name) > 128) {
+                throw new RuntimeException('Template names must be 1-128 characters.');
+            }
+            if (isset($seen_template_names[$template_name])) {
+                throw new RuntimeException('Template "'.$template_name.'" is duplicated.');
+            }
+            $seen_template_names[$template_name] = true;
+            $canonical_templates[] = $template_name;
         }
 
-        if (!empty($opts['templates']) && is_array($opts['templates'])) {
-            $tids = [];
-            foreach ($opts['templates'] as $tn) {
-                $tn = trim((string) $tn);
-                if ($tn === '') {
-                    continue;
-                }
-                $tid = $this->getTemplateIdByName($tn);
-                if ($tid === null) {
-                    throw new RuntimeException('Template "'.$tn.'" not found.');
-                }
-                $tids[] = ['templateid' => $tid];
+        foreach (['visible_name', 'description', 'interface_ip', 'interface_dns', 'interface_port'] as $field) {
+            if (array_key_exists($field, $opts) && !is_string($opts[$field])) {
+                throw new RuntimeException('Host option "'.$field.'" must be a string.');
             }
-            if ($tids) {
-                $params['templates'] = $tids;
-            }
+        }
+        $visible_name = trim((string) ($opts['visible_name'] ?? ''));
+        if ($visible_name !== '' && $length($visible_name) > 128) {
+            throw new RuntimeException('Visible host name must be at most 128 characters.');
+        }
+        $description = (string) ($opts['description'] ?? '');
+        if ($length($description) > 65535) {
+            throw new RuntimeException('Host description must be at most 65535 characters.');
         }
 
         $ip = trim((string) ($opts['interface_ip'] ?? ''));
         $dns = trim((string) ($opts['interface_dns'] ?? ''));
+        if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP) === false) {
+            throw new RuntimeException('Agent interface IP must be a valid IPv4 or IPv6 address.');
+        }
+        if ($dns !== '' && ($length($dns) > 255
+            || filter_var($dns, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) === false)) {
+            throw new RuntimeException('Agent interface DNS must be a valid hostname of at most 255 characters.');
+        }
+        $port = trim((string) ($opts['interface_port'] ?? '10050'));
+        if ($ip !== '' || $dns !== '') {
+            $numeric_port = ctype_digit($port) ? (int) $port : 0;
+            if (($numeric_port < 1 || $numeric_port > 65535) && !Util::isValidZabbixUserMacro($port)) {
+                throw new RuntimeException('Agent interface port must be 1-65535 or a valid user macro.');
+            }
+            if ($length($port) > 64) {
+                throw new RuntimeException('Agent interface port must be at most 64 characters.');
+            }
+        }
+
+        // The confirmed binding for a new host records an absence
+        // precondition. Recheck it through the bound-ID helper immediately
+        // before resolving dependencies and calling host.create.
+        if ($this->getHostIdByName($hostname) !== null) {
+            throw new RuntimeException('Host "'.$hostname.'" already exists. Review a fresh preview.');
+        }
+
+        // Resolve the already-existing immutable dependencies. Distinct names
+        // which alias the same template ID are rejected before host.create.
+        $resolved_template_ids = [];
+        $seen_template_ids = [];
+        foreach ($canonical_templates as $tn) {
+                $tid = $this->getTemplateIdByName($tn);
+                if ($tid === null) {
+                    throw new RuntimeException('Template "'.$tn.'" not found.');
+                }
+                if (isset($seen_template_ids[$tid])) {
+                    throw new RuntimeException('Multiple template names resolve to template ID '.$tid.'.');
+                }
+                $seen_template_ids[$tid] = true;
+                $resolved_template_ids[] = ['templateid' => $tid];
+        }
+
+        $groupids = [];
+        $seen_group_ids = [];
+        foreach ($canonical_groups as $gn) {
+            $existing = $this->getHostGroupByName($gn);
+            $gid = $existing['groupid'] ?? null;
+            if ($gid === null) {
+                throw new RuntimeException('Host group "'.$gn.'" does not exist. Create it with create_host_group first.');
+            }
+            $gid = (string) $gid;
+            if (isset($seen_group_ids[$gid])) {
+                throw new RuntimeException('Multiple host-group names resolve to group ID '.$gid.'.');
+            }
+            $seen_group_ids[$gid] = true;
+            $groupids[] = ['groupid' => $gid];
+        }
+
+        $params = ['host' => $hostname, 'groups' => $groupids];
+
+        if ($visible_name !== '') {
+            $params['name'] = $visible_name;
+        }
+        if ($description !== '') {
+            $params['description'] = $description;
+        }
+
+        if ($resolved_template_ids) {
+            $params['templates'] = $resolved_template_ids;
+        }
+
         if ($ip !== '' || $dns !== '') {
             $params['interfaces'] = [[
                 'type' => 1,
@@ -4232,7 +4877,7 @@ class ZabbixApiClient {
                 'useip' => ($ip !== '') ? 1 : 0,
                 'ip' => $ip,
                 'dns' => $dns,
-                'port' => (string) ($opts['interface_port'] ?? '10050')
+                'port' => $port
             ]];
         }
 
@@ -4501,43 +5146,85 @@ class ZabbixApiClient {
     }
 
     /**
-     * Add a tag to each host in an explicit id list (read-modify-write per host
-     * so existing tags are preserved; skips hosts that already have it).
+     * Add a tag to an explicit host-ID set in one array-form host.update call,
+     * preserving each host's existing tags and skipping hosts that have it.
      */
     public function bulkAddTagToHosts(array $host_ids, string $tag, string $value): void {
         $tag = trim($tag);
         if ($tag === '') {
             throw new RuntimeException('Tag name is required.');
         }
+        $length = static function(string $text): int {
+            return function_exists('mb_strlen') ? mb_strlen($text, 'UTF-8') : strlen($text);
+        };
+        if ($length($tag) > 255 || $length($value) > 255) {
+            throw new RuntimeException('Host tag names and values must be at most 255 characters.');
+        }
 
-        foreach ($host_ids as $hid) {
-            $hid = trim((string) $hid);
-            if ($hid === '') {
-                continue;
+        $ids = [];
+        $seen_ids = [];
+        foreach ($host_ids as $index => $host_id) {
+            if (!is_string($host_id) || preg_match('/^[1-9][0-9]*$/D', $host_id) !== 1) {
+                throw new RuntimeException('Host ID at index '.$index.' must be a positive decimal string.');
             }
+            if (isset($seen_ids[$host_id])) {
+                throw new RuntimeException('Host ID '.$host_id.' is duplicated.');
+            }
+            $seen_ids[$host_id] = true;
+            $ids[] = $host_id;
+        }
+        if (!$ids) {
+            throw new RuntimeException('At least one host ID is required.');
+        }
 
-            $cur = $this->call('host.get', [
-                'hostids' => [$hid],
-                'output' => ['hostid'],
-                'selectTags' => ['tag', 'value']
-            ]);
-            $existing = $cur[0]['tags'] ?? [];
+        // Resolve the complete frozen set first, then submit one array-form
+        // host.update mutation. A missing/inaccessible host therefore fails
+        // before any tag is changed, and a server rejection cannot leave an
+        // earlier host committed by this action.
+        $rows = $this->call('host.get', [
+            'hostids' => $ids,
+            'output' => ['hostid'],
+            'selectTags' => ['tag', 'value'],
+            'preservekeys' => true
+        ]);
+        $by_id = [];
+        foreach ($rows as $row) {
+            $row_id = (string) ($row['hostid'] ?? '');
+            if ($row_id !== '') {
+                $by_id[$row_id] = $row;
+            }
+        }
+        if (count($by_id) !== count($ids)) {
+            throw new RuntimeException('One or more confirmed host targets disappeared or became inaccessible. No tag was changed.');
+        }
 
+        $updates = [];
+        foreach ($ids as $host_id) {
+            if (!isset($by_id[$host_id])) {
+                throw new RuntimeException('Confirmed host ID '.$host_id.' disappeared or became inaccessible. No tag was changed.');
+            }
+            $existing = is_array($by_id[$host_id]['tags'] ?? null) ? $by_id[$host_id]['tags'] : [];
             $final = [];
             $present = false;
-            foreach ($existing as $t) {
-                $tname = (string) ($t['tag'] ?? '');
-                $tval = (string) ($t['value'] ?? '');
-                $final[] = ['tag' => $tname, 'value' => $tval];
-                if ($tname === $tag && $tval === $value) {
+            foreach ($existing as $existing_tag) {
+                if (!is_array($existing_tag)) {
+                    throw new RuntimeException('Host ID '.$host_id.' returned an invalid tag object. No tag was changed.');
+                }
+                $name = (string) ($existing_tag['tag'] ?? '');
+                $existing_value = (string) ($existing_tag['value'] ?? '');
+                $final[] = ['tag' => $name, 'value' => $existing_value];
+                if ($name === $tag && $existing_value === $value) {
                     $present = true;
                 }
             }
             if (!$present) {
                 $final[] = ['tag' => $tag, 'value' => $value];
+                $updates[] = ['hostid' => $host_id, 'tags' => $final];
             }
+        }
 
-            $this->call('host.update', ['hostid' => $hid, 'tags' => $final]);
+        if ($updates) {
+            $this->call('host.update', $updates);
         }
     }
 
@@ -4626,6 +5313,7 @@ class ZabbixApiClient {
             'hostinterface' => 'HostInterface',
             'httptest' => 'HttpTest',
             'item' => 'Item',
+            'itemprototype' => 'ItemPrototype',
             'maintenance' => 'Maintenance',
             'mediatype' => 'MediaType',
             'problem' => 'Problem',
@@ -4635,6 +5323,7 @@ class ZabbixApiClient {
             'template' => 'Template',
             'trend' => 'Trend',
             'trigger' => 'Trigger',
+            'triggerprototype' => 'TriggerPrototype',
             'user' => 'User',
             'usermacro' => 'UserMacro'
         ];
@@ -4720,12 +5409,41 @@ class ZabbixApiClient {
         if (array_key_exists('error', $json)) {
             $message = $json['error']['message'] ?? 'Unknown Zabbix API error';
             $data = $json['error']['data'] ?? '';
+            $detail = trim((string) $message.' '.(string) $data);
 
-            throw new RuntimeException($method.' failed via '.$auth_label.': '.$message.' '.Util::truncate((string) $data, 600));
+            if (self::isAuthenticationError($detail)) {
+                throw new ZabbixApiAuthenticationException(
+                    $method.' failed via '.$auth_label.': '.Util::truncate($detail, 600)
+                );
+            }
+
+            throw new RuntimeException($method.' failed via '.$auth_label.': '.Util::truncate($detail, 600));
         }
 
         $result = $json['result'] ?? [];
 
         return is_array($result) ? $result : [$result];
+    }
+
+    private static function isAuthenticationError(string $detail): bool {
+        $detail = strtolower($detail);
+
+        foreach ([
+            'not authorized',
+            'not authorised',
+            'unauthorized',
+            'unauthorised',
+            'invalid api token',
+            'api token is invalid',
+            'api token has expired',
+            'session terminated',
+            're-login'
+        ] as $needle) {
+            if (strpos($detail, $needle) !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

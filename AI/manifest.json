@@ -3,7 +3,7 @@
   "id": "custom_ai",
   "name": "AI",
   "namespace": "AI",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "author": "Keberneth",
   "description": "Ephemeral chat and webhook-driven AI troubleshooting assistant for Zabbix 7 with local redaction state and audit logging.",
   "actions": {
@@ -59,10 +59,6 @@
       "class": "ChatProblems",
       "layout": "layout.json"
     },
-    "ai.webhook": {
-      "class": "Webhook",
-      "layout": "layout.json"
-    },
     "ai.chat.execute": {
       "class": "ChatExecute",
       "layout": "layout.json"
@@ -101,6 +97,9 @@
     "default_chat_provider_id": "",
     "default_webhook_provider_id": "",
     "default_actions_provider_id": "",
+    "secret_storage": {
+      "allow_plaintext_secrets": false
+    },
     "instructions": [
       {
         "id": "default_firstline_policy",
@@ -116,7 +115,8 @@
       "token_env": "",
       "verify_peer": true,
       "timeout": 15,
-      "auth_mode": "auto"
+      "auth_mode": "bearer",
+      "allow_service_token_read_fallback": false
     },
     "netbox": {
       "enabled": false,
@@ -130,11 +130,12 @@
       "enabled": true,
       "shared_secret": "",
       "shared_secret_env": "",
+      "require_secret": true,
       "add_problem_update": true,
       "problem_update_action": 4,
       "comment_chunk_size": 1900,
       "skip_resolved": true,
-      "include_netbox": true,
+      "include_netbox": false,
       "include_os_hint": true
     },
     "chat": {
@@ -177,7 +178,7 @@
       "compress_archives": true,
       "retention_days": 30,
       "max_payload_chars": 8000,
-      "include_payloads": true,
+      "include_payloads": false,
       "include_mapping_details": false,
       "categories": {
         "chat": true,
@@ -201,7 +202,8 @@
         "problems": false,
         "hostgroups": false
       },
-      "require_super_admin_for_write": true
+      "require_super_admin_for_write": true,
+      "web_scenario_allowed_origins": ""
     }
   }
 }

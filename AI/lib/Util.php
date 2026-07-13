@@ -20,6 +20,21 @@ class Util {
         return in_array($value, ['1', 'true', 'yes', 'on'], true);
     }
 
+    /**
+     * Validate the canonical Zabbix user-macro syntax accepted by AI writes.
+     *
+     * Zabbix permits only uppercase A-Z, digits, underscore and dot in the
+     * macro name. Contexts are limited here to the documented unquoted,
+     * quoted, and regex:"..." forms. Keeping this deliberately strict makes
+     * the confirmation payload identical to what the API will accept.
+     */
+    public static function isValidZabbixUserMacro(string $macro): bool {
+        return preg_match(
+            '/^\{\$[A-Z0-9_.]+(?:\:(?:[^"}]+|"(?:[^"\\\\]|\\\\.)*"|regex:"(?:[^"\\\\]|\\\\.)*"))?\}$/D',
+            $macro
+        ) === 1;
+    }
+
     public static function cleanString($value, int $max_length = 0): string {
         $value = trim((string) $value);
 
@@ -128,6 +143,235 @@ class Util {
                 throw new \RuntimeException('This host resolves to a link-local/metadata address, which is not an allowed target.');
             }
         }
+    }
+
+    /** Reject credentials hidden in a configured HTTP endpoint URL. */
+    public static function assertNoEmbeddedUrlCredentials(string $url): void {
+        $parts = parse_url(trim($url));
+        if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
+            throw new \RuntimeException('The configured HTTP endpoint is not a valid absolute URL.');
+        }
+        if (isset($parts['user']) || isset($parts['pass'])) {
+            throw new \RuntimeException('Credentials in URL userinfo are forbidden; use the encrypted secret/header fields.');
+        }
+        if (!empty($parts['fragment'])) {
+            throw new \RuntimeException('URL fragments are not allowed in configured HTTP endpoints.');
+        }
+
+        $query = [];
+        parse_str((string) ($parts['query'] ?? ''), $query);
+        foreach (array_keys($query) as $name) {
+            if (preg_match('/(?:^|[_-])(?:key|api[_-]?key|token|secret|password|passwd|signature|sig|credential|access[_-]?token|client[_-]?secret)(?:$|[_-])/i', (string) $name)) {
+                throw new \RuntimeException(
+                    'Secret-bearing URL query parameter "'.$name.'" is forbidden; use an encrypted header or secret field.'
+                );
+            }
+        }
+    }
+
+    /** Remove URL credentials before including an endpoint in an error. */
+    public static function sanitizeUrlForDisplay(string $url): string {
+        $url = preg_replace('#(https?://)[^/@\s]+@#i', '$1[REDACTED]@', $url);
+        $url = preg_replace_callback(
+            '/([?&](?:key|api[_-]?key|token|secret|password|passwd|signature|sig|credential|access[_-]?token|client[_-]?secret)=)[^&#]*/i',
+            static function(array $match): string {
+                return $match[1].'[REDACTED]';
+            },
+            (string) $url
+        );
+
+        return (string) $url;
+    }
+
+    /** Best-effort credential scrub for outward-facing transport errors. */
+    public static function sanitizeSensitiveTextForDisplay(string $text): string {
+        $text = self::sanitizeUrlForDisplay($text);
+        $text = preg_replace(
+            '/("(?:password|passwd|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|x[_-]?api[_-]?key|authorization|client[_-]?secret|private[_-]?key)"\s*:\s*)"(?:\\\\.|[^"\\\\])*"/i',
+            '$1"[REDACTED]"',
+            $text
+        );
+        $text = preg_replace(
+            '/\b(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)[^\s,;]+/i',
+            '$1[REDACTED]',
+            (string) $text
+        );
+
+        return (string) $text;
+    }
+
+    /**
+     * Validate a URL which Zabbix server/proxy will fetch as a web-scenario
+     * step. Unlike provider/NetBox test endpoints, these destinations originate
+     * in model parameters and therefore require an administrator allowlist.
+     *
+     * Allowlist entries are exact origins such as https://status.example.com or
+     * wildcard origins such as https://*.checks.example.com:8443. Scheme and
+     * effective port must match. Paths, userinfo and query strings are not valid
+     * in allowlist entries.
+     */
+    public static function assertAllowedWebScenarioUrl(string $url, $allowed_origins): void {
+        $url = trim($url);
+        if ($url === '' || !preg_match('#^https?://#i', $url)) {
+            throw new \RuntimeException('Web scenarios may use only http(s) URLs.');
+        }
+
+        $parts = parse_url($url);
+        if (!is_array($parts) || empty($parts['host'])) {
+            throw new \RuntimeException('The web-scenario URL does not contain a valid host.');
+        }
+        if (isset($parts['user']) || isset($parts['pass'])) {
+            throw new \RuntimeException('Credentials embedded in a web-scenario URL are not allowed.');
+        }
+
+        $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+        $host = strtolower(trim((string) $parts['host'], '[]'));
+        $port = isset($parts['port']) ? (int) $parts['port'] : ($scheme === 'https' ? 443 : 80);
+
+        $entries = is_array($allowed_origins)
+            ? $allowed_origins
+            : preg_split('/\r?\n/', (string) $allowed_origins);
+        $matched = false;
+
+        foreach ((array) $entries as $entry) {
+            $entry = trim((string) $entry);
+            if ($entry === '') {
+                continue;
+            }
+
+            $allowed = parse_url($entry);
+            if (!is_array($allowed) || empty($allowed['scheme']) || empty($allowed['host'])
+                    || isset($allowed['user']) || isset($allowed['pass'])
+                    || !empty($allowed['query']) || !empty($allowed['fragment'])
+                    || !in_array((string) ($allowed['path'] ?? ''), ['', '/'], true)) {
+                continue;
+            }
+
+            $allowed_scheme = strtolower((string) $allowed['scheme']);
+            if (!in_array($allowed_scheme, ['http', 'https'], true) || $allowed_scheme !== $scheme) {
+                continue;
+            }
+
+            $allowed_port = isset($allowed['port'])
+                ? (int) $allowed['port']
+                : ($allowed_scheme === 'https' ? 443 : 80);
+            if ($allowed_port !== $port) {
+                continue;
+            }
+
+            $allowed_host = strtolower(trim((string) $allowed['host'], '[]'));
+            if (strncmp($allowed_host, '*.', 2) === 0) {
+                $suffix = substr($allowed_host, 1); // includes the leading dot
+                $matched = $host !== substr($suffix, 1)
+                    && strlen($host) > strlen($suffix)
+                    && substr($host, -strlen($suffix)) === $suffix;
+            }
+            else {
+                $matched = hash_equals($allowed_host, $host);
+            }
+
+            if ($matched) {
+                break;
+            }
+        }
+
+        if (!$matched) {
+            throw new \RuntimeException(
+                'The web-scenario destination is not in the administrator allowlist '
+                .'(AI Settings > Zabbix Actions > Web scenario allowed origins).'
+            );
+        }
+
+        self::assertWebScenarioHostIsNotRestricted($host);
+    }
+
+    private static function assertWebScenarioHostIsNotRestricted(string $host): void {
+        $host = strtolower(trim($host, '[]'));
+        if ($host === 'localhost' || substr($host, -10) === '.localhost'
+                || in_array($host, ['metadata', 'metadata.google.internal'], true)) {
+            throw new \RuntimeException('Loopback and cloud-metadata web-scenario destinations are blocked.');
+        }
+
+        $addresses = [];
+        if (filter_var($host, FILTER_VALIDATE_IP)) {
+            $addresses[] = $host;
+        }
+        else {
+            if (function_exists('dns_get_record')) {
+                $records = @dns_get_record($host, DNS_A | DNS_AAAA);
+                if (is_array($records)) {
+                    foreach ($records as $record) {
+                        $ip = (string) ($record['ip'] ?? ($record['ipv6'] ?? ''));
+                        if ($ip !== '') {
+                            $addresses[] = $ip;
+                        }
+                    }
+                }
+            }
+            if (!$addresses) {
+                $resolved = @gethostbynamel($host);
+                if (is_array($resolved)) {
+                    $addresses = array_merge($addresses, $resolved);
+                }
+            }
+        }
+
+        if (!$addresses) {
+            throw new \RuntimeException(
+                'The web-scenario destination could not be resolved for SSRF validation. '
+                .'Use a resolvable allowlisted origin.'
+            );
+        }
+
+        foreach (array_unique($addresses) as $ip) {
+            if (self::isRestrictedWebScenarioIp((string) $ip)) {
+                throw new \RuntimeException(
+                    'The web-scenario destination resolves to a loopback, link-local, '
+                    .'metadata, multicast or unspecified address and is blocked.'
+                );
+            }
+        }
+    }
+
+    private static function isRestrictedWebScenarioIp(string $ip): bool {
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            $packed = @inet_pton($ip);
+            if (!is_string($packed) || strlen($packed) !== 4) {
+                return true;
+            }
+            $n = unpack('N', $packed)[1];
+
+            return ($n & 0xff000000) === 0x00000000       // 0.0.0.0/8
+                || ($n & 0xff000000) === 0x7f000000       // 127.0.0.0/8
+                || ($n & 0xffff0000) === 0xa9fe0000       // 169.254.0.0/16
+                || ($n & 0xf0000000) === 0xe0000000       // multicast/reserved
+                || in_array($ip, ['100.100.100.200'], true);
+        }
+
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            $packed = @inet_pton($ip);
+            if (!is_string($packed) || strlen($packed) !== 16) {
+                return true;
+            }
+
+            // IPv4-mapped/compatible spellings must inherit the IPv4 checks;
+            // string matching misses compressed hexadecimal forms such as
+            // ::ffff:7f00:1.
+            if (substr($packed, 0, 10) === str_repeat("\0", 10)
+                    && substr($packed, 10, 2) === "\xff\xff") {
+                $mapped = @inet_ntop(substr($packed, 12, 4));
+
+                return !is_string($mapped) || self::isRestrictedWebScenarioIp($mapped);
+            }
+
+            return $packed === str_repeat("\0", 16)       // ::
+                || $packed === str_repeat("\0", 15)."\1" // ::1
+                || (ord($packed[0]) === 0xfe && (ord($packed[1]) & 0xc0) === 0x80) // fe80::/10
+                || ord($packed[0]) === 0xff                 // multicast
+                || $packed === @inet_pton('fd00:ec2::254');
+        }
+
+        return true;
     }
 
     private static function isLinkLocalIp(string $ip): bool {

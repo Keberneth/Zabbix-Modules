@@ -2,6 +2,7 @@
 
 require_once __DIR__.'/Util.php';
 require_once __DIR__.'/Filesystem.php';
+require_once __DIR__.'/SecretReference.php';
 require_once __DIR__.'/Crypto.php';
 require_once __DIR__.'/Config.php';
 require_once __DIR__.'/AuditLogger.php';

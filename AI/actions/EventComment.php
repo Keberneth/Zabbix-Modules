@@ -6,6 +6,7 @@ require_once __DIR__.'/../lib/bootstrap.php';
 
 use CController,
     CControllerResponseData,
+    CWebUser,
     Modules\AI\Lib\AuditLogger,
     Modules\AI\Lib\Config,
     Modules\AI\Lib\Redactor,
@@ -19,7 +20,7 @@ class EventComment extends CController {
     }
 
     protected function checkPermissions(): bool {
-        return $this->getUserType() >= USER_TYPE_ZABBIX_USER;
+        return $this->getUserType() >= USER_TYPE_ZABBIX_USER && !CWebUser::isGuest();
     }
 
     protected function doAction(): void {
@@ -62,7 +63,10 @@ class EventComment extends CController {
             $chunks = $client->addProblemComment(
                 $eventid,
                 $message_to_post,
-                (int) ($config['webhook']['problem_update_action'] ?? 4),
+                // This interactive control promises only to post a comment.
+                // Webhook automation may be configured to acknowledge/close,
+                // but that setting must never change this button's semantics.
+                4,
                 (int) ($config['webhook']['comment_chunk_size'] ?? 1900)
             );
 
