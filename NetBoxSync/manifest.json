@@ -3,7 +3,7 @@
   "id": "custom_netbox_sync",
   "name": "NetBox Sync",
   "namespace": "NetBoxSync",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Keberneth",
   "description": "Zabbix 7 frontend module for configurable NetBox synchronization, including built-in VM/service sync and extensible custom mappings.",
   "actions": {
@@ -21,6 +21,10 @@
     },
     "netboxsync.test": {
       "class": "TestConnection",
+      "layout": "layout.json"
+    },
+    "netboxsync.zabbix.test": {
+      "class": "TestZabbixConnection",
       "layout": "layout.json"
     },
     "netboxsync.log": {
@@ -48,6 +52,13 @@
   "config": {
     "netbox": {
       "enabled": false,
+      "url": "",
+      "token": "",
+      "token_env": "",
+      "verify_peer": true,
+      "timeout": 15
+    },
+    "zabbix_api": {
       "url": "",
       "token": "",
       "token_env": "",

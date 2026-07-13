@@ -11,7 +11,7 @@ $last_summary = is_array($data['last_summary'] ?? null) ? $data['last_summary'] 
 $settings_save_url = (string) ($data['settings_save_url'] ?? (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.settings.save')->getUrl());
 $run_url = (string) ($data['run_url'] ?? (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.run')->getUrl());
 $test_url = (string) ($data['test_url'] ?? (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.test')->getUrl());
-$runner_url = (string) ($data['runner_url'] ?? $run_url);
+$zabbix_test_url = (string) ($data['zabbix_test_url'] ?? (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.zabbix.test')->getUrl());
 $linux_plugin_url = (string) ($data['linux_plugin_url'] ?? '');
 $windows_plugin_url = (string) ($data['windows_plugin_url'] ?? '');
 $modules_repo_url = (string) ($data['modules_repo_url'] ?? '');
@@ -173,10 +173,7 @@ $render_mapping_row = static function(array $mapping = []) use ($h): string {
 };
 
 $summary_messages = is_array($last_summary['messages'] ?? null) ? $last_summary['messages'] : [];
-$runner_secret_hint = trim((string) ($config['runner']['shared_secret_env'] ?? '')) !== ''
-    ? '$'.$config['runner']['shared_secret_env']
-    : 'replace-with-shared-secret';
-$runner_curl = "curl -fsS -X POST -H 'X-NetBox-Sync-Secret: ".$runner_secret_hint."' '".$runner_url."'";
+$runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.php --json';
 ?>
 <div id="nbs-settings-root" class="nbs-page nbs-settings-page" data-nbs-theme="<?= $h($nbs_theme) ?>">
     <div class="nbs-header">
@@ -199,6 +196,8 @@ $runner_curl = "curl -fsS -X POST -H 'X-NetBox-Sync-Secret: ".$runner_secret_hin
         <input type="hidden" id="nbs-run-csrf-token-value" value="<?= $h(CCsrfTokenHelper::get('netboxsync.run')) ?>">
         <input type="hidden" id="nbs-test-csrf-token-name" value="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>">
         <input type="hidden" id="nbs-test-csrf-token-value" value="<?= $h(CCsrfTokenHelper::get('netboxsync.test')) ?>">
+        <input type="hidden" id="nbs-zabbix-test-csrf-token-name" value="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>">
+        <input type="hidden" id="nbs-zabbix-test-csrf-token-value" value="<?= $h(CCsrfTokenHelper::get('netboxsync.zabbix.test')) ?>">
 
         <section class="nbs-card">
             <div class="nbs-section-header">
@@ -206,7 +205,7 @@ $runner_curl = "curl -fsS -X POST -H 'X-NetBox-Sync-Secret: ".$runner_secret_hin
                 <button type="button" class="nbs-faq-toggle" data-faq-target="nbs-faq-connections">?</button>
             </div>
             <div id="nbs-faq-connections" class="nbs-faq-box">
-                <p><strong><?= $h(_('Zabbix data')) ?>:</strong> <?= $h(_('The module runs inside the Zabbix frontend and reads hosts, items, and interfaces directly through the built-in API facade. No Zabbix URL or token is needed.')) ?></p>
+                <p><strong><?= $h(_('Zabbix data')) ?>:</strong> <?= $h(_('Interactive runs use the current frontend session. Unattended CLI runs use the dedicated Zabbix API token configured below, so no browser session is required.')) ?></p>
                 <p><strong><?= $h(_('NetBox')) ?>:</strong> <?= $h(_('Used for VM, device, interface, disk, IP, service, and custom-field updates. For secrets, prefer environment variables when possible.')) ?></p>
             </div>
             <div class="nbs-columns">
@@ -249,6 +248,42 @@ $runner_curl = "curl -fsS -X POST -H 'X-NetBox-Sync-Secret: ".$runner_secret_hin
                         <span class="nbs-mini-help"><?= $h(_('Runs a single GET /status/ using the values above (blank fields fall back to the stored config).')) ?></span>
                     </div>
                 </div>
+                <div class="nbs-column-card">
+                    <h3><?= $h(_('Zabbix API for unattended sync')) ?></h3>
+                    <div class="nbs-settings-grid">
+                        <div>
+                            <label class="nbs-label"><?= $h(_('Timeout')) ?></label>
+                            <input class="nbs-input" type="number" min="5" max="300" name="zabbix_api[timeout]" value="<?= $h((int) ($config['zabbix_api']['timeout'] ?? 15)) ?>">
+                        </div>
+                        <div>
+                            <label class="nbs-label"><?= $h(_('Verify TLS')) ?></label>
+                            <label class="nbs-checkbox"><input type="checkbox" name="zabbix_api[verify_peer]" value="1" <?= !empty($config['zabbix_api']['verify_peer']) ? 'checked' : '' ?>> <?= $h(_('Validate certificates')) ?></label>
+                        </div>
+                        <div class="nbs-span-2">
+                            <label class="nbs-label"><?= $h(_('API endpoint')) ?></label>
+                            <input class="nbs-input" type="text" name="zabbix_api[url]" value="<?= $h($config['zabbix_api']['url'] ?? '') ?>" placeholder="https://zabbix.example.com/api_jsonrpc.php">
+                        </div>
+                        <div class="nbs-span-2">
+                            <label class="nbs-label"><?= $h(_('API token')) ?></label>
+                            <input class="nbs-input" type="password" name="zabbix_api[token]" value="" placeholder="<?= !empty($config['zabbix_api']['token_present']) ? $h(_('Leave blank to keep current token')) : '' ?>">
+                            <div class="nbs-inline-notes">
+                                <?php if (!empty($config['zabbix_api']['token_present'])): ?>
+                                    <span class="nbs-muted"><?= $h(_('Stored token exists.')) ?></span>
+                                <?php endif; ?>
+                                <label class="nbs-checkbox"><input type="checkbox" name="zabbix_api[clear_token]" value="1"> <?= $h(_('Clear stored token')) ?></label>
+                            </div>
+                        </div>
+                        <div class="nbs-span-2">
+                            <label class="nbs-label"><?= $h(_('Token environment variable')) ?></label>
+                            <input class="nbs-input" type="text" name="zabbix_api[token_env]" value="<?= $h($config['zabbix_api']['token_env'] ?? '') ?>" placeholder="NETBOXSYNC_ZABBIX_API_TOKEN">
+                            <div class="nbs-mini-help"><?= $h(_('For systemd, define this variable in /etc/sysconfig/zabbix-netbox-sync.')) ?></div>
+                        </div>
+                    </div>
+                    <div class="nbs-section-actions">
+                        <button type="button" id="nbs-test-zabbix-connection" class="btn-alt" data-test-url="<?= $h($zabbix_test_url) ?>"><?= $h(_('Test Zabbix API')) ?></button>
+                        <span class="nbs-mini-help"><?= $h(_('Verifies the endpoint and service-token access with a small host.get request.')) ?></span>
+                    </div>
+                </div>
             </div>
         </section>
 
@@ -258,16 +293,16 @@ $runner_curl = "curl -fsS -X POST -H 'X-NetBox-Sync-Secret: ".$runner_secret_hin
                 <button type="button" class="nbs-faq-toggle" data-faq-target="nbs-faq-runner">?</button>
             </div>
             <div id="nbs-faq-runner" class="nbs-faq-box">
-                <p><strong><?= $h(_('How it works')) ?>:</strong> <?= $h(_('The module includes a secure runner action for manual runs and for scheduler-triggered runs. Global interval is the default for every built-in sync and custom mapping unless that row has its own override.')) ?></p>
-                <p><strong><?= $h(_('Runner URL')) ?>:</strong> <code><?= $h($runner_url) ?></code></p>
-                <p><strong><?= $h(_('Suggested scheduler call')) ?>:</strong></p>
-                <pre class="nbs-code"><?= $h($runner_curl) ?></pre>
+                <p><strong><?= $h(_('How it works')) ?>:</strong> <?= $h(_('The recommended systemd timer runs the CLI worker directly. It reads these saved settings and authenticates to Zabbix with the service API token, so it does not need an active frontend session.')) ?></p>
+                <p><strong><?= $h(_('Recommended scheduler command')) ?>:</strong></p>
+                <pre class="nbs-code"><?= $h($runner_cli) ?></pre>
+                <p><?= $h(_('The legacy shared-secret frontend action is not a sessionless endpoint because Zabbix checks module access before loading the action.')) ?></p>
             </div>
 
             <div class="nbs-settings-grid">
                 <div>
                     <label class="nbs-label"><?= $h(_('Runner enabled')) ?></label>
-                    <label class="nbs-checkbox"><input type="checkbox" name="runner[enabled]" value="1" <?= !empty($config['runner']['enabled']) ? 'checked' : '' ?>> <?= $h(_('Allow scheduled runs via shared secret')) ?></label>
+                    <label class="nbs-checkbox"><input type="checkbox" name="runner[enabled]" value="1" <?= !empty($config['runner']['enabled']) ? 'checked' : '' ?>> <?= $h(_('Allow CLI and scheduled runs')) ?></label>
                 </div>
                 <div>
                     <label class="nbs-label"><?= $h(_('Global interval (seconds)')) ?></label>
@@ -282,7 +317,7 @@ $runner_curl = "curl -fsS -X POST -H 'X-NetBox-Sync-Secret: ".$runner_secret_hin
                     <input class="nbs-input" type="number" min="0" max="100000" name="runner[max_hosts_per_run]" value="<?= $h((int) ($config['runner']['max_hosts_per_run'] ?? 0)) ?>">
                 </div>
                 <div class="nbs-span-2">
-                    <label class="nbs-label"><?= $h(_('Shared secret')) ?></label>
+                    <label class="nbs-label"><?= $h(_('Legacy frontend-trigger shared secret (optional)')) ?></label>
                     <input class="nbs-input" type="password" name="runner[shared_secret]" value="" placeholder="<?= !empty($config['runner']['shared_secret_present']) ? $h(_('Leave blank to keep current secret')) : '' ?>">
                     <div class="nbs-inline-notes">
                         <?php if (!empty($config['runner']['shared_secret_present'])): ?>
@@ -292,7 +327,7 @@ $runner_curl = "curl -fsS -X POST -H 'X-NetBox-Sync-Secret: ".$runner_secret_hin
                     </div>
                 </div>
                 <div>
-                    <label class="nbs-label"><?= $h(_('Shared-secret environment variable')) ?></label>
+                    <label class="nbs-label"><?= $h(_('Legacy secret environment variable')) ?></label>
                     <input class="nbs-input" type="text" name="runner[shared_secret_env]" value="<?= $h($config['runner']['shared_secret_env'] ?? '') ?>" placeholder="NETBOXSYNC_SHARED_SECRET">
                 </div>
                 <div>

@@ -191,6 +191,60 @@
         showStatus(payload.message || 'Connection OK.', 'ok');
     }
 
+    async function testZabbixConnection(form) {
+        var button = qs('#nbs-test-zabbix-connection');
+        if (!button) {
+            return;
+        }
+
+        var testUrl = button.getAttribute('data-test-url');
+        var fd = new FormData();
+
+        function fieldValue(name) {
+            var el = form.querySelector('[name="' + name + '"]');
+            return el ? el.value : '';
+        }
+
+        function fieldChecked(name) {
+            var el = form.querySelector('[name="' + name + '"]');
+            return el && el.checked ? '1' : '0';
+        }
+
+        fd.append('url', fieldValue('zabbix_api[url]'));
+        fd.append('token', fieldValue('zabbix_api[token]'));
+        fd.append('token_env', fieldValue('zabbix_api[token_env]'));
+        fd.append('verify_peer', fieldChecked('zabbix_api[verify_peer]'));
+        fd.append('timeout', fieldValue('zabbix_api[timeout]') || '15');
+
+        var tokenName = qs('#nbs-zabbix-test-csrf-token-name');
+        var tokenValue = qs('#nbs-zabbix-test-csrf-token-value');
+        if (tokenName && tokenValue) {
+            fd.append(tokenName.value, tokenValue.value);
+        }
+
+        showStatus('Testing unattended Zabbix API access…', 'warn');
+
+        var response = await fetch(testUrl, {
+            method: 'POST',
+            body: fd,
+            credentials: 'same-origin'
+        });
+
+        var payload;
+        try {
+            payload = await response.json();
+        }
+        catch (e) {
+            throw new Error('The Zabbix API test action did not return valid JSON.');
+        }
+
+        if (!response.ok || !payload.ok) {
+            throw new Error(payload.error || 'Zabbix API connection test failed.');
+        }
+
+        showStatus(payload.message || 'Zabbix API connection OK.', 'ok');
+    }
+
     function initForm() {
         var form = qs('#nbs-settings-form');
         if (!form) {
@@ -217,6 +271,15 @@
         if (testButton) {
             testButton.addEventListener('click', function() {
                 testConnection(form).catch(function(error) {
+                    showStatus(error.message || String(error), 'error');
+                });
+            });
+        }
+
+        var zabbixTestButton = qs('#nbs-test-zabbix-connection');
+        if (zabbixTestButton) {
+            zabbixTestButton.addEventListener('click', function() {
+                testZabbixConnection(form).catch(function(error) {
                     showStatus(error.message || String(error), 'error');
                 });
             });

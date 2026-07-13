@@ -40,7 +40,7 @@ class SettingsView extends CController {
             'settings_save_url' => (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.settings.save')->getUrl(),
             'run_url' => (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.run')->getUrl(),
             'test_url' => (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.test')->getUrl(),
-            'runner_url' => (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.run')->getUrl(),
+            'zabbix_test_url' => (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.zabbix.test')->getUrl(),
             'log_url' => (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.log')->getUrl(),
             'linux_plugin_url' => 'https://github.com/Keberneth/Zabbix-Plugins/tree/main/Linux/linux_service_listening_port',
             'windows_plugin_url' => 'https://github.com/Keberneth/Zabbix-Plugins/tree/main/Windows/windows_service_listening_port',

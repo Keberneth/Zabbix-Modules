@@ -18,6 +18,7 @@ class SettingsSave extends CController {
         // is not one of these whitelisted keys.
         $fields = [
             'netbox' => 'array',
+            'zabbix_api' => 'array',
             'runner' => 'array',
             'vm' => 'array',
             'services' => 'array',

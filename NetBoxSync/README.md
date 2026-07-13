@@ -34,6 +34,7 @@ This frontend module adds a configurable NetBox sync page under **Monitoring →
 - `actions/`
 - `views/`
 - `lib/`
+- `bin/`
 - `assets/`
 - `samples/`
 
@@ -51,13 +52,22 @@ The default item names expected by this module are:
 
 ## Scheduler model
 
-A Zabbix frontend module does not run on its own.  
-This module therefore includes a secure runner action:
+A Zabbix frontend module does not run on its own. The recommended unattended
+path is the bundled CLI worker:
 
-- `zabbix.php?action=netboxsync.run`
+```bash
+php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.php --json
+```
 
-Use that runner with cron or a systemd timer.  
-Examples are included in `samples/`.
+It reads this module's settings from the Zabbix frontend database and reads
+hosts through the Zabbix JSON-RPC API using a dedicated API token. It therefore
+works under systemd or cron with no logged-in user and no browser session.
+
+The frontend `netboxsync.run` action remains available for interactive use,
+but it is not an anonymous scheduler endpoint: Zabbix must load the module for
+an authenticated user before the controller can run. Use the CLI worker for
+session-free scheduling. Ready-to-use systemd and cron examples are included
+in `samples/`.
 
 ## Secrets
 
@@ -69,13 +79,16 @@ The module supports both:
 Supported env settings:
 
 - `netbox[token_env]`
+- `zabbix_api[token_env]`
 - `runner[shared_secret_env]`
 
-The module reads Zabbix hosts, items, and interfaces directly through the built-in `API::` facade inside the Zabbix frontend, so no Zabbix URL or token is required.
+Interactive **Run now** requests use the logged-in Zabbix frontend session.
+Unattended CLI runs use `zabbix_api[url]` plus a dedicated Zabbix API token, so
+they are independent of frontend sessions.
 
 ## Filesystem permissions
 
-The web/PHP user must be able to write to:
+The PHP-FPM user and unattended CLI service account must be able to write to:
 
 - runner state path (default `/var/lib/zabbix-netbox-sync/state`)
 - runner log path (default `/var/log/zabbix-netbox-sync`)
@@ -112,10 +125,12 @@ isolate changes — e.g. filter OS = `Windows Server 2019` + `Windows Server
 ## Configuration reference
 
 All settings live on **Monitoring → NetBox Sync → Settings**, grouped into cards.
-Secrets (NetBox token, runner shared secret) are never echoed back to the page —
-leave the field blank to keep the stored value, or tick *Clear* to remove it.
+Secrets (NetBox token, Zabbix API token, runner shared secret) are never echoed
+back to the page — leave the field blank to keep the stored value, or tick
+*Clear* to remove it.
 
 ### Connections → NetBox
+
 | Field | Meaning |
 | --- | --- |
 | Enabled | Master switch for all NetBox writes. A run aborts early if this is off. |
@@ -126,14 +141,26 @@ leave the field blank to keep the stored value, or tick *Clear* to remove it.
 | Timeout | Per-request cURL timeout in seconds (5–300). |
 | **Test connection** | Runs a single `GET /status/` using the values currently in the form (blank fields fall back to the stored config) and reports success or a generic failure. |
 
-### Runner and scheduling
+### Connections → Zabbix API for unattended sync
+
 | Field | Meaning |
 | --- | --- |
-| Runner enabled | Allow secret-gated runs via `action=netboxsync.run` (cron/systemd). |
+| API endpoint | Full JSON-RPC URL, for example `https://zabbix.example.com/api_jsonrpc.php`. |
+| API token | Token for a dedicated Zabbix service user with read access to the host groups being synchronized. |
+| Token environment variable | Name of an env var read at runtime; this overrides the stored token when it is present. |
+| Verify TLS | Validate the Zabbix frontend certificate. Disable only for a controlled lab setup. |
+| Timeout | Per-request cURL timeout in seconds (5–300). |
+| **Test Zabbix API** | Verifies the endpoint and token with a bounded `host.get` request. For environment-only systemd credentials, use the CLI `--check` command from that service account. |
+
+### Runner and scheduling
+
+| Field | Meaning |
+| --- | --- |
+| Runner enabled | Allow unattended CLI runs and the legacy frontend trigger. |
 | Global interval | Default seconds between runs of each sync/mapping unless it overrides it. |
 | Default prefix length | Mask used when creating a NetBox prefix for a discovered primary IP. |
 | Max hosts per run | 0 = all (capped at 50000). Otherwise processes at most this many hosts. |
-| Shared secret / env var | Secret the runner must present (`X-NetBox-Sync-Secret` header or `?secret=`). |
+| Shared secret / env var | Legacy frontend-trigger secret. It is not used by the CLI worker and does not bypass Zabbix's requirement that the module action be loaded for an authenticated user. |
 | Lock TTL | Advisory lock lifetime preventing overlapping runs. |
 | State path / Log path | Writable directories for run state and the structured event log (see Filesystem permissions). |
 

@@ -8,7 +8,8 @@ use CController,
     CControllerResponseData,
     Modules\NetBoxSync\Lib\Config,
     Modules\NetBoxSync\Lib\SyncEngine,
-    Modules\NetBoxSync\Lib\Util;
+    Modules\NetBoxSync\Lib\Util,
+    Modules\NetBoxSync\Lib\ZabbixApiClient;
 
 class RunSync extends CController {
 
@@ -56,10 +57,33 @@ class RunSync extends CController {
             $config = Config::get();
             $is_super_admin = ($this->getUserType() == USER_TYPE_SUPER_ADMIN);
 
-            $summary = SyncEngine::run($config, [
+            $options = [
                 'force' => Util::truthy($_REQUEST['force'] ?? false),
                 'source' => $is_super_admin ? 'ui' : 'runner'
-            ]);
+            ];
+
+            // A shared-secret request must not rely on the caller's session-bound
+            // API facade. Use the configured service API token for Zabbix reads.
+            if (!$is_super_admin) {
+                $options['zabbix_client'] = ZabbixApiClient::fromConfig($config);
+            }
+
+            $summary = SyncEngine::run($config, $options);
+
+            if (empty($summary['ok'])) {
+                $messages = is_array($summary['messages'] ?? null) ? $summary['messages'] : [];
+                $last_message = $messages !== [] ? end($messages) : null;
+                $error = is_array($last_message)
+                    ? (string) ($last_message['message'] ?? _('The sync failed.'))
+                    : (is_string($last_message) ? $last_message : _('The sync failed.'));
+
+                $this->respond([
+                    'ok' => false,
+                    'error' => $error,
+                    'summary' => $summary
+                ], 500);
+                return;
+            }
 
             $this->respond([
                 'ok' => true,

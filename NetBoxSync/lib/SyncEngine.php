@@ -61,7 +61,11 @@ class SyncEngine {
         $this->store = new StateStore($state_path, $log_path);
         $this->events = new LogStore($log_path);
 
-        $this->zabbix = new ZabbixApiClient();
+        $zabbix_client = $options['zabbix_client'] ?? null;
+        if ($zabbix_client !== null && !($zabbix_client instanceof ZabbixApiClient)) {
+            throw new RuntimeException('The supplied Zabbix client is invalid.');
+        }
+        $this->zabbix = $zabbix_client ?? new ZabbixApiClient();
 
         $netbox = $this->config['netbox'] ?? [];
         if (empty($netbox['enabled'])) {
@@ -77,7 +81,9 @@ class SyncEngine {
     }
 
     private function execute(): array {
-        set_time_limit(300);
+        if (PHP_SAPI !== 'cli') {
+            set_time_limit(300);
+        }
         $started_at = microtime(true);
 
         try {

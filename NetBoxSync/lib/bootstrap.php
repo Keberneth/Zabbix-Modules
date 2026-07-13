@@ -2,6 +2,8 @@
 
 require_once __DIR__.'/Util.php';
 require_once __DIR__.'/Config.php';
+require_once __DIR__.'/DbConnector.php';
+require_once __DIR__.'/StandaloneConfig.php';
 require_once __DIR__.'/StateStore.php';
 require_once __DIR__.'/LogStore.php';
 require_once __DIR__.'/ZabbixApiClient.php';

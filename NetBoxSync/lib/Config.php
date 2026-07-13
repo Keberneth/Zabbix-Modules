@@ -21,6 +21,13 @@ class Config {
         'verify_peer' => true,
         'timeout' => 15
     ],
+    'zabbix_api' => [
+        'url' => '',
+        'token' => '',
+        'token_env' => '',
+        'verify_peer' => true,
+        'timeout' => 15
+    ],
     'runner' => [
         'enabled' => true,
         'shared_secret' => '',
@@ -254,6 +261,9 @@ class Config {
         $config['netbox']['token_present'] = trim((string) ($config['netbox']['token'] ?? '')) !== '';
         $config['netbox']['token'] = '';
 
+        $config['zabbix_api']['token_present'] = trim((string) ($config['zabbix_api']['token'] ?? '')) !== '';
+        $config['zabbix_api']['token'] = '';
+
         $config['runner']['shared_secret_present'] = trim((string) ($config['runner']['shared_secret'] ?? '')) !== '';
         $config['runner']['shared_secret'] = '';
 
@@ -272,6 +282,11 @@ public static function sanitizeForRuntime(array $config): array {
     $config['netbox']['token'] = self::resolveRuntimeSecret(
         (string) ($config['netbox']['token_env'] ?? ''),
         (string) ($config['netbox']['token'] ?? '')
+    );
+
+    $config['zabbix_api']['token'] = self::resolveRuntimeSecret(
+        (string) ($config['zabbix_api']['token_env'] ?? ''),
+        (string) ($config['zabbix_api']['token'] ?? '')
     );
 
     $config['runner']['shared_secret'] = self::resolveRuntimeSecret(
@@ -297,6 +312,18 @@ public static function sanitizeForRuntime(array $config): array {
             'token_env' => Util::cleanString($post['netbox']['token_env'] ?? '', 128),
             'verify_peer' => Util::truthy($post['netbox']['verify_peer'] ?? false),
             'timeout' => Util::cleanInt($post['netbox']['timeout'] ?? 15, 15, 5, 300)
+        ];
+
+        $new_config['zabbix_api'] = [
+            'url' => Util::cleanUrl($post['zabbix_api']['url'] ?? ''),
+            'token' => self::preserveSecret(
+                $post['zabbix_api']['token'] ?? '',
+                $current_config['zabbix_api']['token'] ?? '',
+                $post['zabbix_api']['clear_token'] ?? false
+            ),
+            'token_env' => Util::cleanString($post['zabbix_api']['token_env'] ?? '', 128),
+            'verify_peer' => Util::truthy($post['zabbix_api']['verify_peer'] ?? false),
+            'timeout' => Util::cleanInt($post['zabbix_api']['timeout'] ?? 15, 15, 5, 300)
         ];
 
         $new_config['runner'] = [

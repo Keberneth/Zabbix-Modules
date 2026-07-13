@@ -6,20 +6,27 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# Holds NETBOXSYNC_URL and NETBOXSYNC_SECRET. Keep it root-only (0640):
-#   sudo install -o root -g root -m 0640 /dev/null /etc/sysconfig/zabbix-netbox-sync
-# On Debian/Ubuntu use /etc/default/zabbix-netbox-sync and update the path below.
-EnvironmentFile=/etc/sysconfig/zabbix-netbox-sync
-# Invoked through /bin/sh so it works even though the module files are installed
-# mode 0644 (no executable bit).
-ExecStart=/bin/sh /usr/share/zabbix/modules/NetBoxSync/samples/netboxsync-run.sh
+# Use the same account that owns the state/log directories and can read the
+# Zabbix frontend DB configuration. Debian/Ubuntu usually uses www-data.
+User=apache
+Group=apache
 
-# Hardening (optional; relax if your environment needs it).
-DynamicUser=yes
+# Optional environment-backed NetBox/Zabbix tokens, ZABBIX_WEB_CONFIG, and
+# standalone DB credentials for Vault-backed frontend configurations.
+# Keep this file root-owned and not world-readable. On Debian/Ubuntu use
+# /etc/default/zabbix-netbox-sync and update this path.
+EnvironmentFile=/etc/sysconfig/zabbix-netbox-sync
+WorkingDirectory=/usr/share/zabbix/modules/NetBoxSync
+ExecStart=/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.php --json
+TimeoutStartSec=30min
+UMask=0007
+
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+ReadWritePaths=/var/lib/zabbix-netbox-sync /var/log/zabbix-netbox-sync
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target

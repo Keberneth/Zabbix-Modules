@@ -1,21 +1,19 @@
 #!/bin/sh
-# Runner wrapper for the NetBoxSync module. Triggers one synchronization run via
-# the secret-gated runner action. Used by the bundled systemd service, but it
-# also works straight from cron.
+# CLI wrapper for the NetBoxSync module. It runs without a browser session and
+# can be used directly from cron. The bundled systemd service invokes PHP
+# directly, so this wrapper is optional.
 #
-# Required environment (e.g. from /etc/sysconfig/zabbix-netbox-sync):
-#   NETBOXSYNC_URL    = https://<zabbix>/zabbix.php?action=netboxsync.run
-#   NETBOXSYNC_SECRET = the runner shared secret configured on the settings page
+# Optional environment:
+#   PHP_BIN             = PHP CLI path (default /usr/bin/php)
+#   NETBOXSYNC_RUNNER   = runner path shown below
 #
-# Cron example (every 15 minutes), keeping the secret out of the process list:
-#   */15 * * * * . /etc/sysconfig/zabbix-netbox-sync; sh /usr/share/zabbix/modules/NetBoxSync/samples/netboxsync-run.sh
+# Cron example when tokens are stored in module settings (every 15 minutes):
+#   */15 * * * * /bin/sh /usr/share/zabbix/modules/NetBoxSync/samples/netboxsync-run.sh --json
+# Environment-backed tokens must already be exported by the caller. The
+# bundled systemd unit handles its EnvironmentFile automatically.
 set -eu
 
-: "${NETBOXSYNC_URL:?NETBOXSYNC_URL is not set}"
-: "${NETBOXSYNC_SECRET:?NETBOXSYNC_SECRET is not set}"
+PHP_BIN=${PHP_BIN:-/usr/bin/php}
+NETBOXSYNC_RUNNER=${NETBOXSYNC_RUNNER:-/usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.php}
 
-exec curl -fsS \
-    --max-time 600 \
-    -X POST \
-    -H "X-NetBox-Sync-Secret: ${NETBOXSYNC_SECRET}" \
-    "${NETBOXSYNC_URL}"
+exec "${PHP_BIN}" "${NETBOXSYNC_RUNNER}" "$@"
