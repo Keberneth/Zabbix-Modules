@@ -1,0 +1,27 @@
+{
+  "manifest_version": 2.0,
+  "id": "capacity_planning",
+  "name": "Capacity Planning & Prediction",
+  "namespace": "CapacityPlanning",
+  "version": "1.0.0",
+  "author": "Keberneth",
+  "description": "Predictive filesystem, CPU and memory capacity report with robust trend forecasting, threshold ETAs, risk classification, drill-down charts and export options.",
+  "actions": {
+    "capacity.planning.view": {
+      "class": "CapacityPlanningView",
+      "view": "capacity.planning.view"
+    },
+    "capacity.planning.data": {
+      "class": "CapacityPlanningData",
+      "layout": "layout.json"
+    }
+  },
+  "assets": {
+    "css": [
+      "capacity-planning.css"
+    ],
+    "js": [
+      "capacity-planning.js"
+    ]
+  }
+}
