@@ -135,7 +135,8 @@ final class CapacityPlanningData extends CController {
 			'time_from' => 'string',
 			'time_to' => 'string',
 			'specs' => 'string',
-			'refresh' => 'in 0,1'
+			'refresh' => 'in 0,1',
+			self::csrfTokenField() => 'string'
 		];
 
 		return $this->validateInput($fields);
@@ -2559,7 +2560,8 @@ final class CapacityPlanningData extends CController {
 		// The shared cache is initialized only after the live item authorization
 		// lookup above. No cache key/path is ever derived for an item that was not
 		// returned to the current Zabbix user.
-		$this->force_series_refresh = (string) $this->getInput('refresh', '0') === '1';
+		$this->force_series_refresh = (string) $this->getInput('refresh', '0') === '1'
+			&& $this->hasValidRefreshToken();
 		$this->series_cache = new SeriesCache(Config::cacheSettings());
 
 		$now = time();
@@ -2698,7 +2700,47 @@ final class CapacityPlanningData extends CController {
 				'crit' => $num($entry['crit'] ?? null, 0.0, 100.0)
 			];
 		}
+
+		// The client is told this limit via inventory meta and batches resource
+		// specs separately. Enforce it server-side too: every resource spec can
+		// trigger a bounded but expensive raw-history scan.
+		$resource_specs = 0;
+		foreach ($specs as $spec) {
+			if ($spec['kind'] === 'res') {
+				$resource_specs++;
+			}
+		}
+		if ($resource_specs > self::RESOURCE_FORECAST_BATCH_MAX) {
+			return null;
+		}
+
 		return $specs;
+	}
+
+	/**
+	 * refresh=1 forces uncached live API loads for the whole batch. That
+	 * privilege requires proof the request originated from this module's page:
+	 * CSRF stays disabled for ordinary (cache-friendly) data loads, but a forced
+	 * refresh without a valid per-action token silently downgrades to a normal
+	 * cached load (observable via meta.cache.forced_refresh) instead of failing.
+	 */
+	private function hasValidRefreshToken(): bool {
+		$token = (string) $this->getInput(self::csrfTokenField(), '');
+
+		return $token !== '' && class_exists('CCsrfTokenHelper')
+			&& method_exists('CCsrfTokenHelper', 'check')
+			&& \CCsrfTokenHelper::check($token, 'capacity.planning.data');
+	}
+
+	/**
+	 * The client submits the token under CCsrfTokenHelper::CSRF_TOKEN_NAME (the
+	 * view passes that name to the browser), so the server must key on the same
+	 * constant rather than a hardcoded copy of its current value.
+	 */
+	private static function csrfTokenField(): string {
+		return class_exists('CCsrfTokenHelper') && defined('CCsrfTokenHelper::CSRF_TOKEN_NAME')
+			? (string) \CCsrfTokenHelper::CSRF_TOKEN_NAME
+			: '_csrf_token';
 	}
 
 	/** Return API-shaped hourly trend rows for one bounded shard. */
@@ -4419,21 +4461,24 @@ final class CapacityPlanningData extends CController {
 		$index = 0;
 		foreach ($daily as $day => $d) {
 			if ($bucket === null) {
-				$bucket = ['clock' => $day, 'sum' => 0.0, 'n' => 0, 'min' => $d['min'], 'max' => $d['max']];
+				$bucket = ['clock_sum' => 0.0, 'sum' => 0.0, 'n' => 0, 'min' => $d['min'], 'max' => $d['max']];
 			}
+			// Sample-weighted mean clock: sparse series can group days that are far
+			// apart, and stamping the group's first day would misplace its values.
+			$bucket['clock_sum'] += (float) $day * $d['n'];
 			$bucket['sum'] += $d['sum'];
 			$bucket['n'] += $d['n'];
 			$bucket['min'] = min($bucket['min'], $d['min']);
 			$bucket['max'] = max($bucket['max'], $d['max']);
 			$index++;
 			if ($index % $group === 0) {
-				$points[] = [$bucket['clock'], round($bucket['min'], 4),
+				$points[] = [(int) round($bucket['clock_sum'] / max(1, $bucket['n'])), round($bucket['min'], 4),
 					round($bucket['sum'] / max(1, $bucket['n']), 4), round($bucket['max'], 4)];
 				$bucket = null;
 			}
 		}
 		if ($bucket !== null) {
-			$points[] = [$bucket['clock'], round($bucket['min'], 4),
+			$points[] = [(int) round($bucket['clock_sum'] / max(1, $bucket['n'])), round($bucket['min'], 4),
 				round($bucket['sum'] / max(1, $bucket['n']), 4), round($bucket['max'], 4)];
 		}
 		return $points;

@@ -1236,9 +1236,9 @@ final class SeriesCache {
 			if (random_int(1, 50) !== 1) {
 				return;
 			}
-			// Shard lock files may only be removed while no fetch holds the
-			// installation-wide shared guard. Otherwise a waiter could retain an
-			// unlinked old inode while a second worker creates a new lock inode.
+			// The installation-wide exclusive guard ensures cleanup never runs
+			// concurrently with a fetch (which holds the shared guard) or an
+			// explicit clear operation.
 			$clear_guard = $this->acquireLock(
 				$this->install_root.DIRECTORY_SEPARATOR.'.clear.lock',
 				LOCK_EX,
@@ -1260,7 +1260,7 @@ final class SeriesCache {
 				$mtime = max(0, (int) @filemtime($file));
 				$size = max(0, (int) @filesize($file));
 				if ($mtime > 0 && $now - $mtime > $max_idle
-						&& $this->deleteDataAndLock($file)) {
+						&& $this->deleteDataFile($file)) {
 					continue;
 				}
 				$entries[] = ['path' => $file, 'mtime' => $mtime, 'size' => $size];
@@ -1277,7 +1277,7 @@ final class SeriesCache {
 							|| $evictions >= self::MAX_CLEANUP_EVICTIONS) {
 						break;
 					}
-					if ($this->deleteDataAndLock($entry['path'])) {
+					if ($this->deleteDataFile($entry['path'])) {
 						$total -= $entry['size'];
 						$evictions++;
 					}
@@ -1328,24 +1328,19 @@ final class SeriesCache {
 	}
 
 	/** Called only while holding the installation-wide exclusive clear guard. */
-	private function deleteDataAndLock(string $data_file): bool {
+	private function deleteDataFile(string $data_file): bool {
 		if (!$this->isDataFile($data_file) || is_link($data_file) || !is_file($data_file)) {
 			return false;
 		}
-		if (!@unlink($data_file)) {
-			return false;
-		}
-		$lock_file = substr($data_file, 0, -8).'.lock';
-		if (is_file($lock_file) && !is_link($lock_file)) {
-			@unlink($lock_file);
-		}
 
-		return true;
+		return (bool) @unlink($data_file);
 	}
 
 	/**
-	 * Inspect one random hash bucket in every generation. This avoids repeatedly
-	 * visiting only the first 10k healthy locks while still bounding each pass.
+	 * Remove abandoned temporary files. Root-level quota-state leftovers are
+	 * checked every pass; shard publish leftovers are looked for in one random
+	 * hash bucket per generation so each pass stays bounded. Shard locks are
+	 * striped at the installation root and need no per-shard cleanup here.
 	 */
 	private function cleanupAbandonedFiles(int $now): void {
 		$root_entries = new \DirectoryIterator($this->install_root);
@@ -1381,13 +1376,7 @@ final class SeriesCache {
 					continue;
 				}
 				$path = $entry->getPathname();
-				if (substr($path, -5) === '.lock') {
-					$data_file = substr($path, 0, -5).'.json.gz';
-					if (!is_file($data_file) && @unlink($path)) {
-						$removed++;
-					}
-				}
-				elseif (strpos(basename($path), '.json.gz.tmp.') !== false
+				if (strpos(basename($path), '.json.gz.tmp.') !== false
 						&& $now - max(0, (int) @filemtime($path)) > 3600 && @unlink($path)) {
 					$removed++;
 				}

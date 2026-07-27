@@ -191,23 +191,14 @@ final class Config {
 		$pid1_starttime = '';
 		$pid1_stat_path = '/proc/1/stat';
 		if (is_file($pid1_stat_path) && !is_link($pid1_stat_path)) {
-			$pid1_stat = trim((string) @file_get_contents($pid1_stat_path));
-			$command_end = strrpos($pid1_stat, ')');
-			if ($command_end !== false) {
-				$fields = preg_split('/\s+/', trim(substr($pid1_stat, $command_end + 1)));
-				// After the parenthesized command, index 0 is proc field 3;
-				// therefore index 19 is field 22 (process start time in ticks).
-				if (isset($fields[19]) && ctype_digit($fields[19])) {
-					$pid1_starttime = $fields[19];
-				}
-			}
+			$pid1_starttime = self::parsePid1StartTime((string) @file_get_contents($pid1_stat_path));
 		}
 
 		$boot_id_path = '/proc/sys/kernel/random/boot_id';
 		if (is_file($boot_id_path) && !is_link($boot_id_path)) {
-			$boot_id = trim((string) @file_get_contents($boot_id_path));
-			if (preg_match('/^[a-f0-9-]{16,64}$/i', $boot_id) === 1) {
-				$identity = strtolower($boot_id);
+			$boot_id = self::parseBootId((string) @file_get_contents($boot_id_path));
+			if ($boot_id !== '') {
+				$identity = $boot_id;
 				$source = 'linux-boot-id';
 				if ($pid1_starttime !== '') {
 					$identity .= ':pid1:'.$pid1_starttime;
@@ -223,9 +214,9 @@ final class Config {
 
 		$proc_stat_path = '/proc/stat';
 		if (is_file($proc_stat_path) && !is_link($proc_stat_path)) {
-			$stat = (string) @file_get_contents($proc_stat_path);
-			if (preg_match('/^btime\s+(\d+)$/m', $stat, $match) === 1) {
-				$identity = 'btime:'.$match[1];
+			$btime = self::parseBtime((string) @file_get_contents($proc_stat_path));
+			if ($btime !== '') {
+				$identity = 'btime:'.$btime;
 				$source = 'linux-boot-time';
 				if ($pid1_starttime !== '') {
 					$identity .= ':pid1:'.$pid1_starttime;
@@ -240,6 +231,39 @@ final class Config {
 		}
 
 		return ['id' => '', 'source' => 'unavailable', 'restart_safe' => false];
+	}
+
+	/**
+	 * Extract the process start time (proc field 22, in clock ticks) from
+	 * /proc/1/stat content. The command name in field 2 may itself contain
+	 * spaces and parentheses, so fields are counted after the last ')'.
+	 * Public to make the parsing independently testable.
+	 */
+	public static function parsePid1StartTime(string $stat): string {
+		$stat = trim($stat);
+		$command_end = strrpos($stat, ')');
+		if ($command_end === false) {
+			return '';
+		}
+		$fields = preg_split('/\s+/', trim(substr($stat, $command_end + 1)));
+		// After the parenthesized command, index 0 is proc field 3;
+		// therefore index 19 is field 22 (process start time in ticks).
+		return isset($fields[19]) && ctype_digit($fields[19]) ? $fields[19] : '';
+	}
+
+	/**
+	 * Validate /proc/sys/kernel/random/boot_id content; returns the lowercased
+	 * identifier or '' when the content is not a plausible boot id.
+	 */
+	public static function parseBootId(string $content): string {
+		$boot_id = trim($content);
+
+		return preg_match('/^[a-f0-9-]{16,64}$/i', $boot_id) === 1 ? strtolower($boot_id) : '';
+	}
+
+	/** Extract the boot epoch from /proc/stat content, or '' when absent. */
+	public static function parseBtime(string $stat): string {
+		return preg_match('/^btime\s+(\d+)$/m', $stat, $match) === 1 ? $match[1] : '';
 	}
 
 	public static function cacheMaxBytes(): int {

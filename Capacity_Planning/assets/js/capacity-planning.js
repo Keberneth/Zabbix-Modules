@@ -11,6 +11,7 @@
 	];
 	const RISK_BY_KEY = Object.fromEntries(RISKS.map((r) => [r.key, r]));
 	const RISK_ORDER = {Critical: 5, High: 4, Medium: 3, Watch: 2, Healthy: 1, Unknown: 0, Pending: -1};
+	const CONFIDENCE_RANK = {High: 4, Medium: 3, Low: 2, None: 1, 'Current state': 0, '': -1};
 
 	const LOOKBACKS = [
 		{days: 92, label: '3M'}, {days: 183, label: '6M'}, {days: 365, label: '12M'}
@@ -70,6 +71,9 @@
 			this.canManageSettings = root.dataset.canManageSettings === '1';
 			this.csrfName = root.dataset.csrfName || '';
 			this.csrfToken = root.dataset.csrfToken || '';
+			// Sent only with refresh=1; the server downgrades a forced refresh to a
+			// normal cached load when this per-action token is missing or invalid.
+			this.dataCsrfToken = root.dataset.dataCsrfToken || '';
 			this.settingsBusy = false;
 			this.cacheStatusRequested = false;
 			this.cacheStatusLoading = false;
@@ -96,6 +100,9 @@
 			this.fcTotal = 0;
 			this.fcDone = 0;
 			this.fcReady = false;
+			// Server clock the current forecast run's ETAs are anchored to; charts
+			// use it so "today"/crossing markers agree with the printed ETA dates.
+			this.fcGeneratedAt = null;
 			this.forecastRuns = new Map(); // completed lookback -> page-lifetime result
 			this.cacheRunMeta = null;
 
@@ -543,7 +550,8 @@
 			this.resultFilters.group = p('result_group') || '';
 			this.resultFilters.hostid = p('result_host') || '';
 			this.resultFilters.type = ['disk-local', 'disk-remote', 'cpu', 'memory'].includes(p('type')) ? p('type') : '';
-			this.resultFilters.status = p('status') || '';
+			this.resultFilters.status = ['issues', 'OK', 'Stale', 'Missing', 'Incomplete', 'Invalid current value']
+				.includes(p('status')) ? p('status') : '';
 			this.syncTypeForActiveTab();
 			if (this.resultFilters.status === 'issues') {
 				this.elements.resultsFilter.querySelector('[data-result-filter="status"]').value = 'issues';
@@ -1404,6 +1412,7 @@
 			this.fcTotal = 0;
 			this.fcDone = 0;
 			this.fcReady = false;
+			this.fcGeneratedAt = null;
 			this.cacheRunMeta = null;
 			if (clearForecastRuns) { this.forecastRuns.clear(); }
 			this.hideDetail();
@@ -1545,6 +1554,7 @@
 				this.fcTotal = savedRun.total;
 				this.fcDone = savedRun.total;
 				this.fcReady = true;
+				this.fcGeneratedAt = savedRun.generatedAt || null;
 				this.cacheRunMeta = Object.assign({}, savedRun.cacheRunMeta || {}, {page_hit: true});
 				this.setLoading(false);
 				this.renderActiveTab();
@@ -1580,7 +1590,8 @@
 			if (!this.fcTotal) {
 				this.fcReady = true;
 				this.forecastRuns.set(runKey, {
-					forecasts: new Map(), total: 0, cacheRunMeta: Object.assign({}, this.cacheRunMeta)
+					forecasts: new Map(), total: 0, generatedAt: null,
+					cacheRunMeta: Object.assign({}, this.cacheRunMeta)
 				});
 				this.setLoading(false);
 				this.renderActiveTab();
@@ -1592,6 +1603,7 @@
 			const nowSec = Number.isFinite(generatedAt) && generatedAt > 0
 				? Math.floor(generatedAt)
 				: Math.floor(Date.now() / 1000);
+			this.fcGeneratedAt = nowSec;
 			const timeFrom = nowSec - this.lookbackDays * 86400;
 			const meta = this.inv.meta || {};
 			const diskBatchMax = Math.min(10, Math.max(1,
@@ -1624,10 +1636,14 @@
 						const batch = batches[batchIndex];
 						let payload = null;
 						try {
-							payload = await this.fetchData({
+							const params = {
 								mode: 'forecast', time_from: timeFrom, time_to: nowSec,
 								specs: JSON.stringify(batch), refresh: forceRefresh ? 1 : 0
-							}, signal);
+							};
+							if (forceRefresh && this.csrfName && this.dataCsrfToken) {
+								params[this.csrfName] = this.dataCsrfToken;
+							}
+							payload = await this.fetchData(params, signal);
 						}
 						catch (err) {
 							if ((err && err.name === 'AbortError') || !isCurrent()) { return; }
@@ -1638,6 +1654,12 @@
 						if (!isCurrent()) { return; }
 						if (payload) {
 							this.absorbForecastCacheMeta(payload.meta ? payload.meta.cache : null);
+							// ETA dates are computed against the forecast run's server clock;
+							// anchor the charts to the same instant.
+							const g = payload.meta ? Number(payload.meta.generated_at) : NaN;
+							if (Number.isFinite(g) && g > 0) {
+								this.fcGeneratedAt = Math.max(this.fcGeneratedAt || 0, Math.floor(g));
+							}
 							(Array.isArray(payload.forecasts) ? payload.forecasts : []).forEach((f) => {
 								if (f && f.id) { this.fc.set(f.id, f); }
 							});
@@ -1659,6 +1681,7 @@
 				if (!failures.length) {
 					this.forecastRuns.set(runKey, {
 						forecasts: new Map(this.fc), total: this.fcTotal,
+						generatedAt: this.fcGeneratedAt,
 						cacheRunMeta: Object.assign({}, this.cacheRunMeta, {
 							reasons: Array.isArray(this.cacheRunMeta.reasons)
 								? this.cacheRunMeta.reasons.slice() : []
@@ -2480,7 +2503,13 @@
 			rows.sort((a, b) => {
 				let av = a[key];
 				let bv = b[key];
-				if (key === 'host' || key === 'conf') {
+				if (key === 'conf') {
+					// Confidence is an ordered scale; alphabetical order would put
+					// Low between High and Medium.
+					const rank = (v) => CONFIDENCE_RANK[String(v || '')] ?? -1;
+					return (rank(av) - rank(bv)) * mul;
+				}
+				if (key === 'host') {
 					av = String(av || '').toLowerCase();
 					bv = String(bv || '').toLowerCase();
 					return av < bv ? -mul : av > bv ? mul : 0;
@@ -2526,6 +2555,7 @@
 			modal.classList.add('is-open');
 			modal.setAttribute('aria-hidden', 'false');
 			document.body.classList.add('cap-modal-open');
+			this.setBackgroundInert(true);
 			if (!wasOpen) {
 				this.elements.detailClose.focus({preventScroll: true});
 				requestAnimationFrame(() => {
@@ -2535,6 +2565,30 @@
 					if (modal.classList.contains('is-open')) { this.elements.detailClose.focus({preventScroll: true}); }
 				}, 30);
 			}
+		}
+
+		setBackgroundInert(inert) {
+			// The Tab trap covers keyboard focus; inert additionally hides the
+			// report behind the dialog from assistive-technology virtual cursors.
+			// Only the modal's siblings inside the shell are affected — the shared
+			// tooltip node outside the shell stays usable for the modal chart.
+			const modal = this.elements.detailModal;
+			const shell = modal && modal.parentElement;
+			if (!shell) { return; }
+			// Blur a focused background element (e.g. the clicked table row) before
+			// inerting its container: the browser's own inert focus fixup can land
+			// asynchronously and would steal the focus given to the dialog.
+			const active = document.activeElement;
+			if (inert && active instanceof HTMLElement && shell.contains(active)
+					&& !modal.contains(active)) {
+				active.blur();
+			}
+			[...shell.children].forEach((child) => {
+				if (child === modal) { return; }
+				if ('inert' in child) { child.inert = inert; }
+				if (inert) { child.setAttribute('aria-hidden', 'true'); }
+				else { child.removeAttribute('aria-hidden'); }
+			});
 		}
 
 		onDetailModalKeydown(e) {
@@ -2562,6 +2616,8 @@
 			this.elements.detailModal.classList.remove('is-open');
 			this.elements.detailModal.setAttribute('aria-hidden', 'true');
 			document.body.classList.remove('cap-modal-open');
+			// Uninert before focus restoration: an inert element cannot take focus.
+			this.setBackgroundInert(false);
 			this.selected = null;
 			this.detailPending = false;
 			this.detailGeom = null;
@@ -2988,7 +3044,11 @@
 			const height = 380;
 			const plotHeight = height - margin.top - margin.bottom;
 			const series = spec.series;
-			const nowSec = Math.floor(Date.now() / 1000);
+			// Anchor "today" and the projection to the server clock the ETAs were
+			// computed from, so crossing markers agree with the printed ETA dates.
+			const nowSec = Number.isFinite(this.fcGeneratedAt) && this.fcGeneratedAt > 0
+				? this.fcGeneratedAt
+				: Math.floor(Date.now() / 1000);
 
 			const projected = spec.slope != null && spec.currentValue != null;
 			const tMin = spec.viewFrom != null ? spec.viewFrom : series[0].clock;
@@ -3109,6 +3169,7 @@
 			const svg = surface.querySelector('svg');
 			if (!geom || !svg || !this.detailEls || this.detailEls.surface !== surface) { return; }
 			const rect = svg.getBoundingClientRect();
+			if (!rect.width) { return; }
 			const vb = svg.viewBox.baseVal;
 			const vbWidth = (vb && vb.width) ? vb.width : rect.width;
 			const userX = (e.clientX - rect.left) * (vbWidth / rect.width);

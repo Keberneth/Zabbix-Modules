@@ -108,7 +108,8 @@ function settingsDocument(canManage, enabled = true, ttlSeconds = 1800) {
 		data-data-url="/fake" data-settings-save-url="/settings-save" data-cache-status-url="/cache-status"
 		data-cache-settings='${settings}' data-cache-status='${status}'
 		data-can-manage-settings="${canManage ? '1' : '0'}" data-csrf-name="csrf_key"
-		data-csrf-token="${canManage ? 'csrf-value-123' : ''}" data-initial-lookback="" data-initial-tab="settings"></main></body></html>`;
+		data-csrf-token="${canManage ? 'csrf-value-123' : ''}" data-data-csrf-token="data-token-123"
+		data-initial-lookback="" data-initial-tab="settings"></main></body></html>`;
 }
 
 async function run() {
@@ -397,7 +398,7 @@ async function run() {
 			};
 		}, scopeData);
 		await scopePage.route('http://scope.test/**', (route) => route.fulfill({
-			status: 200, contentType: 'text/html', body: '<!doctype html><html><body><main id="capacity-planning-root" data-data-url="/fake" data-initial-lookback="" data-initial-tab="disks"></main></body></html>'
+			status: 200, contentType: 'text/html', body: '<!doctype html><html><body><main id="capacity-planning-root" data-data-url="/fake" data-csrf-name="csrf_key" data-data-csrf-token="data-token-123" data-initial-lookback="" data-initial-tab="disks"></main></body></html>'
 		}));
 		await scopePage.goto('http://scope.test/zabbix.php?action=capacity.planning.view&tab=disks');
 		await scopePage.addStyleTag({path: cssAsset});
@@ -631,7 +632,8 @@ async function run() {
 				const id = specs[0].id;
 				const days = Math.round((Number(params.get('time_to')) - Number(params.get('time_from'))) / 86400);
 				const stats = window.__poolStats;
-				stats.started.push({id, days});
+				stats.started.push({id, days,
+					refresh: params.get('refresh') || '', csrf: params.get('csrf_key') || ''});
 				stats.active++;
 				stats.maxActive = Math.max(stats.maxActive, stats.active);
 				stats.activeByDays[days] = Number(stats.activeByDays[days] || 0) + 1;
@@ -659,7 +661,7 @@ async function run() {
 		}, poolData);
 		await poolPage.route('http://forecast-pool.test/**', (route) => route.fulfill({
 			status: 200, contentType: 'text/html',
-			body: '<!doctype html><html><body><main id="capacity-planning-root" data-data-url="/fake" data-initial-lookback="" data-initial-tab="disks"></main></body></html>'
+			body: '<!doctype html><html><body><main id="capacity-planning-root" data-data-url="/fake" data-csrf-name="csrf_key" data-data-csrf-token="data-token-123" data-initial-lookback="" data-initial-tab="disks"></main></body></html>'
 		}));
 		await poolPage.goto('http://forecast-pool.test/zabbix.php?action=capacity.planning.view&tab=disks');
 		await poolPage.addStyleTag({path: cssAsset});
@@ -710,6 +712,20 @@ async function run() {
 			'The replacement run should complete all forecasts after the previous pool is aborted.');
 		ok(await poolPage.locator('[data-role="error"]').isHidden(),
 			'An aborted stale run must not overwrite the replacement run with an error state.');
+		ok(await poolPage.evaluate(() => window.__poolStats.started
+			.every((entry) => entry.refresh === '0' && entry.csrf === '')),
+			'Ordinary forecast requests must not force a refresh or carry the per-action CSRF token.');
+		const startedBeforeReload = await poolPage.evaluate(() => window.__poolStats.started.length);
+		await poolPage.locator('[data-role="reload"]').click();
+		await poolPage.waitForFunction((start) => window.__poolStats.started.length > start, startedBeforeReload);
+		const reloadForecast = await poolPage.evaluate((start) => window.__poolStats.started[start],
+			startedBeforeReload);
+		same('1', reloadForecast.refresh,
+			'Refresh now must request uncached forecasts.');
+		same('data-token-123', reloadForecast.csrf,
+			'A forced refresh must send the per-action CSRF token under the configured field name; '
+			+ 'without it the server silently downgrades to a cached load.');
+		await poolPage.waitForFunction(() => document.querySelector('[data-role="loading"]').hidden);
 		await poolPage.close();
 
 		await page.addInitScript((payload) => {
@@ -733,7 +749,7 @@ async function run() {
 			};
 		}, data);
 		await page.route('http://capacity.test/**', (route) => route.fulfill({
-			status: 200, contentType: 'text/html', body: '<!doctype html><html><body><main id="capacity-planning-root" data-data-url="/fake" data-initial-lookback="" data-initial-tab="disks"></main></body></html>'
+			status: 200, contentType: 'text/html', body: '<!doctype html><html><body><main id="capacity-planning-root" data-data-url="/fake" data-csrf-name="csrf_key" data-data-csrf-token="data-token-123" data-initial-lookback="" data-initial-tab="disks"></main></body></html>'
 		}));
 		await page.goto('http://capacity.test/zabbix.php?action=capacity.planning.view&tab=resources');
 		await page.addStyleTag({path: cssAsset});

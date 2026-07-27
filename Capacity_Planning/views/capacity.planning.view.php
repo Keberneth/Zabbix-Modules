@@ -23,6 +23,7 @@ $root = (new CDiv(_('Loading capacity planning report…')))
 	->setAttribute('data-can-manage-settings', $data['can_manage_settings'] ? '1' : '0')
 	->setAttribute('data-csrf-name', (string) $data['csrf_name'])
 	->setAttribute('data-csrf-token', (string) $data['csrf_token'])
+	->setAttribute('data-data-csrf-token', (string) $data['data_csrf_token'])
 	->setAttribute('data-initial-lookback', (string) $data['lookback'])
 	->setAttribute('data-initial-tab', (string) $data['tab']);
 

@@ -52,6 +52,9 @@ final class CapacityPlanningView extends CController {
 			'csrf_token' => $can_manage_settings
 				? \CCsrfTokenHelper::get('capacity.planning.settings.save')
 				: '',
+			// Proves a forced cache refresh originated from this page; without it
+			// the data endpoint silently serves the cached series instead.
+			'data_csrf_token' => \CCsrfTokenHelper::get('capacity.planning.data'),
 			// Deep-link / restore state.
 			'lookback' => $this->sanitizeLookback((string) $this->getInput('lookback', '')),
 			'tab' => $this->sanitizeTab((string) $this->getInput('tab', ''))

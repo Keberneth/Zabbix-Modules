@@ -86,6 +86,8 @@ final class CapacityPlanningMathTest {
 		$this->testMaintenanceExplainedDiskGapIsNotQualityFailure();
 		$this->testMaintenanceBlocksCurrentForecastEscalation();
 		$this->testForecastSpecValidatesCurrentObservationFlag();
+		$this->testForecastSpecEnforcesResourceBatchLimit();
+		$this->testDownsampleSeriesTimestamps();
 		$this->testMissingResourceItemsRemainVisible();
 		$this->testInventoryFacetsAreCompactAndSorted();
 
@@ -1193,6 +1195,59 @@ final class CapacityPlanningMathTest {
 		$entry['current_observation_usable'] = 'false';
 		$this->assertSame(null, $this->call('parseSpecs', [json_encode([$entry])]),
 			'The forecast parser must reject a non-boolean current-observation flag.');
+	}
+
+	private function testForecastSpecEnforcesResourceBatchLimit(): void {
+		$res = static fn (int $i): array => [
+			'id' => 'r'.$i, 'itemid' => (string) ($i + 1), 'kind' => 'res', 'rtype' => 'CPU'
+		];
+		$disk = static fn (int $i): array => [
+			'id' => 'd'.$i, 'itemid' => (string) (100 + $i), 'kind' => 'disk'
+		];
+
+		$this->assertSame(null,
+			$this->call('parseSpecs', [json_encode([$res(0), $res(1), $res(2)])]),
+			'Resource forecast batches beyond the advertised limit must be rejected server-side.');
+
+		$two = $this->call('parseSpecs', [json_encode([$res(0), $res(1)])]);
+		$this->assertSame(2, count($two),
+			'A resource forecast batch at the advertised limit must be accepted.');
+
+		$mixed = $this->call('parseSpecs',
+			[json_encode(array_merge([$res(0), $res(1)], array_map($disk, range(0, 7))))]);
+		$this->assertSame(10, count($mixed),
+			'Disk specs must not count against the resource forecast batch limit.');
+	}
+
+	private function testDownsampleSeriesTimestamps(): void {
+		$base = 86400 * 19000;
+
+		$dense = $this->call('downsampleSeries', [[
+			['clock' => $base + 3600, 'num' => 2, 'min' => 1.0, 'avg' => 2.0, 'max' => 3.0],
+			['clock' => $base + 86400 + 3600, 'num' => 1, 'min' => 2.0, 'avg' => 4.0, 'max' => 6.0],
+			['clock' => $base + 2 * 86400 + 3600, 'num' => 1, 'min' => 3.0, 'avg' => 5.0, 'max' => 7.0]
+		]]);
+		$this->assertSame([$base, $base + 86400, $base + 2 * 86400], array_column($dense, 0),
+			'Ungrouped dense series must keep exact UTC day-start timestamps.');
+		$this->assertSame(2.0, $dense[0][2],
+			'The dense day average must be unchanged by the timestamp weighting.');
+
+		// 421 populated days force two-day groups. The first group pairs day 0
+		// (three samples) with day 40 (one sample) across a 40-day gap.
+		$rows = [
+			['clock' => $base + 100, 'num' => 3, 'min' => 1.0, 'avg' => 2.0, 'max' => 3.0],
+			['clock' => $base + 40 * 86400 + 200, 'num' => 1, 'min' => 4.0, 'avg' => 4.0, 'max' => 4.0]
+		];
+		for ($i = 41; $i <= 459; $i++) {
+			$rows[] = ['clock' => $base + $i * 86400, 'num' => 1, 'min' => 5.0, 'avg' => 5.0, 'max' => 5.0];
+		}
+		$sparse = $this->call('downsampleSeries', [$rows]);
+		$this->assertSame($base + 10 * 86400, $sparse[0][0],
+			'A sparse group must be stamped at its sample-weighted mean clock, not its first day.');
+		$this->assertSame(2.5, $sparse[0][2],
+			'The grouped average must stay sample-weighted.');
+		$this->assertTrue($sparse[0][0] >= $base && $sparse[0][0] <= $base + 40 * 86400,
+			'The stamped clock must lie inside the group\'s populated day range.');
 	}
 
 	private function testMissingResourceItemsRemainVisible(): void {
