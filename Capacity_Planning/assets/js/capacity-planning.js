@@ -25,6 +25,10 @@
 	};
 	const HORIZON_DAYS = 365;
 	const FORECAST_WORKER_LIMIT = 3;
+	// The backend removes at most 10,000 entries per request and the cache has a
+	// hard 100,000-entry bound. Twenty attempts leave room for fixed metadata and
+	// directory cleanup without allowing an unbounded browser loop.
+	const MAX_CACHE_CLEAR_REQUESTS = 20;
 	const GIB = 1024 * 1024 * 1024;
 	const CACHE_OPTIONS = [
 		{seconds: 0, label: 'Off'},
@@ -308,15 +312,15 @@
 							<section class="cap-card cap-settings-card">
 								<h3>Cache controls</h3>
 								${this.canManageSettings ? `
-									<p class="cap-card-subtitle">Choose how recently refreshed data may be reused. Missing ranges and newer samples are still fetched incrementally.</p>
+									<p class="cap-card-subtitle">Choose when mutable current-day and current-month shards load newer samples. This interval is not retention: historical shards remain until age or size cleanup, or a manual clear.</p>
 									<div class="cap-settings-control">
-										<div class="cap-field"><label for="cap-cache-ttl">Shared cache freshness</label><select id="cap-cache-ttl" data-role="cache-ttl">${CACHE_OPTIONS.map((option) => `<option value="${option.seconds}">${option.label}</option>`).join('')}</select></div>
+										<div class="cap-field"><label for="cap-cache-ttl">Recent-shard refresh interval</label><select id="cap-cache-ttl" data-role="cache-ttl">${CACHE_OPTIONS.map((option) => `<option value="${option.seconds}">${option.label}</option>`).join('')}</select></div>
 										<div class="cap-settings-actions">
 											<button type="button" class="cap-btn cap-btn-primary" data-role="save-cache-settings">Save</button>
 											<button type="button" class="cap-btn" data-role="clear-shared-cache">Clear shared cache</button>
 										</div>
 									</div>` : `
-									<p class="cap-settings-readonly" data-role="settings-readonly">These installation-wide controls are read-only for your account. A Zabbix Super Admin can change the freshness interval or clear the shared cache.</p>`}
+									<p class="cap-settings-readonly" data-role="settings-readonly">These installation-wide controls are read-only for your account. A Zabbix Super Admin can change the recent-shard refresh interval or clear the shared cache.</p>`}
 								<div class="cap-settings-message" data-role="settings-message" aria-live="polite" aria-atomic="true" hidden></div>
 							</section>
 						</div>
@@ -722,13 +726,13 @@
 				? 'is-unavailable'
 				: (enabled ? 'is-on' : 'is-off');
 			const stateLabel = enabled
-				? (backendKnown && !backendAvailable ? 'Enabled · live fallback' : `On · ${this.cacheIntervalLabel()}`)
+				? (backendKnown && !backendAvailable ? 'Enabled · live fallback' : `On · recent refresh ${this.cacheIntervalLabel()}`)
 				: 'Off';
 			const stateDetail = enabled
 				? (backendKnown && !backendAvailable
 					? 'Protected shared storage is unavailable, so analysis uses live Zabbix reads.'
 					: (backendKnown
-						? 'Fresh cached ranges are reused and only missing or newer intervals are requested.'
+						? 'Cached ranges are reused; mutable recent shards load newer samples after the selected interval. Historical shards are not deleted by this timer.'
 						: (this.canManageSettings
 							? (this.cacheStatusLoading ? 'Inspecting protected shared storage…' : 'Detailed storage health is loaded only when Settings is opened.')
 							: 'Fresh cached ranges are reused across users and analysis ranges.')))
@@ -736,7 +740,7 @@
 
 			this.elements.cacheSummary.innerHTML = `<span class="cap-cache-state ${stateClass}">${this.escapeHtml(stateLabel)}</span><span>${this.escapeHtml(stateDetail)}</span>`;
 			const rows = [
-				['Configuration', enabled ? `Enabled, ${this.cacheIntervalLabel()} freshness` : 'Disabled'],
+				['Configuration', enabled ? `Enabled; mutable shards refresh after ${this.cacheIntervalLabel()}` : 'Disabled'],
 				['Scope', 'Shared by this Zabbix installation; not tied to a browser session']
 			];
 			if (this.canManageSettings) {
@@ -745,7 +749,7 @@
 						['Cache backend', backendAvailable ? 'Available' : 'Unavailable · live reads remain available'],
 						['Stored shards', Number.isFinite(files) ? `${scanComplete ? '' : 'At least '}${Math.max(0, Math.round(files))}` : 'Status unavailable'],
 						['Storage used', Number.isFinite(bytes)
-							? `${this.fmtBytes(Math.max(0, bytes))}${Number.isFinite(maxBytes) && maxBytes > 0 ? ` of ${this.fmtBytes(maxBytes)}` : ''}`
+							? `${scanComplete ? '' : 'At least '}${this.fmtBytes(Math.max(0, bytes))}${Number.isFinite(maxBytes) && maxBytes > 0 ? ` of ${this.fmtBytes(maxBytes)} limit` : ''}`
 							: 'Status unavailable'],
 						['Private storage', privateVerified ? 'Permissions verified (cached values are not encrypted)' : 'Not verified · live fallback is used'],
 						['Restart invalidation', bootAvailable
@@ -779,15 +783,16 @@
 			element.textContent = message || '';
 		}
 
-		settingsErrorMessage(value) {
-			const message = String(value || 'The cache operation failed.');
-			if (message.includes('cache_busy')) {
+		settingsErrorMessage(value, fallbackMessage = '') {
+			const code = value && typeof value === 'object' ? String(value.code || '') : String(value || '');
+			const suppliedMessage = value && typeof value === 'object' ? String(value.message || '') : fallbackMessage;
+			if (code.includes('cache_busy')) {
 				return 'The shared cache is busy. Wait for the active analysis to finish, then try again.';
 			}
-			if (message.includes('clear_limit') || message.includes('limit_reached')) {
-				return 'Only part of the shared cache could be cleared. Run Clear shared cache again.';
+			if (code.includes('clear_io_failed')) {
+				return 'The shared cache could not be cleared because a file operation failed. Check the PHP-FPM log and cache-directory ownership, mode, and SELinux context.';
 			}
-			return message;
+			return suppliedMessage || code || 'The cache operation failed.';
 		}
 
 		async loadCacheStatus() {
@@ -837,10 +842,13 @@
 			let payload = {};
 			try { payload = text.trim() ? JSON.parse(text) : {}; }
 			catch (_error) { throw new Error('The server returned an invalid settings response.'); }
-			const rawError = typeof payload.error === 'string'
+			const rawError = payload.error && typeof payload.error === 'object'
 				? payload.error
-				: (payload.error && payload.error.message ? payload.error.message : 'The cache operation failed.');
-			if (!response.ok || payload.ok !== true) { throw new Error(this.settingsErrorMessage(rawError)); }
+				: String(payload.error || 'The cache operation failed.');
+			if (!response.ok || payload.ok !== true) {
+				throw new Error(this.settingsErrorMessage(rawError,
+					payload.error && typeof payload.error === 'object' ? payload.error.message : ''));
+			}
 			if (payload.clear_result && payload.clear_result.ok === false) {
 				throw new Error(this.settingsErrorMessage(payload.clear_result.reason));
 			}
@@ -878,7 +886,7 @@
 			if (!this.elements.cacheTtl) { return; }
 			const seconds = Number(this.elements.cacheTtl.value);
 			if (!CACHE_OPTIONS.some((option) => option.seconds === seconds)) {
-				this.showSettingsMessage('Select a valid cache freshness interval.', true);
+				this.showSettingsMessage('Select a valid recent-shard refresh interval.', true);
 				return;
 			}
 			this.applySettingsOperation({
@@ -887,8 +895,67 @@
 			}, 'Capacity Planning cache settings updated.');
 		}
 
-		clearSharedCache() {
-			this.applySettingsOperation({clear_cache: 1}, 'The shared Capacity Planning cache was cleared.');
+		async clearSharedCache() {
+			if (this.settingsBusy) { return; }
+			this.showSettingsMessage('');
+			this.setSettingsBusy(true);
+			let removedFileTotal = 0;
+			let removedDirectoryTotal = 0;
+			try {
+				for (let attempt = 1; attempt <= MAX_CACHE_CLEAR_REQUESTS; attempt++) {
+					const payload = await this.postSettings({clear_cache: 1});
+					if (payload.cache && typeof payload.cache === 'object') {
+						this.cacheSettings = this.normalizeCacheSettings(payload.cache);
+					}
+					if (payload.cache_status && typeof payload.cache_status === 'object') {
+						this.cacheStatus = payload.cache_status;
+						this.cacheStatusRequested = true;
+					}
+					const result = payload.clear_result && typeof payload.clear_result === 'object'
+						? payload.clear_result : null;
+					if (!result || result.ok !== true) {
+						throw new Error('The server returned an incomplete cache-clear response.');
+					}
+					const removedFiles = Number(result.removed_files);
+					const removedDirectories = result.removed_directories === undefined
+						? 0 : Number(result.removed_directories);
+					if (!Number.isInteger(removedFiles) || removedFiles < 0
+							|| !Number.isInteger(removedDirectories) || removedDirectories < 0) {
+						throw new Error('The server returned invalid cache-clear counters.');
+					}
+					removedFileTotal += removedFiles;
+					removedDirectoryTotal += removedDirectories;
+					const removedThisPass = removedFiles + removedDirectories;
+					const removedSummary = `${removedFileTotal} cache file(s) removed`
+						+ (removedDirectoryTotal > 0 ? `; ${removedDirectoryTotal} empty director${removedDirectoryTotal === 1 ? 'y' : 'ies'} removed` : '');
+					this.renderSettings();
+					if (result.complete === true && result.progress !== true) {
+						this.showSettingsMessage(`${payload.message || 'The shared Capacity Planning cache was cleared.'} ${removedSummary}.`);
+						return;
+					}
+					if (result.complete !== false || result.progress !== true) {
+						throw new Error('The server returned an invalid cache-clear progress response.');
+					}
+					if (removedThisPass <= 0) {
+						throw new Error('The shared cache clear reported no progress. Wait for active analysis to finish, then try again.');
+					}
+					this.showSettingsMessage(`Clearing shared cache… ${removedSummary}.`);
+					await new Promise((resolve) => setTimeout(resolve, 0));
+				}
+				throw new Error('The shared cache is still being cleared after the safe request limit. Try again to continue.');
+			}
+			catch (error) {
+				const message = error instanceof Error ? error.message : 'The cache operation failed.';
+				// A later chunk can fail after earlier chunks already removed data.
+				// Refresh the read-only status once so the Settings panel never keeps a
+				// pre-clear count while still preserving the actionable clear error.
+				this.cacheStatusRequested = false;
+				await this.loadCacheStatus();
+				this.showSettingsMessage(message, true);
+			}
+			finally {
+				this.setSettingsBusy(false);
+			}
 		}
 
 		// ---- filters ---------------------------------------------------------------
@@ -1715,9 +1782,17 @@
 
 		absorbForecastCacheMeta(meta) {
 			if (!meta || typeof meta !== 'object' || !this.cacheRunMeta) { return; }
-			['enabled', 'backend_available', 'ttl_seconds', 'protection', 'forced_refresh'].forEach((key) => {
+			['enabled', 'ttl_seconds', 'protection', 'forced_refresh'].forEach((key) => {
 				if (Object.prototype.hasOwnProperty.call(meta, key)) { this.cacheRunMeta[key] = meta[key]; }
 			});
+			if (Object.prototype.hasOwnProperty.call(meta, 'backend_available')) {
+				const available = meta.backend_available === true || meta.backend_available === 1
+					|| meta.backend_available === '1';
+				this.cacheRunMeta.backend_available = Object.prototype.hasOwnProperty.call(
+					this.cacheRunMeta, 'backend_available')
+					? this.cacheRunMeta.backend_available === true && available
+					: available;
+			}
 			const request = meta.request && typeof meta.request === 'object' ? meta.request : {};
 			['requests', 'shard_hits', 'shard_misses', 'shards_written', 'live_fallbacks'].forEach((key) => {
 				this.cacheRunMeta[key] = Number(this.cacheRunMeta[key] || 0) + Number(request[key] || 0);
@@ -2035,11 +2110,21 @@
 			else if (cm && cm.enabled === false) {
 				cache = ' • cache: off';
 			}
-			else if (cm && cm.backend_available === false) {
-				cache = ' • cache: live fallback';
+			else if (cm && (cm.backend_available === false || Number(cm.live_fallbacks || 0) > 0)) {
+				const fallbackCount = Math.max(0, Number(cm.live_fallbacks || 0));
+				const activity = Number(cm.shard_hits || 0) + Number(cm.shard_misses || 0);
+				const fallbackLabel = fallbackCount > 0
+					? `partial live fallback (${fallbackCount} range${fallbackCount === 1 ? '' : 's'})`
+					: 'live fallback';
+				cache = ` • cache: ${fallbackLabel}`;
+				if (activity > 0) {
+					cache += ` • ${Number(cm.shard_hits || 0)} reused, ${Number(cm.shard_misses || 0)} loaded, `
+						+ `${Number(cm.shards_written || 0)} stored`;
+				}
 			}
 			else if (cm && (Number(cm.shard_hits || 0) + Number(cm.shard_misses || 0)) > 0) {
-				cache = ` • cache: ${Number(cm.shard_hits || 0)} reused, ${Number(cm.shard_misses || 0)} refreshed`;
+				cache = ` • cache: ${Number(cm.shard_hits || 0)} reused, ${Number(cm.shard_misses || 0)} loaded, `
+					+ `${Number(cm.shards_written || 0)} stored`;
 			}
 			this.elements.meta.textContent =
 				`Scope: ${m.hosts_analyzed || 0} hosts • ${this.inv.disks.length} filesystems • `

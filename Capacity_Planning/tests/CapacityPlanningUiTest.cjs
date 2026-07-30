@@ -135,10 +135,11 @@ async function run() {
 			window.__settingsDataModes = [];
 			window.__settingsForecastEnds = [];
 			let selectedTtl = 1800;
-			const fullStatus = (files) => ({
+			let clearStep = 0;
+			const fullStatus = (files, scanComplete = true) => ({
 				enabled: selectedTtl !== 0, ttl_seconds: selectedTtl, backend_available: true,
 				unavailable_reason: '', private_permissions_verified: true, files,
-				bytes: files * 1024, max_bytes: 1024 * 1024, scan_complete: true,
+				bytes: files * 1024, max_bytes: 1024 * 1024, scan_complete: scanComplete,
 				boot_invalidation: {available: true, source: 'linux-boot-id'}
 			});
 			window.fetch = async (url, options = {}) => {
@@ -147,19 +148,27 @@ async function run() {
 				window.__settingsRequests.push(request);
 				if (href.includes('/cache-status')) {
 					return new Response(JSON.stringify({ok: true,
-						cache: {enabled: true, ttl_seconds: selectedTtl}, cache_status: fullStatus(4)}),
+						cache: {enabled: true, ttl_seconds: selectedTtl}, cache_status: fullStatus(4, false)}),
 					{status: 200, headers: {'Content-Type': 'application/json'}});
 				}
 				if (href.includes('/settings-save')) {
 					const params = new URLSearchParams(request.body);
 					const clearing = params.get('clear_cache') === '1';
 					if (!clearing) { selectedTtl = Number(params.get('cache_ttl_seconds')); }
+					if (clearing) { clearStep++; }
+					const clearResult = !clearing ? null : (clearStep < 3
+						? {ok: true, complete: false, progress: true, reason: 'clear_in_progress',
+							removed_files: clearStep === 1 ? 3 : 0, removed_directories: clearStep === 2 ? 2 : 0}
+						: {ok: true, complete: true, progress: false, reason: '',
+							removed_files: 1, removed_directories: 0});
 					return new Response(JSON.stringify({
 						ok: true,
-						message: clearing ? 'Shared cache cleared.' : 'Cache settings updated.',
+						message: clearing
+							? (clearResult.complete ? 'Shared cache cleared.' : 'Shared cache clearing is in progress.')
+							: 'Cache settings updated.',
 						cache: {enabled: selectedTtl !== 0, ttl_seconds: selectedTtl},
-						cache_status: fullStatus(clearing ? 0 : 5),
-						clear_result: clearing ? {ok: true, removed_files: 5, complete: true} : null
+						cache_status: fullStatus(clearing ? Math.max(0, 6 - clearStep * 2) : 5),
+						clear_result: clearResult
 					}), {status: 200, headers: {'Content-Type': 'application/json'}});
 				}
 				const params = new URLSearchParams(request.body);
@@ -193,10 +202,17 @@ async function run() {
 		ok(await adminPage.locator('[data-role="analysis-toolbar"]').isHidden()
 			&& await adminPage.locator('[data-role="results-filter"]').isHidden(),
 			'Analysis controls should stay out of the Settings view.');
-		ok((await adminPage.locator('[data-role="cache-summary"]').textContent()).includes('On · 30 minutes'),
+		ok((await adminPage.locator('[data-role="cache-summary"]').textContent()).includes('On · recent refresh 30 minutes'),
 			'The shared-cache configuration should be visible on Settings.');
-		ok((await adminPage.locator('[data-role="cache-status"]').textContent()).includes('Stored shards4'),
+		ok((await adminPage.locator('[data-role="cache-status"]').textContent()).includes('Stored shardsAt least 4'),
 			'The lazily loaded status should show shared cache usage without a filesystem path.');
+		ok((await adminPage.locator('[data-role="cache-status"]').textContent())
+			.includes('Storage usedAt least 4.0 KiB of 1.0 MiB limit'),
+			'An incomplete status scan should label both shard count and storage bytes as lower bounds.');
+		const settingsCopy = await adminPage.locator('[data-panel="settings"]').textContent();
+		ok(settingsCopy.includes('Recent-shard refresh interval') && settingsCopy.includes('not retention')
+			&& settingsCopy.includes('historical shards remain'),
+			'The Settings copy should explain that 15/30/60 minutes refreshes mutable shards and does not delete history.');
 		ok(!(await adminPage.locator('[data-panel="settings"]').textContent()).match(/[A-Z]:\\|\/var\/|\/tmp\//),
 			'The Settings view must not expose a cache filesystem path.');
 
@@ -213,15 +229,37 @@ async function run() {
 		same('3600', await adminPage.locator('[data-role="cache-ttl"]').inputValue(),
 			'The controls should update from the saved response.');
 
+		await adminPage.evaluate(() => {
+			window.__clearMessages = [];
+			new MutationObserver(() => window.__clearMessages.push(
+				document.querySelector('[data-role="settings-message"]').textContent
+			)).observe(document.querySelector('[data-role="settings-message"]'), {childList: true, subtree: true});
+		});
 		await adminPage.locator('[data-role="clear-shared-cache"]').click();
-		await adminPage.waitForFunction(() => document.querySelector('[data-role="settings-message"]').textContent.includes('5 cache file(s) removed.'));
-		const clearBody = await adminPage.evaluate(() => window.__settingsRequests
-			.filter((request) => request.url.includes('/settings-save'))[1].body);
+		await adminPage.waitForFunction(() => {
+			const message = document.querySelector('[data-role="settings-message"]').textContent;
+			return message.includes('4 cache file(s) removed') && message.includes('2 empty directories removed');
+		});
+		const clearRequests = await adminPage.evaluate(() => window.__settingsRequests
+			.filter((request) => request.url.includes('/settings-save'))
+			.slice(1));
+		same(3, clearRequests.length,
+			'A single Clear click should continue bounded server requests until the cache reports complete.');
+		ok(await adminPage.locator('[data-role="settings-message"]').textContent()
+			.then((message) => message.includes('4 cache file(s) removed')
+				&& message.includes('2 empty directories removed')),
+			'Directory-only progress should continue automatically and be reported separately from payload files.');
+		ok(await adminPage.evaluate(() => window.__clearMessages.some((message) =>
+			message.includes('Clearing shared cache') && message.includes('cache file(s) removed'))),
+			'Chunked clear progress should remain visible while follow-up requests run.');
+		const clearBody = clearRequests[0].body;
 		const clearParams = new URLSearchParams(clearBody);
 		same('1', clearParams.get('clear_cache'), 'Clear should request the shared-cache clear operation.');
 		same('csrf-value-123', clearParams.get('csrf_key'), 'Clear should include the configured CSRF field and token.');
 		same(null, clearParams.get('cache_enabled'), 'Clear should not silently save an edited enabled state.');
 		same(null, clearParams.get('cache_ttl_seconds'), 'Clear should not silently save an edited TTL.');
+		ok(clearRequests.every((request) => new URLSearchParams(request.body).get('csrf_key') === 'csrf-value-123'),
+			'Every bounded clear continuation should remain CSRF protected.');
 		ok((await adminPage.locator('[data-role="cache-status"]').textContent()).includes('Stored shards0'),
 			'Clear should update the displayed shared cache status from the response.');
 
@@ -287,11 +325,114 @@ async function run() {
 			.textContent.includes('configured cache setting shown above is still valid'));
 		same(1, await statusFailurePage.evaluate(() => window.__statusFailureFetches.length),
 			'A failed detailed status inspection should not be retried or trigger analysis calls.');
-		ok((await statusFailurePage.locator('[data-role="cache-summary"]').textContent()).includes('On · 30 minutes'),
+		ok((await statusFailurePage.locator('[data-role="cache-summary"]').textContent()).includes('On · recent refresh 30 minutes'),
 			'The cheap configured snapshot should remain visible when detailed status fails.');
 		ok(await statusFailurePage.locator('[data-role="save-cache-settings"]').isEnabled(),
 			'Settings controls should recover after a failed read-only status inspection.');
 		await statusFailurePage.close();
+
+		for (const failure of [
+			{code: 'cache_busy', status: 409,
+				expected: 'The shared cache is busy. Wait for the active analysis to finish, then try again.'},
+			{code: 'clear_io_failed', status: 500,
+				expected: 'The shared cache could not be cleared because a file operation failed. Check the PHP-FPM log and cache-directory ownership, mode, and SELinux context.'}
+		]) {
+			const failurePage = await browser.newPage({viewport: {width: 1000, height: 700}});
+			failurePage.on('pageerror', (error) => browserErrors.push(`settings ${failure.code}: ${error.message}`));
+			await failurePage.addInitScript((scenario) => {
+				window.__clearFailureRequests = [];
+				window.fetch = async (url, options = {}) => {
+					const href = String(url);
+					if (href.includes('/cache-status')) {
+						return new Response(JSON.stringify({ok: true, cache: {enabled: true, ttl_seconds: 1800},
+							cache_status: {enabled: true, ttl_seconds: 1800, backend_available: true,
+								private_permissions_verified: true, files: 2, bytes: 2048, max_bytes: 1048576,
+								scan_complete: true, boot_invalidation: {available: true}}}),
+						{status: 200, headers: {'Content-Type': 'application/json'}});
+					}
+					window.__clearFailureRequests.push(String(options.body || ''));
+					return new Response(JSON.stringify({ok: false,
+						error: {code: scenario.code, message: 'Server-provided safe fallback message.'},
+						clear_result: {ok: false, complete: false, reason: scenario.code, removed_files: 0}}),
+						{status: scenario.status, headers: {'Content-Type': 'application/json'}});
+				};
+			}, failure);
+			const host = `settings-${failure.code.replaceAll('_', '-')}.test`;
+			await failurePage.route(`http://${host}/**`, (route) => route.fulfill({
+				status: 200, contentType: 'text/html', body: settingsDocument(true)
+			}));
+			await failurePage.goto(`http://${host}/zabbix.php?action=capacity.planning.view&tab=settings`);
+			await failurePage.addStyleTag({path: cssAsset});
+			await failurePage.addScriptTag({path: jsAsset});
+			await failurePage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
+			await failurePage.waitForFunction(() => !document.querySelector('[data-role="cache-status"]')
+				.textContent.includes('Loading'));
+			await failurePage.locator('[data-role="clear-shared-cache"]').click();
+			await failurePage.waitForFunction((expected) =>
+				document.querySelector('[data-role="settings-message"]').textContent === expected, failure.expected);
+			same(failure.expected, await failurePage.locator('[data-role="settings-message"]').textContent(),
+				`${failure.code} should retain its exact actionable cache-clear explanation.`);
+			same(1, await failurePage.evaluate(() => window.__clearFailureRequests.length),
+				`${failure.code} must stop automatic clear continuation after a real failure.`);
+			await failurePage.close();
+		}
+
+		const noProgressPage = await browser.newPage({viewport: {width: 1000, height: 700}});
+		noProgressPage.on('pageerror', (error) => browserErrors.push(`settings clear no progress: ${error.message}`));
+		await noProgressPage.addInitScript(() => {
+			window.__noProgressClearRequests = 0;
+			window.__malformedClearFinal = false;
+			window.fetch = async (url) => {
+				if (String(url).includes('/cache-status')) {
+					return new Response(JSON.stringify({ok: true, cache: {enabled: true, ttl_seconds: 1800},
+						cache_status: {enabled: true, ttl_seconds: 1800, backend_available: true,
+							private_permissions_verified: true, files: 2, bytes: 2048, max_bytes: 1048576,
+							scan_complete: true, boot_invalidation: {available: true}}}),
+					{status: 200, headers: {'Content-Type': 'application/json'}});
+				}
+				window.__noProgressClearRequests++;
+				if (window.__malformedClearFinal) {
+					return new Response(JSON.stringify({ok: true, message: 'Shared cache cleared.',
+						cache: {enabled: true, ttl_seconds: 1800},
+						clear_result: {ok: true, removed_files: 0, removed_directories: 0}}),
+					{status: 200, headers: {'Content-Type': 'application/json'}});
+				}
+				return new Response(JSON.stringify({ok: true, message: 'Shared cache clearing is in progress.',
+					cache: {enabled: true, ttl_seconds: 1800},
+					clear_result: {ok: true, complete: false, progress: true,
+						reason: 'clear_in_progress', removed_files: 0}}),
+				{status: 200, headers: {'Content-Type': 'application/json'}});
+			};
+		});
+		await noProgressPage.route('http://settings-no-progress.test/**', (route) => route.fulfill({
+			status: 200, contentType: 'text/html', body: settingsDocument(true)
+		}));
+		await noProgressPage.goto('http://settings-no-progress.test/zabbix.php?action=capacity.planning.view&tab=settings');
+		await noProgressPage.addStyleTag({path: cssAsset});
+		await noProgressPage.addScriptTag({path: jsAsset});
+		await noProgressPage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
+		await noProgressPage.waitForFunction(() => !document.querySelector('[data-role="cache-status"]')
+			.textContent.includes('Loading'));
+		await noProgressPage.locator('[data-role="clear-shared-cache"]').click();
+		const noProgressError = 'The shared cache clear reported no progress. Wait for active analysis to finish, then try again.';
+		await noProgressPage.waitForFunction((expected) =>
+			document.querySelector('[data-role="settings-message"]').textContent === expected, noProgressError);
+		same(1, await noProgressPage.evaluate(() => window.__noProgressClearRequests),
+			'A successful partial response that removes no files must stop after one request instead of looping.');
+		same(noProgressError, await noProgressPage.locator('[data-role="settings-message"]').textContent(),
+			'A zero-progress partial clear should show its actionable stop reason.');
+		ok(await noProgressPage.locator('[data-role="clear-shared-cache"]').isEnabled(),
+			'The Clear control should recover after a zero-progress response.');
+		await noProgressPage.evaluate(() => { window.__malformedClearFinal = true; });
+		await noProgressPage.locator('[data-role="clear-shared-cache"]').click();
+		const malformedFinalError = 'The server returned an invalid cache-clear progress response.';
+		await noProgressPage.waitForFunction((expected) =>
+			document.querySelector('[data-role="settings-message"]').textContent === expected, malformedFinalError);
+		same(2, await noProgressPage.evaluate(() => window.__noProgressClearRequests),
+			'A malformed terminal response must stop after one request.');
+		same(malformedFinalError, await noProgressPage.locator('[data-role="settings-message"]').textContent(),
+			'A successful-looking response without complete=true must never be reported as cleared.');
+		await noProgressPage.close();
 
 		const scopePage = await browser.newPage({viewport: {width: 1180, height: 760}});
 		const scopeData = fixture();
@@ -646,7 +787,13 @@ async function run() {
 							{status: 500, headers: {'Content-Type': 'application/json'}});
 					}
 					stats.finished.push({id, days});
-					return new Response(JSON.stringify({forecasts: [forecast(id)]}),
+					const cacheFallback = days === 92 && id === 'pool-0';
+					return new Response(JSON.stringify({forecasts: [forecast(id)], meta: {cache: {
+						enabled: true, backend_available: !cacheFallback, ttl_seconds: 3600,
+						request: {requests: 1, shard_hits: 1, shard_misses: 2,
+							shards_written: cacheFallback ? 1 : 2, live_fallbacks: cacheFallback ? 1 : 0,
+							reasons: cacheFallback ? ['cache_io_unavailable'] : []}
+					}}}),
 						{status: 200, headers: {'Content-Type': 'application/json'}});
 				}
 				catch (error) {
@@ -694,6 +841,11 @@ async function run() {
 			&& poolError.includes('1 affected finding is shown as Unknown')
 			&& poolError.includes('Fixture forecast batch failed.'),
 			'The completed run should report the isolated failure without discarding successful batches.');
+		const cacheMetaText = await poolPage.locator('[data-role="meta"]').textContent();
+		ok(cacheMetaText.includes('cache: partial live fallback (1 range)')
+			&& cacheMetaText.includes('5 reused, 10 loaded, 9 stored')
+			&& !cacheMetaText.includes('refreshed'),
+			'Cache metadata should retain any failed backend batch and label misses as loaded, not refreshed.');
 
 		await poolPage.locator('[data-role="custom-lookback-toggle"]').click();
 		await poolPage.locator('#cap-custom-lookback-days').fill('183');
@@ -904,6 +1056,9 @@ async function run() {
 		const row = page.locator('[data-table="disks"] tbody tr[data-id="d0"]');
 		await row.scrollIntoViewIfNeeded();
 		const scrollBefore = await page.evaluate(() => window.scrollY);
+		// Several short-lived Settings pages ran earlier; foreground the primary
+		// report immediately before asserting the browser's active element.
+		await page.bringToFront();
 		await row.click();
 		await page.waitForSelector('[data-role="detail-modal"].is-open');
 		ok(await page.locator('[data-role="detail-stats"] .cap-detail-maintenance').isVisible(),

@@ -286,40 +286,108 @@ final class SeriesCache {
 		];
 	}
 
-	/** Clear all cache generations for this Zabbix installation. */
-	public function clear(): array {
+	/**
+	 * Clear one bounded batch of payload shards for this Zabbix installation.
+	 *
+	 * Callers may repeat the operation while complete=false.  The optional
+	 * limit exists so the bounded/resumable behavior can be exercised without
+	 * creating thousands of files in the regression suite; production callers
+	 * use MAX_CLEAR_FILES and no caller can raise that ceiling.
+	 */
+	public function clear(?int $batch_limit = null): array {
 		if (!$this->storage_secure || $this->install_root === '' || !is_dir($this->install_root)) {
-			return ['ok' => false, 'removed_files' => 0, 'reason' => $this->unavailable_reason ?: 'cache_unavailable'];
+			return [
+				'ok' => false, 'removed_files' => 0, 'reason' => $this->unavailable_reason ?: 'cache_unavailable',
+				'complete' => false, 'progress' => false
+			];
 		}
+		$batch_limit = $batch_limit === null
+			? self::MAX_CLEAR_FILES
+			: max(1, min(self::MAX_CLEAR_FILES, $batch_limit));
 
 		$clear_lock_path = $this->install_root.DIRECTORY_SEPARATOR.'.clear.lock';
 		$clear_lock = $this->acquireLock($clear_lock_path, LOCK_EX);
 		if ($clear_lock === null) {
-			return ['ok' => false, 'removed_files' => 0, 'reason' => 'cache_busy'];
+			return [
+				'ok' => false, 'removed_files' => 0, 'reason' => 'cache_busy',
+				'complete' => false, 'progress' => false
+			];
 		}
 
 		try {
-			$this->invalidateUsageLedger();
-			$files = $this->safeFiles($this->install_root, self::MAX_CLEAR_FILES + 1, true);
-			$complete = count($files) <= self::MAX_CLEAR_FILES;
 			$removed = 0;
-			foreach (array_slice($files, 0, self::MAX_CLEAR_FILES) as $file) {
-				if ($file === $clear_lock_path) {
-					continue;
-				}
-				if (is_file($file) && !is_link($file) && @unlink($file)) {
-					$removed++;
-				}
+			$removed_directories = 0;
+			if (!$this->invalidateUsageLedgerChecked()) {
+				return [
+					'ok' => false, 'removed_files' => 0, 'removed_directories' => 0,
+					'reason' => 'cache_ledger_invalidation_failed', 'complete' => false, 'progress' => false
+				];
 			}
-			$complete = $this->removeEmptyDirectories($this->install_root, self::MAX_CLEAR_FILES)
-				&& $complete;
+			$files = $this->safeFiles($this->install_root, $batch_limit + 1, false, true);
+			foreach (array_slice($files, 0, $batch_limit) as $file) {
+				if (!$this->deleteDataFile($file)) {
+					return [
+						'ok' => false, 'removed_files' => $removed, 'removed_directories' => 0,
+						'reason' => 'cache_delete_failed',
+						'complete' => false, 'progress' => $removed > 0
+					];
+				}
+				$removed++;
+			}
+			$directory_result = $this->removeEmptyCacheDirectories($batch_limit);
+			$removed_directories = $directory_result['removed'];
+			if (!$this->invalidateUsageLedgerChecked()) {
+				return [
+					'ok' => false, 'removed_files' => $removed,
+					'removed_directories' => $removed_directories,
+					'reason' => 'cache_ledger_invalidation_failed', 'complete' => false,
+					'progress' => $removed + $removed_directories > 0
+				];
+			}
 			$this->ensurePrivateDirectory($this->install_root);
+			$payloads_complete = $this->safeFiles($this->install_root, 1, false, true) === [];
+			$usage = $this->scanUsageState();
+			$complete = $payloads_complete && $directory_result['complete']
+				&& $usage['bytes'] === 0 && $usage['files'] === 0;
+			if ($payloads_complete && $directory_result['complete'] && !$complete) {
+				return [
+					'ok' => false, 'removed_files' => $removed,
+					'removed_directories' => $removed_directories,
+					'reason' => 'cache_clear_residual_entries', 'complete' => false,
+					'progress' => $removed + $removed_directories > 0
+				];
+			}
+			$made_progress = $removed + $removed_directories > 0;
+			if (!$complete && !$made_progress) {
+				return [
+					'ok' => false, 'removed_files' => 0, 'removed_directories' => 0,
+					'reason' => 'cache_clear_residual_entries', 'complete' => false, 'progress' => false
+				];
+			}
 
 			return [
-				'ok' => $complete,
+				'ok' => true,
 				'removed_files' => $removed,
-				'reason' => $complete ? '' : 'clear_limit_reached',
-				'complete' => $complete
+				'removed_directories' => $removed_directories,
+				'reason' => $complete ? '' : 'clear_in_progress',
+				'complete' => $complete,
+				'progress' => !$complete && $made_progress
+			];
+		}
+		catch (CacheSecurityException $e) {
+			return [
+				'ok' => false, 'removed_files' => $removed ?? 0,
+				'removed_directories' => $removed_directories ?? 0, 'reason' => $e->reason(),
+				'complete' => false,
+				'progress' => ($removed ?? 0) + ($removed_directories ?? 0) > 0
+			];
+		}
+		catch (\Throwable) {
+			return [
+				'ok' => false, 'removed_files' => $removed ?? 0,
+				'removed_directories' => $removed_directories ?? 0, 'reason' => 'cache_clear_io_failed',
+				'complete' => false,
+				'progress' => ($removed ?? 0) + ($removed_directories ?? 0) > 0
 			];
 		}
 		finally {
@@ -857,18 +925,22 @@ final class SeriesCache {
 			}
 			$path = $entry->getPathname();
 			$name = basename($path);
+			$is_fixed_root_metadata = dirname($path) === $this->install_root && (
+				$name === '.clear.lock' || $name === '.quota.lock' || $name === '.quota-state.json'
+				|| preg_match('/^\.shard-lock-[a-f0-9]{2}\.lock$/', $name) === 1
+			);
+			if ($is_fixed_root_metadata) {
+				if (!$entry->isFile()) {
+					throw new CacheSecurityException('cache_file_unsafe');
+				}
+				$this->assertPrivateFile($path);
+				continue;
+			}
 			if ($entry->isDir()) {
 				$this->assertPrivateModeAndOwner($path, true);
 				$files++;
 			}
 			elseif ($entry->isFile()) {
-				$is_fixed_root_metadata = dirname($path) === $this->install_root && (
-					$name === '.clear.lock' || $name === '.quota.lock' || $name === '.quota-state.json'
-					|| preg_match('/^\.shard-lock-[a-f0-9]{2}\.lock$/', $name) === 1
-				);
-				if ($is_fixed_root_metadata) {
-					continue;
-				}
 				$this->assertPrivateFile($path);
 				$size = @filesize($path);
 				if ($size === false || $size < 0) {
@@ -878,7 +950,7 @@ final class SeriesCache {
 				$files++;
 			}
 			else {
-				continue;
+				throw new CacheSecurityException('cache_file_unsafe');
 			}
 			if ($bytes > Config::cacheMaxBytes() || $files > self::MAX_CACHE_ENTRIES) {
 				return ['bytes' => $bytes, 'files' => $files];
@@ -954,8 +1026,15 @@ final class SeriesCache {
 	}
 
 	private function acquireLock(string $path, int $operation = LOCK_EX, bool $wait = true) {
+		clearstatcache(true, $path);
 		if (is_link($path)) {
 			throw new CacheSecurityException('cache_symlink_rejected');
+		}
+		if (file_exists($path)) {
+			if (!is_file($path)) {
+				throw new CacheSecurityException('cache_file_unsafe');
+			}
+			$this->assertPrivateFile($path);
 		}
 		$old_umask = umask(0077);
 		$handle = @fopen($path, 'c');
@@ -966,7 +1045,22 @@ final class SeriesCache {
 			}
 			return null;
 		}
-		$this->assertPrivateFile($path);
+		try {
+			$this->assertPrivateFile($path);
+			$handle_stat = @fstat($handle);
+			$path_stat = @lstat($path);
+			if (!is_array($handle_stat) || !is_array($path_stat)
+					|| (($handle_stat['mode'] ?? 0) & 0170000) !== 0100000
+					|| (($path_stat['mode'] ?? 0) & 0170000) !== 0100000
+					|| ($handle_stat['dev'] ?? null) !== ($path_stat['dev'] ?? null)
+					|| ($handle_stat['ino'] ?? null) !== ($path_stat['ino'] ?? null)) {
+				throw new CacheSecurityException('cache_file_unsafe');
+			}
+		}
+		catch (\Throwable $e) {
+			@fclose($handle);
+			throw $e;
+		}
 		$deadline = microtime(true) + self::LOCK_WAIT_MICROSECONDS / 1000000;
 		do {
 			if (@flock($handle, $operation | LOCK_NB)) {
@@ -1010,10 +1104,26 @@ final class SeriesCache {
 		// existing group/world-readable install directory could expose the data.
 		$this->ensurePrivateDirectory($this->base_dir);
 		$this->ensurePrivateDirectory($this->install_root);
-		$this->ensurePrivateDirectory($this->generation_root);
-		// Re-resolve after creation so aliases and symlinked ancestors cannot
-		// evade the pre-creation document-root check.
-		$this->assertSafeRootPath((string) realpath($this->base_dir));
+		// Generation creation participates in the same installation-wide clear
+		// guard as fetches. Otherwise a concurrent constructor can recreate an
+		// empty generation while clear is proving that all owned entries are gone.
+		$clear_guard = $this->acquireLock(
+			$this->install_root.DIRECTORY_SEPARATOR.'.clear.lock',
+			LOCK_SH
+		);
+		if ($clear_guard === null) {
+			throw new CacheStorageException('Unable to acquire the cache clear guard during initialization.');
+		}
+		try {
+			$this->ensurePrivateDirectory($this->generation_root);
+			// Re-resolve after creation so aliases and symlinked ancestors cannot
+			// evade the pre-creation document-root check.
+			$this->assertSafeRootPath((string) realpath($this->base_dir));
+		}
+		finally {
+			@flock($clear_guard, LOCK_UN);
+			@fclose($clear_guard);
+		}
 		$this->storage_secure = true;
 		$this->backend_available = true;
 	}
@@ -1249,43 +1359,36 @@ final class SeriesCache {
 			}
 			$now = time();
 			$max_idle = Config::cacheMaxIdleSeconds();
-			$files = $this->safeFiles($this->install_root, self::MAX_STATUS_FILES + 1);
-			$scan_truncated = count($files) > self::MAX_STATUS_FILES;
+			// MAX_STATUS_FILES is only a UI/status display bound. Reaching it says
+			// nothing about capacity, so cleanup scans up to the actual hard entry
+			// ceiling before considering entry-count eviction.
+			$files = $this->safeFiles($this->install_root, self::MAX_CACHE_ENTRIES + 1);
 			$entries = [];
-			$total = 0;
-			foreach (array_slice($files, 0, self::MAX_STATUS_FILES) as $file) {
-				if (is_link($file)) {
-					continue;
-				}
+			foreach ($files as $file) {
 				$mtime = max(0, (int) @filemtime($file));
 				$size = max(0, (int) @filesize($file));
-				if ($mtime > 0 && $now - $mtime > $max_idle
-						&& $this->deleteDataFile($file)) {
-					continue;
-				}
 				$entries[] = ['path' => $file, 'mtime' => $mtime, 'size' => $size];
-				$total += $size;
 			}
 
 			$max_bytes = Config::cacheMaxBytes();
-			if ($scan_truncated || $total > $max_bytes) {
-				usort($entries, static fn (array $a, array $b): int => $a['mtime'] <=> $b['mtime']);
-				$target = $scan_truncated ? 0 : (int) floor($max_bytes * 0.9);
-				$evictions = 0;
-				foreach ($entries as $entry) {
-					if ((!$scan_truncated && $total <= $target)
-							|| $evictions >= self::MAX_CLEANUP_EVICTIONS) {
-						break;
-					}
-					if ($this->deleteDataFile($entry['path'])) {
-						$total -= $entry['size'];
-						$evictions++;
-					}
-				}
+			$usage = $this->scanUsageState();
+			foreach ($this->cleanupEvictionCandidates(
+				$entries,
+				$now,
+				$max_idle,
+				$usage['bytes'],
+				$usage['files'],
+				$max_bytes,
+				self::MAX_CACHE_ENTRIES,
+				self::MAX_CLEANUP_EVICTIONS
+			) as $entry) {
+				$this->deleteDataFile($entry['path']);
 			}
 			$this->cleanupAbandonedFiles($now);
-			$this->invalidateUsageLedger();
 			$this->removeEmptyDirectories($this->install_root);
+			// Empty-directory and abandoned-file cleanup also changes the exact
+			// entry count tracked by the quota ledger.
+			$this->invalidateUsageLedger();
 		}
 		catch (\Throwable) {
 			// Cleanup is advisory and must never break a report request.
@@ -1298,7 +1401,65 @@ final class SeriesCache {
 		}
 	}
 
-	private function safeFiles(string $root, int $limit, bool $include_locks = false): array {
+	/**
+	 * Select bounded cleanup victims by the documented idle, byte and hard-entry
+	 * limits. The status display limit is deliberately absent from this helper.
+	 *
+	 * @param array<int, array{path: string, mtime: int, size: int}> $entries
+	 * @return array<int, array{path: string, mtime: int, size: int}>
+	 */
+	private function cleanupEvictionCandidates(array $entries, int $now, int $max_idle, int $current_bytes,
+			int $current_entries, int $max_bytes, int $max_entries, int $limit): array {
+		if ($entries === [] || $limit < 1) {
+			return [];
+		}
+		$max_bytes = max(1, $max_bytes);
+		$max_entries = max(1, $max_entries);
+		$limit = max(1, min(self::MAX_CLEANUP_EVICTIONS, $limit));
+		usort($entries, static fn (array $a, array $b): int =>
+			($a['mtime'] <=> $b['mtime']) ?: strcmp($a['path'], $b['path']));
+		$total_bytes = max(0, $current_bytes);
+		$remaining = max(0, $current_entries);
+		$over_bytes = $total_bytes > $max_bytes;
+		$over_entries = $remaining > $max_entries;
+		$target_bytes = $over_bytes ? (int) floor($max_bytes * 0.9) : $total_bytes;
+		$target_entries = $over_entries ? (int) floor($max_entries * 0.9) : $remaining;
+		$selected = [];
+		$selected_paths = [];
+
+		// Idle expiry is an independent retention rule, even below capacity.
+		foreach ($entries as $entry) {
+			if (count($selected) >= $limit) {
+				break;
+			}
+			if ($entry['mtime'] > 0 && $now - $entry['mtime'] > $max_idle) {
+				$selected[] = $entry;
+				$selected_paths[$entry['path']] = true;
+				$total_bytes -= $entry['size'];
+				$remaining--;
+			}
+		}
+
+		// Capacity eviction only starts after an actual byte or hard-entry breach.
+		foreach ($entries as $entry) {
+			if (count($selected) >= $limit
+					|| ($total_bytes <= $target_bytes && $remaining <= $target_entries)) {
+				break;
+			}
+			if (isset($selected_paths[$entry['path']])) {
+				continue;
+			}
+			$selected[] = $entry;
+			$selected_paths[$entry['path']] = true;
+			$total_bytes -= $entry['size'];
+			$remaining--;
+		}
+
+		return $selected;
+	}
+
+	private function safeFiles(string $root, int $limit, bool $include_locks = false,
+			bool $include_temporary_payloads = false): array {
 		$files = [];
 		if (!is_dir($root) || is_link($root)) {
 			return $files;
@@ -1312,10 +1473,13 @@ final class SeriesCache {
 				break;
 			}
 			if ($entry->isLink()) {
-				continue;
+				throw new CacheSecurityException('cache_symlink_rejected');
 			}
 			$path = $entry->getPathname();
-			if ($entry->isFile() && ($this->isDataFile($path) || $include_locks)) {
+			if ($entry->isFile() && ($this->isDataFile($path)
+					|| ($include_temporary_payloads && ($this->isTemporaryDataFile($path)
+						|| $this->isQuotaTemporaryFile($path)))
+					|| $include_locks)) {
 				$files[] = $path;
 			}
 		}
@@ -1324,16 +1488,75 @@ final class SeriesCache {
 	}
 
 	private function isDataFile(string $path): bool {
-		return substr($path, -8) === '.json.gz';
+		$parts = $this->cacheRelativeParts($path);
+
+		return $this->hasOwnedSeriesPath($parts)
+			&& preg_match('/^[a-f0-9]{64}\.json\.gz$/', $parts[3]) === 1;
+	}
+
+	private function isTemporaryDataFile(string $path): bool {
+		$parts = $this->cacheRelativeParts($path);
+
+		return $this->hasOwnedSeriesPath($parts)
+			&& preg_match('/^[a-f0-9]{64}\.json\.gz\.tmp\.[a-f0-9]{16}$/', $parts[3]) === 1;
+	}
+
+	private function isQuotaTemporaryFile(string $path): bool {
+		$parts = $this->cacheRelativeParts($path);
+
+		return count($parts) === 1
+			&& preg_match('/^\.quota-state\.json\.tmp\.[a-f0-9]{16}$/', $parts[0]) === 1;
+	}
+
+	/** @return string[] */
+	private function cacheRelativeParts(string $path): array {
+		$root = rtrim(str_replace('\\', '/', $this->install_root), '/');
+		$normalized = str_replace('\\', '/', $path);
+		if ($root === '' || strpos($normalized, $root.'/') !== 0) {
+			return [];
+		}
+
+		return explode('/', substr($normalized, strlen($root) + 1));
+	}
+
+	/** @param string[] $parts */
+	private function hasOwnedSeriesPath(array $parts): bool {
+		return count($parts) === 4
+			&& preg_match('/^schema-\d+-[a-f0-9]{12}-boot-[a-f0-9]{24}$/', $parts[0]) === 1
+			&& preg_match('/^[a-f0-9]{2}$/', $parts[1]) === 1
+			&& preg_match('/^[a-f0-9]{64}$/', $parts[2]) === 1;
 	}
 
 	/** Called only while holding the installation-wide exclusive clear guard. */
 	private function deleteDataFile(string $data_file): bool {
-		if (!$this->isDataFile($data_file) || is_link($data_file) || !is_file($data_file)) {
-			return false;
+		if ((!$this->isDataFile($data_file) && !$this->isTemporaryDataFile($data_file)
+				&& !$this->isQuotaTemporaryFile($data_file))
+				|| is_link($data_file)) {
+			throw new CacheSecurityException('cache_symlink_rejected');
+		}
+		$root = realpath($this->install_root);
+		if ($root === false) {
+			throw new CacheSecurityException('cache_path_unresolvable');
+		}
+		$this->assertNoSymlinkComponents($data_file);
+		$resolved = realpath($data_file);
+		$root = rtrim(str_replace('\\', '/', $root), '/');
+		$resolved_normalized = $resolved === false
+			? '' : str_replace('\\', '/', $resolved);
+		if ($resolved === false || strpos($resolved_normalized, $root.'/') !== 0) {
+			throw new CacheSecurityException('cache_path_unsafe');
+		}
+		$this->assertPrivateFile($resolved);
+
+		// Recheck immediately before unlink. Cache-owned directories are private,
+		// so another OS user cannot legitimately replace the verified inode.
+		clearstatcache(true, $resolved);
+		if (is_link($resolved) || !is_file($resolved)
+				|| realpath($resolved) !== $resolved) {
+			throw new CacheSecurityException('cache_file_unsafe');
 		}
 
-		return (bool) @unlink($data_file);
+		return (bool) @unlink($resolved);
 	}
 
 	/**
@@ -1346,7 +1569,7 @@ final class SeriesCache {
 		$root_entries = new \DirectoryIterator($this->install_root);
 		foreach ($root_entries as $entry) {
 			if (!$entry->isDot() && !$entry->isLink() && $entry->isFile()
-					&& strpos($entry->getFilename(), '.quota-state.json.tmp.') === 0
+					&& $this->isQuotaTemporaryFile($entry->getPathname())
 					&& $now - max(0, (int) $entry->getMTime()) > 3600) {
 				@unlink($entry->getPathname());
 			}
@@ -1376,7 +1599,7 @@ final class SeriesCache {
 					continue;
 				}
 				$path = $entry->getPathname();
-				if (strpos(basename($path), '.json.gz.tmp.') !== false
+				if ($this->isTemporaryDataFile($path)
 						&& $now - max(0, (int) @filemtime($path)) > 3600 && @unlink($path)) {
 					$removed++;
 				}
@@ -1389,6 +1612,125 @@ final class SeriesCache {
 		if (is_file($path) && !is_link($path)) {
 			@unlink($path);
 		}
+	}
+
+	/** Clear must prove that a stale quota ledger cannot survive its response. */
+	private function invalidateUsageLedgerChecked(): bool {
+		$lock = $this->acquireLock(
+			$this->install_root.DIRECTORY_SEPARATOR.'.quota.lock',
+			LOCK_EX
+		);
+		if ($lock === null) {
+			return false;
+		}
+		$path = $this->usageLedgerPath();
+		try {
+			clearstatcache(true, $path);
+			if (is_link($path)) {
+				throw new CacheSecurityException('cache_symlink_rejected');
+			}
+			if (!file_exists($path)) {
+				return true;
+			}
+			if (!is_file($path)) {
+				return false;
+			}
+			$this->assertPrivateFile($path);
+			if (!@unlink($path)) {
+				return false;
+			}
+			clearstatcache(true, $path);
+
+			return !file_exists($path) && !is_link($path);
+		}
+		finally {
+			@flock($lock, LOCK_UN);
+			@fclose($lock);
+		}
+	}
+
+	/**
+	 * Remove only directories whose relative shape is owned by this cache.
+	 * Unknown directory trees are never removed.
+	 *
+	 * @return array{complete: bool, removed: int}
+	 */
+	private function removeEmptyCacheDirectories(int $limit): array {
+		$limit = max(1, min(self::MAX_CLEAR_FILES, $limit));
+		$root = realpath($this->install_root);
+		if ($root === false || is_link($this->install_root)) {
+			throw new CacheSecurityException('cache_path_unresolvable');
+		}
+		$root = rtrim(str_replace('\\', '/', $root), '/');
+		$iterator = new \RecursiveIteratorIterator(
+			new \RecursiveDirectoryIterator($this->install_root, \FilesystemIterator::SKIP_DOTS),
+			\RecursiveIteratorIterator::CHILD_FIRST
+		);
+		$visited = 0;
+		$removed = 0;
+		$remaining = false;
+		$truncated = false;
+		foreach ($iterator as $entry) {
+			$path = $entry->getPathname();
+			$name = basename($path);
+			if ($entry->isLink()) {
+				throw new CacheSecurityException('cache_symlink_rejected');
+			}
+			$is_fixed_root_metadata = dirname($path) === $this->install_root && (
+				$name === '.clear.lock' || $name === '.quota.lock' || $name === '.quota-state.json'
+				|| preg_match('/^\.shard-lock-[a-f0-9]{2}\.lock$/', $name) === 1
+			);
+			if ($is_fixed_root_metadata) {
+				if (!$entry->isFile()) {
+					throw new CacheSecurityException('cache_file_unsafe');
+				}
+				$this->assertPrivateFile($path);
+				continue;
+			}
+			if ($visited >= $limit) {
+				$truncated = true;
+				break;
+			}
+			$visited++;
+			if (!$entry->isDir()) {
+				if ($this->isDataFile($path) || $this->isTemporaryDataFile($path)
+						|| $this->isQuotaTemporaryFile($path)) {
+					continue;
+				}
+				throw new CacheSecurityException('cache_unknown_file');
+			}
+			$this->assertNoSymlinkComponents($path);
+			$resolved = realpath($path);
+			$normalized = $resolved === false ? '' : str_replace('\\', '/', $resolved);
+			if ($normalized === '' || strpos($normalized, $root.'/') !== 0) {
+				throw new CacheSecurityException('cache_path_unsafe');
+			}
+			$relative = substr($normalized, strlen($root) + 1);
+			$parts = explode('/', $relative);
+			$generation = preg_match('/^schema-\d+-[a-f0-9]{12}-boot-[a-f0-9]{24}$/', $parts[0] ?? '') === 1;
+			$owned = $generation && (
+				count($parts) === 1
+				|| (count($parts) === 2 && preg_match('/^[a-f0-9]{2}$/', $parts[1]) === 1)
+				|| (count($parts) === 3 && preg_match('/^[a-f0-9]{2}$/', $parts[1]) === 1
+					&& preg_match('/^[a-f0-9]{64}$/', $parts[2]) === 1)
+			);
+			if (!$owned) {
+				throw new CacheSecurityException('cache_unknown_directory');
+			}
+			$this->assertPrivateModeAndOwner($resolved, true);
+			if (@rmdir($resolved)) {
+				$removed++;
+			}
+			else {
+				$remaining = true;
+				$probe = new \FilesystemIterator($resolved, \FilesystemIterator::SKIP_DOTS);
+				if (!$probe->valid()) {
+					throw new CacheStorageException('Unable to remove an empty cache directory.');
+				}
+			}
+		}
+
+		return ['complete' => !$truncated && !$remaining, 'removed' => $removed];
 	}
 
 	private function removeEmptyDirectories(string $root, int $limit = self::MAX_STATUS_FILES): bool {

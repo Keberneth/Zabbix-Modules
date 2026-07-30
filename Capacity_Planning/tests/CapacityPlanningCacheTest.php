@@ -31,7 +31,13 @@ final class CapacityPlanningCacheTest {
 		$this->testWebRootOverlapPredicate();
 		$this->testCalendarOrderAndPublicStatus();
 		$this->testCalendarSegmentsCrossYear();
+		$this->testCleanupPlanningUsesHardLimits();
 		$this->testEnabledCacheRoundTripAndIncrementalExtension();
+		$this->testResumableClearAndFreshMiss();
+		$this->testResumableEmptyDirectoryClear();
+		$this->testCheckedLedgerInvalidation();
+		$this->testClearRejectsSymlinkPayload();
+		$this->testClearRejectsSpecialLockFile();
 		$this->testStorageSecurityFailClosed();
 		$this->testBroadCacheDirectoryRejected();
 
@@ -189,6 +195,26 @@ final class CapacityPlanningCacheTest {
 		$this->same(2, count($fresh_plan));
 		$this->same($fresh_segment['from'], $fresh_plan[0][0]);
 		$this->same($fresh_segment['to'], $fresh_plan[1][1]);
+
+		$stale_cache = new SeriesCache(['enabled' => false, 'ttl_seconds' => 1800]);
+		$stale_method = new ReflectionMethod($stale_cache, 'refreshPlan');
+		$stale_method->setAccessible(true);
+		$stale_state = [
+			'covered_from' => $fresh_segment['from'],
+			'covered_to' => $fresh_segment['to'],
+			'refreshed_at' => time() - 3600,
+			'rows' => []
+		];
+		$closed_segment = $fresh_segment;
+		$closed_segment['shard_to'] = time() - 1;
+		$this->same([], $stale_method->invoke(
+			$stale_cache, $stale_state, $closed_segment, 'history', false
+		));
+		$mutable_plan = $stale_method->invoke(
+			$stale_cache, $stale_state, $fresh_segment, 'history', false
+		);
+		$this->same(1, count($mutable_plan));
+		$this->same($fresh_segment['to'], $mutable_plan[0][1]);
 	}
 
 	private function testWebRootOverlapPredicate(): void {
@@ -242,6 +268,35 @@ final class CapacityPlanningCacheTest {
 		$this->same($from, $history[3]['from']);
 	}
 
+	private function testCleanupPlanningUsesHardLimits(): void {
+		$cache = new SeriesCache(['enabled' => false, 'ttl_seconds' => 1800]);
+		$method = new ReflectionMethod($cache, 'cleanupEvictionCandidates');
+		$method->setAccessible(true);
+		$now = time();
+		$entries = [];
+		for ($i = 0; $i < 11; $i++) {
+			$entries[] = [
+				'path' => '/private/cache/'.str_pad((string) $i, 2, '0', STR_PAD_LEFT).'.json.gz',
+				'mtime' => $now - 100 + $i,
+				'size' => 10
+			];
+		}
+
+		// Eleven entries may be above a small UI/status display limit, but they
+		// are not over this simulated hard limit and must not trigger eviction.
+		$this->same([], $method->invoke($cache, $entries, $now, 86400, 110, 11, 10000, 100, 5));
+		$byte_victims = $method->invoke($cache, $entries, $now, 86400, 110, 11, 50, 100, 5);
+		$this->same(5, count($byte_victims));
+		$this->same($entries[0]['path'], $byte_victims[0]['path']);
+		$entry_victims = $method->invoke($cache, $entries, $now, 86400, 110, 11, 10000, 10, 2);
+		$this->same(2, count($entry_victims));
+
+		$entries[10]['mtime'] = $now - 90000;
+		$idle_victims = $method->invoke($cache, $entries, $now, 86400, 110, 11, 10000, 100, 5);
+		$this->same(1, count($idle_victims));
+		$this->same($entries[10]['path'], $idle_victims[0]['path']);
+	}
+
 	private function testEnabledCacheRoundTripAndIncrementalExtension(): void {
 		$old_dir = getenv('CAPACITY_PLANNING_CACHE_DIR');
 		$old_namespace = getenv('CAPACITY_PLANNING_CACHE_NAMESPACE');
@@ -264,6 +319,11 @@ final class CapacityPlanningCacheTest {
 			$this->same(true, in_array($cache->publicStatus()['owner_identity_source'], [
 				'proc-self-status', 'private-file-probe'
 			], true));
+			$install_root_property = new ReflectionProperty($cache, 'install_root');
+			$install_root_property->setAccessible(true);
+			$this->same(true, is_file(
+				(string) $install_root_property->getValue($cache).DIRECTORY_SEPARATOR.'.clear.lock'
+			), 'Initialization must create/use the shared clear guard before exposing the generation.');
 
 			$current_year = (int) gmdate('Y');
 			$current_month = (int) gmdate('n');
@@ -377,10 +437,301 @@ final class CapacityPlanningCacheTest {
 			$this->same(true, $cache->clear()['ok']);
 		}
 		finally {
-			$install_root = $base.DIRECTORY_SEPARATOR.Config::installNamespace();
-			@unlink($install_root.DIRECTORY_SEPARATOR.'.clear.lock');
-			@rmdir($install_root);
-			@rmdir($base);
+			$this->removeTree($base);
+			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_DIR', $old_dir);
+			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_NAMESPACE', $old_namespace);
+			$this->restoreEnvironment('CAPACITY_PLANNING_BOOT_ID', $old_boot);
+		}
+	}
+
+	private function testResumableClearAndFreshMiss(): void {
+		$old_dir = getenv('CAPACITY_PLANNING_CACHE_DIR');
+		$old_namespace = getenv('CAPACITY_PLANNING_CACHE_NAMESPACE');
+		$old_boot = getenv('CAPACITY_PLANNING_BOOT_ID');
+		$base = rtrim(sys_get_temp_dir(), "\\/").DIRECTORY_SEPARATOR
+			.'capacity-planning-clear-'.bin2hex(random_bytes(6));
+		putenv('CAPACITY_PLANNING_CACHE_DIR='.$base);
+		putenv('CAPACITY_PLANNING_CACHE_NAMESPACE=resumable-clear');
+		putenv('CAPACITY_PLANNING_BOOT_ID=resumable-clear-boot');
+
+		try {
+			$cache = new SeriesCache(['enabled' => true, 'ttl_seconds' => 1800]);
+			if (!$cache->publicStatus()['backend_available']) {
+				echo "CapacityPlanningCacheTest: resumable clear skipped (POSIX backend unavailable).\n";
+				return;
+			}
+			$year = (int) gmdate('Y');
+			$month = (int) gmdate('n');
+			$from = gmmktime(0, 0, 0, $month - 3, 1, $year);
+			$to = gmmktime(0, 0, 0, $month - 2, 1, $year) - 1;
+			$loader = static fn (int $range_from, int $range_to): array => [[
+				'clock' => $range_from + min(3600, $range_to - $range_from),
+				'num' => 1,
+				'value_min' => 1,
+				'value_avg' => 2,
+				'value_max' => 3
+			]];
+			foreach (['41001', '41002', '41003'] as $itemid) {
+				$seeded = $cache->fetchRange($itemid, 0, 'trend', $from, $to, true, $loader);
+				$this->same(1, $seeded['cache']['shards_written']);
+			}
+			$this->same(3, $cache->publicStatus()['files']);
+
+			$first = $cache->clear(2);
+			$this->same(true, $first['ok']);
+			$this->same(false, $first['complete']);
+			$this->same(true, $first['progress']);
+			$this->same('clear_in_progress', $first['reason']);
+			$this->same(2, $first['removed_files']);
+
+			$total_removed = $first['removed_files'];
+			$clear_calls = 1;
+			do {
+				$next = $cache->clear(2);
+				$clear_calls++;
+				$this->same(true, $next['ok']);
+				$total_removed += $next['removed_files'];
+				if ($clear_calls > 20) {
+					$this->fail('Bounded payload/directory clear did not converge.');
+				}
+			} while (!$next['complete']);
+			$this->same('', $next['reason']);
+			$this->same(3, $total_removed);
+			$this->same(true, $clear_calls > 1);
+			$this->same(0, $cache->publicStatus()['files']);
+
+			$calls = 0;
+			$after_clear = $cache->fetchRange('41001', 0, 'trend', $from, $to, true,
+				static function (int $range_from, int $range_to) use (&$calls): array {
+					$calls++;
+					return [[
+						'clock' => $range_from + min(3600, $range_to - $range_from),
+						'num' => 1,
+						'value_min' => 4,
+						'value_avg' => 5,
+						'value_max' => 6
+					]];
+				});
+			$this->same(1, $calls);
+			$this->same(1, $after_clear['cache']['shard_misses']);
+			$this->same(4.0, $after_clear['rows'][0]['value_min']);
+		}
+		finally {
+			$this->removeTree($base);
+			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_DIR', $old_dir);
+			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_NAMESPACE', $old_namespace);
+			$this->restoreEnvironment('CAPACITY_PLANNING_BOOT_ID', $old_boot);
+		}
+	}
+
+	private function testResumableEmptyDirectoryClear(): void {
+		$old_dir = getenv('CAPACITY_PLANNING_CACHE_DIR');
+		$old_namespace = getenv('CAPACITY_PLANNING_CACHE_NAMESPACE');
+		$old_boot = getenv('CAPACITY_PLANNING_BOOT_ID');
+		$base = rtrim(sys_get_temp_dir(), "\\/").DIRECTORY_SEPARATOR
+			.'capacity-planning-empty-dirs-'.bin2hex(random_bytes(6));
+		putenv('CAPACITY_PLANNING_CACHE_DIR='.$base);
+		putenv('CAPACITY_PLANNING_CACHE_NAMESPACE=resumable-empty-directories');
+		putenv('CAPACITY_PLANNING_BOOT_ID=resumable-empty-directories-boot');
+
+		try {
+			$cache = new SeriesCache(['enabled' => true, 'ttl_seconds' => 1800]);
+			if (!$cache->publicStatus()['backend_available']) {
+				echo "CapacityPlanningCacheTest: empty-directory clear skipped (POSIX backend unavailable).\n";
+				return;
+			}
+			$generation = new ReflectionProperty($cache, 'generation_root');
+			$generation->setAccessible(true);
+			$generation_root = (string) $generation->getValue($cache);
+			$bucket = $generation_root.DIRECTORY_SEPARATOR.'00';
+			mkdir($bucket, 0700, true);
+			@chmod($bucket, 0700);
+			for ($i = 0; $i < 6; $i++) {
+				$series = $bucket.DIRECTORY_SEPARATOR.hash('sha256', 'empty-series-'.$i);
+				mkdir($series, 0700);
+				@chmod($series, 0700);
+			}
+
+			$calls = 0;
+			do {
+				$result = $cache->clear(2);
+				$calls++;
+				$this->same(true, $result['ok']);
+				if (!$result['complete']) {
+					$this->same('clear_in_progress', $result['reason']);
+					$this->same(true, $result['progress']);
+				}
+				if ($calls > 10) {
+					$this->fail('Bounded empty-directory clear did not converge.');
+				}
+			} while (!$result['complete']);
+			$this->same(true, $calls > 1);
+			$this->same(0, $result['removed_files']);
+			$scan = new ReflectionMethod($cache, 'scanUsageState');
+			$scan->setAccessible(true);
+			$this->same(['bytes' => 0, 'files' => 0], $scan->invoke($cache));
+		}
+		finally {
+			$this->removeTree($base);
+			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_DIR', $old_dir);
+			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_NAMESPACE', $old_namespace);
+			$this->restoreEnvironment('CAPACITY_PLANNING_BOOT_ID', $old_boot);
+		}
+	}
+
+	private function testCheckedLedgerInvalidation(): void {
+		$old_dir = getenv('CAPACITY_PLANNING_CACHE_DIR');
+		$old_namespace = getenv('CAPACITY_PLANNING_CACHE_NAMESPACE');
+		$old_boot = getenv('CAPACITY_PLANNING_BOOT_ID');
+		$base = rtrim(sys_get_temp_dir(), "\\/").DIRECTORY_SEPARATOR
+			.'capacity-planning-ledger-clear-'.bin2hex(random_bytes(6));
+		putenv('CAPACITY_PLANNING_CACHE_DIR='.$base);
+		putenv('CAPACITY_PLANNING_CACHE_NAMESPACE=checked-ledger-clear');
+		putenv('CAPACITY_PLANNING_BOOT_ID=checked-ledger-clear-boot');
+
+		try {
+			$cache = new SeriesCache(['enabled' => true, 'ttl_seconds' => 1800]);
+			if (!$cache->publicStatus()['backend_available']) {
+				echo "CapacityPlanningCacheTest: checked ledger invalidation skipped (POSIX backend unavailable).\n";
+				return;
+			}
+			$ledger_path = new ReflectionMethod($cache, 'usageLedgerPath');
+			$ledger_path->setAccessible(true);
+			$path = (string) $ledger_path->invoke($cache);
+			$write = new ReflectionMethod($cache, 'writeUsageLedger');
+			$write->setAccessible(true);
+			$write->invoke($cache, ['bytes' => 123, 'files' => 9]);
+			$this->same(true, is_file($path));
+			$this->same(true, $cache->clear(2)['complete']);
+			$this->same(false, file_exists($path));
+			$install_root_property = new ReflectionProperty($cache, 'install_root');
+			$install_root_property->setAccessible(true);
+			$install_root = (string) $install_root_property->getValue($cache);
+			$quota_tmp = $install_root.DIRECTORY_SEPARATOR
+				.'.quota-state.json.tmp.'.str_repeat('a', 16);
+			file_put_contents($quota_tmp, 'stale quota temp');
+			@chmod($quota_tmp, 0600);
+			$quota_tmp_result = $cache->clear(2);
+			$this->same(true, $quota_tmp_result['complete']);
+			$this->same(1, $quota_tmp_result['removed_files']);
+			$this->same(false, file_exists($quota_tmp));
+
+			$near_miss = $install_root.DIRECTORY_SEPARATOR.'.quota-state.json.tmp.not-hex';
+			file_put_contents($near_miss, 'must not be deleted');
+			@chmod($near_miss, 0600);
+			$near_miss_result = $cache->clear(2);
+			$this->same(false, $near_miss_result['ok']);
+			$this->same(false, $near_miss_result['complete']);
+			$this->same(false, $near_miss_result['progress']);
+			$this->same('cache_unknown_file', $near_miss_result['reason']);
+			$this->same(true, is_file($near_miss));
+			@unlink($near_miss);
+
+			mkdir($path, 0700);
+			@chmod($path, 0700);
+			$failed = $cache->clear(2);
+			$this->same(false, $failed['ok']);
+			$this->same(false, $failed['complete']);
+			$this->same('cache_ledger_invalidation_failed', $failed['reason']);
+			@rmdir($path);
+
+			$unknown = $install_root
+				.DIRECTORY_SEPARATOR.'unknown'.DIRECTORY_SEPARATOR.'tree';
+			mkdir($unknown, 0700, true);
+			$unknown_result = $cache->clear(10);
+			$this->same(false, $unknown_result['ok']);
+			$this->same('cache_unknown_directory', $unknown_result['reason']);
+			$this->same(true, is_dir($unknown));
+		}
+		finally {
+			$this->removeTree($base);
+			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_DIR', $old_dir);
+			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_NAMESPACE', $old_namespace);
+			$this->restoreEnvironment('CAPACITY_PLANNING_BOOT_ID', $old_boot);
+		}
+	}
+
+	private function testClearRejectsSymlinkPayload(): void {
+		$old_dir = getenv('CAPACITY_PLANNING_CACHE_DIR');
+		$old_namespace = getenv('CAPACITY_PLANNING_CACHE_NAMESPACE');
+		$old_boot = getenv('CAPACITY_PLANNING_BOOT_ID');
+		$base = rtrim(sys_get_temp_dir(), "\\/").DIRECTORY_SEPARATOR
+			.'capacity-planning-clear-symlink-'.bin2hex(random_bytes(6));
+		putenv('CAPACITY_PLANNING_CACHE_DIR='.$base);
+		putenv('CAPACITY_PLANNING_CACHE_NAMESPACE=clear-symlink');
+		putenv('CAPACITY_PLANNING_BOOT_ID=clear-symlink-boot');
+		$external = $base.'-external.json.gz';
+
+		try {
+			$cache = new SeriesCache(['enabled' => true, 'ttl_seconds' => 1800]);
+			if (!$cache->publicStatus()['backend_available'] || !function_exists('symlink')) {
+				echo "CapacityPlanningCacheTest: clear symlink rejection skipped (POSIX backend unavailable).\n";
+				return;
+			}
+			$generation = new ReflectionProperty($cache, 'generation_root');
+			$generation->setAccessible(true);
+			$generation_root = (string) $generation->getValue($cache);
+			file_put_contents($external, 'must remain');
+			@chmod($external, 0600);
+			$link = $generation_root.DIRECTORY_SEPARATOR.'outside.json.gz';
+			if (!@symlink($external, $link)) {
+				echo "CapacityPlanningCacheTest: clear symlink rejection skipped (symlink creation denied).\n";
+				return;
+			}
+
+			$result = $cache->clear(1);
+			$this->same(false, $result['ok']);
+			$this->same(false, $result['complete']);
+			$this->same('cache_symlink_rejected', $result['reason']);
+			$this->same('must remain', file_get_contents($external));
+		}
+		finally {
+			$this->removeTree($base);
+			@unlink($external);
+			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_DIR', $old_dir);
+			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_NAMESPACE', $old_namespace);
+			$this->restoreEnvironment('CAPACITY_PLANNING_BOOT_ID', $old_boot);
+		}
+	}
+
+	private function testClearRejectsSpecialLockFile(): void {
+		if (PHP_OS_FAMILY !== 'Linux' || !function_exists('posix_mkfifo')) {
+			echo "CapacityPlanningCacheTest: FIFO lock rejection skipped (posix_mkfifo unavailable).\n";
+			return;
+		}
+		$old_dir = getenv('CAPACITY_PLANNING_CACHE_DIR');
+		$old_namespace = getenv('CAPACITY_PLANNING_CACHE_NAMESPACE');
+		$old_boot = getenv('CAPACITY_PLANNING_BOOT_ID');
+		$base = rtrim(sys_get_temp_dir(), "\\/").DIRECTORY_SEPARATOR
+			.'capacity-planning-special-lock-'.bin2hex(random_bytes(6));
+		putenv('CAPACITY_PLANNING_CACHE_DIR='.$base);
+		putenv('CAPACITY_PLANNING_CACHE_NAMESPACE=special-lock-rejection');
+		putenv('CAPACITY_PLANNING_BOOT_ID=special-lock-rejection-boot');
+
+		try {
+			$cache = new SeriesCache(['enabled' => true, 'ttl_seconds' => 1800]);
+			if (!$cache->publicStatus()['backend_available']) {
+				echo "CapacityPlanningCacheTest: FIFO lock rejection skipped (POSIX backend unavailable).\n";
+				return;
+			}
+			$install_root_property = new ReflectionProperty($cache, 'install_root');
+			$install_root_property->setAccessible(true);
+			$fifo = (string) $install_root_property->getValue($cache)
+				.DIRECTORY_SEPARATOR.'.shard-lock-aa.lock';
+			if (!@posix_mkfifo($fifo, 0600)) {
+				echo "CapacityPlanningCacheTest: FIFO lock rejection skipped (FIFO creation denied).\n";
+				return;
+			}
+			@chmod($fifo, 0600);
+
+			$result = $cache->clear(10);
+			$this->same(false, $result['ok']);
+			$this->same(false, $result['complete']);
+			$this->same('cache_file_unsafe', $result['reason']);
+			$this->same(true, file_exists($fifo));
+		}
+		finally {
+			$this->removeTree($base);
 			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_DIR', $old_dir);
 			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_NAMESPACE', $old_namespace);
 			$this->restoreEnvironment('CAPACITY_PLANNING_BOOT_ID', $old_boot);

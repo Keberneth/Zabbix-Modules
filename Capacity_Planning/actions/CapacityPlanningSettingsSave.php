@@ -56,12 +56,38 @@ final class CapacityPlanningSettingsSave extends CController {
 			// settings were already committed.
 			if ($clear_requested) {
 				$clear_result = $cache->clear();
-				if (!$clear_result['ok']) {
+				if (empty($clear_result['ok'])) {
+					$raw_reason = (string) ($clear_result['reason'] ?? 'clear_io_failed');
+					$reason = $raw_reason === 'cache_busy' ? 'cache_busy' : 'clear_io_failed';
+					$message = $reason === 'cache_busy'
+						? _('The shared cache is busy. Wait for the active analysis to finish, then try again.')
+						: _('The shared cache could not be cleared because a cache file operation failed. Check the PHP-FPM log and cache-directory permissions.');
+					if ($reason === 'clear_io_failed') {
+						error_log(sprintf(
+							'CapacityPlanning cache clear failed: reason=%s removed_files=%d removed_directories=%d',
+							$raw_reason,
+							max(0, (int) ($clear_result['removed_files'] ?? 0)),
+							max(0, (int) ($clear_result['removed_directories'] ?? 0))
+						));
+					}
 					$this->respond([
 						'ok' => false,
-						'error' => _('The shared cache could not be cleared now. Please retry.'),
+						'error' => ['code' => $reason, 'message' => $message],
 						'clear_result' => $clear_result
-					], 409);
+					], $reason === 'cache_busy' ? 409 : 500);
+					return;
+				}
+
+				// Large caches are removed in bounded chunks. A successful partial
+				// response lets the browser continue under the same explicit click
+				// without turning normal progress into an error.
+				if (array_key_exists('complete', $clear_result) && !$clear_result['complete']) {
+					$this->respond([
+						'ok' => true,
+						'message' => _('Shared cache clearing is in progress.'),
+						'cache' => $current,
+						'clear_result' => $clear_result
+					]);
 					return;
 				}
 			}
