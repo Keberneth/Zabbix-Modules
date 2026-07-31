@@ -61,6 +61,10 @@ final class CapacityPlanningData extends CController {
 	private const STALE_DISK_SECONDS = 24 * 3600;
 	private const STALE_RESOURCE_SECONDS = 4 * 3600;
 	private const MIN_DISK_GROWTH_BYTES_DAY = 1048576.0; // 1 MiB/day noise floor
+	// pp/day noise floor for a direct percentage series when usable capacity is
+	// unknown (1 pp per 100 days); with a known capacity the byte floor is
+	// translated through it instead so both models agree on "no growth".
+	private const MIN_DISK_GROWTH_PCT_DAY = 0.01;
 
 	private const DISK_WARN_DEFAULT = 90.0;
 	private const DISK_CRIT_DEFAULT = 95.0;
@@ -117,6 +121,10 @@ final class CapacityPlanningData extends CController {
 		'reasons' => []
 	];
 	private array $cache_runtime_meta = [];
+	/** Request-scoped memo for macroScopeBuckets(); initialized here because the
+	 * math regression suite instantiates this class without its constructor. */
+	private array $macro_scope_buckets = [];
+	private ?array $macro_scopes_index = null;
 
 	public function init(): void {
 		$this->disableCsrfValidation();
@@ -1242,12 +1250,23 @@ final class CapacityPlanningData extends CController {
 
 		$host_levels = [];
 		$relevant = [];
+		$levels_by_direct_set = [];
 		foreach ($hosts as $hostid => $host) {
 			$hostid = (string) $hostid; // PHP stores numeric-string keys as ints
 			$relevant[$hostid] = true;
 			$direct = [];
 			foreach ($host['templates'] as $t) {
 				$direct[$t['templateid']] = true;
+			}
+			// The level walk is a pure function of the direct template set and the
+			// fixed parent topology, and its $relevant additions are identical for
+			// an identical set — hosts sharing a template set share the result.
+			$direct_ids = array_map('strval', array_keys($direct));
+			sort($direct_ids, SORT_NATURAL);
+			$memo_key = implode(',', $direct_ids);
+			if (isset($levels_by_direct_set[$memo_key])) {
+				$host_levels[$hostid] = $levels_by_direct_set[$memo_key];
+				continue;
 			}
 			$levels = [];
 			$seen = [];
@@ -1270,6 +1289,7 @@ final class CapacityPlanningData extends CController {
 				$current = array_keys(array_diff_key($parents, $seen));
 			}
 			$host_levels[$hostid] = $levels;
+			$levels_by_direct_set[$memo_key] = $levels;
 		}
 
 		$macro_searches = ['VFS.FS.', 'CPU.UTIL', 'MEMORY.'];
@@ -1439,7 +1459,7 @@ final class CapacityPlanningData extends CController {
 			}
 			$context = $this->unquoteContext($ctx);
 		}
-		return [
+		$parsed = [
 			'raw' => $raw,
 			'base' => strtoupper($m[1]),
 			'context' => $context,
@@ -1448,6 +1468,12 @@ final class CapacityPlanningData extends CController {
 			'type' => $type,
 			'entityid' => $entityid
 		];
+		if ($regex_context) {
+			// Precompiled once here; regex-context macros are otherwise re-assembled
+			// for every filesystem they are evaluated against.
+			$parsed['pattern'] = '~'.str_replace('~', '\~', $context).'~';
+		}
+		return $parsed;
 	}
 
 	private function compareMacroCandidates(array $a, array $b): int {
@@ -1518,6 +1544,32 @@ final class CapacityPlanningData extends CController {
 	}
 
 	/**
+	 * Memoized macroScopes() with each scope's macros bucketed by base name in
+	 * original order. A pure function of the request's immutable macro index;
+	 * the cache resets if a different index is supplied (regression tests).
+	 *
+	 * @return array<int, array{0: string, 1: array<string, array<int, array>>}>
+	 */
+	private function macroScopeBuckets(array $index, string $hostid): array {
+		if ($this->macro_scopes_index !== $index) {
+			$this->macro_scopes_index = $index;
+			$this->macro_scope_buckets = [];
+		}
+		if (!isset($this->macro_scope_buckets[$hostid])) {
+			$buckets = [];
+			foreach ($this->macroScopes($index, $hostid) as [$label, $macros]) {
+				$by_base = [];
+				foreach ($macros as $macro) {
+					$by_base[$macro['base']][] = $macro;
+				}
+				$buckets[] = [$label, $by_base];
+			}
+			$this->macro_scope_buckets[$hostid] = $buckets;
+		}
+		return $this->macro_scope_buckets[$hostid];
+	}
+
+	/**
 	 * Resolve {$BASE:"context"} across scopes: for each candidate context, exact
 	 * context matches (all scopes) beat regex context matches (all scopes);
 	 * afterwards the plain (context-free) macro is resolved by scope precedence.
@@ -1526,16 +1578,16 @@ final class CapacityPlanningData extends CController {
 	 */
 	private function resolveMacro(array $index, string $hostid, string $base, array $contexts): array {
 		$base = strtoupper($base);
-		$scopes = $this->macroScopes($index, $hostid);
+		$scopes = $this->macroScopeBuckets($index, $hostid);
 
 		foreach ($contexts as $context) {
 			if ($context === '') {
 				continue;
 			}
-			foreach ($scopes as [$label, $macros]) {
+			foreach ($scopes as [$label, $by_base]) {
 				$exact = [];
-				foreach ($macros as $macro) {
-					if ($macro['base'] === $base && $macro['type'] === 0 && $macro['context'] !== null
+				foreach ($by_base[$base] ?? [] as $macro) {
+					if ($macro['type'] === 0 && $macro['context'] !== null
 							&& !$macro['regex'] && $macro['context'] === $context) {
 						$exact[] = $macro;
 					}
@@ -1546,11 +1598,12 @@ final class CapacityPlanningData extends CController {
 						'ambiguous' => $this->macroCandidatesAmbiguous($exact)];
 				}
 			}
-			foreach ($scopes as [$label, $macros]) {
+			foreach ($scopes as [$label, $by_base]) {
 				$matched = [];
-				foreach ($macros as $macro) {
-					if ($macro['base'] === $base && $macro['type'] === 0 && $macro['context'] !== null
-							&& $macro['regex'] && @preg_match('~'.str_replace('~', '\~', $macro['context']).'~', $context) === 1) {
+				foreach ($by_base[$base] ?? [] as $macro) {
+					if ($macro['type'] === 0 && $macro['context'] !== null && $macro['regex']
+							&& @preg_match($macro['pattern'] ?? '~'.str_replace('~', '\~', $macro['context']).'~',
+								$context) === 1) {
 						$matched[] = $macro;
 					}
 				}
@@ -1562,10 +1615,10 @@ final class CapacityPlanningData extends CController {
 			}
 		}
 
-		foreach ($scopes as [$label, $macros]) {
+		foreach ($scopes as [$label, $by_base]) {
 			$plain = [];
-			foreach ($macros as $macro) {
-				if ($macro['base'] === $base && $macro['type'] === 0 && $macro['context'] === null) {
+			foreach ($by_base[$base] ?? [] as $macro) {
+				if ($macro['type'] === 0 && $macro['context'] === null) {
 					$plain[] = $macro;
 				}
 			}
@@ -1959,6 +2012,7 @@ final class CapacityPlanningData extends CController {
 			string $host_os = 'Unknown'): array {
 		$now = $now ?? time();
 		$families = [];
+		$ranks = [];
 		foreach ($host_items as $item) {
 			$parsed = $this->parseFsKey($item['key']);
 			if ($parsed === null) {
@@ -1966,9 +2020,12 @@ final class CapacityPlanningData extends CController {
 			}
 			[$fs, $metric] = $parsed;
 			$family = strpos($item['key'], '.dependent.') !== false ? 'dependent' : 'standard';
-			$current = $families[$fs][$family][$metric] ?? null;
-			if ($current === null || $this->itemRank($item, $metric) > $this->itemRank($current, $metric)) {
+			$rank = $this->itemRank($item, $metric);
+			// Rank and item are stored together so the incumbent's rank is never
+			// recomputed; a tie must not replace the incumbent.
+			if (!isset($ranks[$fs][$family][$metric]) || $rank > $ranks[$fs][$family][$metric]) {
 				$families[$fs][$family][$metric] = $item;
+				$ranks[$fs][$family][$metric] = $rank;
 			}
 		}
 
@@ -2892,7 +2949,7 @@ final class CapacityPlanningData extends CController {
 			$row['baseline_eligible'] = isset($usable_hours[intdiv($row['clock'], 3600)]);
 		}
 		unset($row);
-		$combined = [];
+		$filtered = [];
 		foreach ($trend_rows as $row) {
 			$hour = intdiv($row['clock'], 3600);
 			if (isset($duration_hours[$hour])) {
@@ -2902,12 +2959,54 @@ final class CapacityPlanningData extends CController {
 				$row['baseline_eligible'] = false;
 				$row['saturation_only'] = true;
 			}
-			$combined[] = $row;
+			$filtered[] = $row;
 		}
-		foreach ($recent_rows as $row) {
-			$combined[] = $row;
+
+		// Both inputs arrive sorted ascending by clock; a linear merge emitting the
+		// trend row first on equal clocks reproduces the previous stable sort of
+		// the trend-then-recent concatenation. Unsorted input falls back to it.
+		$sorted = true;
+		$previous_clock = null;
+		foreach ($filtered as $row) {
+			if ($previous_clock !== null && $row['clock'] < $previous_clock) {
+				$sorted = false;
+				break;
+			}
+			$previous_clock = $row['clock'];
 		}
-		usort($combined, static fn (array $a, array $b): int => $a['clock'] <=> $b['clock']);
+		if ($sorted) {
+			$previous_clock = null;
+			foreach ($recent_rows as $row) {
+				if ($previous_clock !== null && $row['clock'] < $previous_clock) {
+					$sorted = false;
+					break;
+				}
+				$previous_clock = $row['clock'];
+			}
+		}
+		if (!$sorted) {
+			$combined = array_merge($filtered, $recent_rows);
+			usort($combined, static fn (array $a, array $b): int => $a['clock'] <=> $b['clock']);
+
+			return $combined;
+		}
+
+		$combined = [];
+		$trend_count = count($filtered);
+		$recent_count = count($recent_rows);
+		$i = 0;
+		$j = 0;
+		while ($i < $trend_count && $j < $recent_count) {
+			$combined[] = $filtered[$i]['clock'] <= $recent_rows[$j]['clock']
+				? $filtered[$i++]
+				: $recent_rows[$j++];
+		}
+		while ($i < $trend_count) {
+			$combined[] = $filtered[$i++];
+		}
+		while ($j < $recent_count) {
+			$combined[] = $recent_rows[$j++];
+		}
 
 		return $combined;
 	}
@@ -3175,14 +3274,36 @@ final class CapacityPlanningData extends CController {
 	 */
 	private function summarizeWindows(array $rows, int $now, ?float $warn, ?float $crit): array {
 		$result = [];
+		// WINDOWS is ordered longest-first, so the cutoffs increase monotonically
+		// and one advancing lower bound selects every nested window from sorted
+		// rows; unsorted input (never produced by callers) keeps the full scan.
+		$rows_sorted = true;
+		$previous_clock = null;
+		foreach ($rows as $row) {
+			if ($previous_clock !== null && $row['clock'] < $previous_clock) {
+				$rows_sorted = false;
+				break;
+			}
+			$previous_clock = $row['clock'];
+		}
+		$row_count = count($rows);
+		$start = 0;
 		foreach (self::WINDOWS as $window => $days) {
 			$label = ['12m' => '12 months', '6m' => '6 months', '3m' => '3 months',
 				'1m' => '1 month', '2w' => '2 weeks', '1w' => '1 week'][$window];
 			$cutoff = $now - $days * 86400;
-			$selected = [];
-			foreach ($rows as $row) {
-				if ($row['clock'] >= $cutoff) {
-					$selected[] = $row;
+			if ($rows_sorted) {
+				while ($start < $row_count && $rows[$start]['clock'] < $cutoff) {
+					$start++;
+				}
+				$selected = array_slice($rows, $start);
+			}
+			else {
+				$selected = [];
+				foreach ($rows as $row) {
+					if ($row['clock'] >= $cutoff) {
+						$selected[] = $row;
+					}
 				}
 			}
 			if (!$selected) {
@@ -3200,6 +3321,8 @@ final class CapacityPlanningData extends CController {
 			$hours = [];
 			$values = [];
 			$weights = [];
+			$above_warn_sum = 0;
+			$above_crit_sum = 0;
 			foreach ($selected as $row) {
 				$w = max(1, $row['num']);
 				$total_num += $w;
@@ -3210,21 +3333,21 @@ final class CapacityPlanningData extends CController {
 				if ($peak === null || $row['max'] > $peak) {
 					$peak = $row['max'];
 				}
+				if ($warn !== null && $row['avg'] > $warn) {
+					$above_warn_sum += $w;
+				}
+				if ($crit !== null && $row['avg'] > $crit) {
+					$above_crit_sum += $w;
+				}
 			}
 			$first = $selected[0]['clock'];
 			$last = $selected[count($selected) - 1]['clock'];
 			$data_days = max(1, min($days, (int) ceil(($last - $first + 3600) / 86400)));
 			[$slope, $r2] = $this->theilSen($this->dailyPoints($selected));
 
-			$above = function (?float $threshold) use ($values, $weights, $total_num): ?float {
+			$above = static function (?float $threshold, int $sum) use ($total_num): ?float {
 				if ($threshold === null || $total_num <= 0) {
 					return null;
-				}
-				$sum = 0;
-				foreach ($values as $i => $value) {
-					if ($value > $threshold) {
-						$sum += $weights[$i];
-					}
 				}
 				return $sum / $total_num * 100;
 			};
@@ -3240,8 +3363,8 @@ final class CapacityPlanningData extends CController {
 				'peak' => $peak,
 				'slope' => $slope,
 				'r2' => $r2,
-				'above_warn' => $above($warn),
-				'above_crit' => $above($crit),
+				'above_warn' => $above($warn, $above_warn_sum),
+				'above_crit' => $above($crit, $above_crit_sum),
 				'start_value' => $selected[0]['avg'],
 				'end_value' => $selected[count($selected) - 1]['avg'],
 				'net_change' => $selected[count($selected) - 1]['avg'] - $selected[0]['avg'],
@@ -3351,24 +3474,29 @@ final class CapacityPlanningData extends CController {
 		if (!$values || count($values) !== count($weights)) {
 			return null;
 		}
-		$pairs = [];
+		$vals = [];
+		$wts = [];
 		foreach ($values as $i => $value) {
-			$pairs[] = [$value, max(1, $weights[$i])];
+			$vals[] = $value;
+			$wts[] = max(1, $weights[$i]);
 		}
-		usort($pairs, static fn ($a, $b) => $a[0] <=> $b[0]);
+		// Callback-free sort; the index column reproduces a stable usort's tie
+		// order so the weight column is reordered but never used as a tiebreaker.
+		$order = range(0, count($vals) - 1);
+		array_multisort($vals, SORT_ASC, SORT_NUMERIC, $order, SORT_ASC, SORT_NUMERIC, $wts);
 		$total = 0;
-		foreach ($pairs as [, $w]) {
+		foreach ($wts as $w) {
 			$total += $w;
 		}
 		$target = max(1.0, min((float) $total, $total * $quantile));
 		$cumulative = 0;
-		foreach ($pairs as [$value, $w]) {
-			$cumulative += $w;
+		foreach ($vals as $i => $value) {
+			$cumulative += $wts[$i];
 			if ($cumulative >= $target) {
 				return $value;
 			}
 		}
-		return $pairs[count($pairs) - 1][0];
+		return $vals[count($vals) - 1];
 	}
 
 	private function selectModelWindow(array $windows): ?string {
@@ -3398,8 +3526,13 @@ final class CapacityPlanningData extends CController {
 		}
 		$one_month = $windows['1m'] ?? null;
 		$agreement = true;
+		// A recent-window disagreement may veto High/Medium confidence only when
+		// the 1m window carries real evidence (mirroring the Medium quality bar).
+		// A slope through a handful of sparse points is statistically meaningless
+		// and must not demote an otherwise dense, well-fitted long-window model.
 		if ($one_month !== null && $one_month['slope'] !== null && $selected['slope'] !== null
-				&& abs($selected['slope']) > 0) {
+				&& abs($selected['slope']) > 0
+				&& $one_month['days'] >= 14 && $one_month['cov'] >= 45) {
 			$agreement = $one_month['slope'] == 0.0
 				|| ($one_month['slope'] <=> 0) === ($selected['slope'] <=> 0);
 		}
@@ -3499,11 +3632,19 @@ final class CapacityPlanningData extends CController {
 		$slope = $selected !== null ? $selected['slope'] : null;
 		$pct_slope = $selected_pct !== null ? $selected_pct['slope'] : null;
 		$accelerating = false;
+		$pct_accelerating = false;
+		// The noise floor is capacity-relative for small filesystems: 1 MiB/day on
+		// a 200 MiB volume is a confident fill trend, not noise. 1e-5 of capacity
+		// per day (could not fill the volume within ~270 years) is unambiguously
+		// noise; at and above ~100 GiB the absolute 1 MiB/day floor is unchanged.
+		$byte_floor = ($capacity !== null && $capacity > 0)
+			? min(self::MIN_DISK_GROWTH_BYTES_DAY, $capacity * 0.00001)
+			: self::MIN_DISK_GROWTH_BYTES_DAY;
 		$recent = $windows['1m'] ?? null;
 		$recent_pct = $pct_windows['1m'] ?? null;
 		if ($slope !== null && $recent !== null && $recent['slope'] !== null
 				&& $recent['days'] >= 21 && $recent['cov'] >= 70 && ($recent['r2'] ?? 0) >= 0.35
-				&& $recent['slope'] > max($slope * 1.5, self::MIN_DISK_GROWTH_BYTES_DAY)) {
+				&& $recent['slope'] > max($slope * 1.5, $byte_floor)) {
 			$selected_window = '1m';
 			$selected = $recent;
 			$slope = $recent['slope'];
@@ -3514,12 +3655,35 @@ final class CapacityPlanningData extends CController {
 			}
 			$accelerating = true;
 		}
+		// A direct percentage series is an independent model of the alarming
+		// metric, so it gets the same acceleration rule evaluated in its own
+		// units: the byte noise floor translated through current usable capacity,
+		// or a conservative fixed floor when capacity is unknown. Without this a
+		// direct pused series stays on its long window while the byte model
+		// accelerates, and the report can claim Full before Critical.
+		if ($pct_series_direct && $pct_slope !== null && $recent_pct !== null
+				&& $recent_pct['slope'] !== null && $recent_pct['days'] >= 21
+				&& $recent_pct['cov'] >= 70 && ($recent_pct['r2'] ?? 0) >= 0.35) {
+			$pct_floor = ($capacity !== null && $capacity > 0)
+				? $byte_floor * 100 / $capacity
+				: self::MIN_DISK_GROWTH_PCT_DAY;
+			if ($recent_pct['slope'] > max($pct_slope * 1.5, $pct_floor)) {
+				$selected_pct_window = '1m';
+				$selected_pct = $recent_pct;
+				$pct_slope = $recent_pct['slope'];
+				$pct_accelerating = true;
+			}
+		}
 		$byte_confidence = $this->forecastConfidence($selected, $windows);
 		$pct_confidence = $this->forecastConfidence($selected_pct, $pct_windows);
-		if ($slope !== null && $slope < self::MIN_DISK_GROWTH_BYTES_DAY) {
+		if ($slope !== null && $slope < $byte_floor) {
 			$slope = null;
 		}
-		if ($pct_slope !== null && $pct_slope <= 0) {
+		// Both bases must agree on what counts as no meaningful growth: a pct
+		// slope whose byte equivalent sits under the noise floor must not keep
+		// producing threshold dates next to a nulled byte model ("Full: never").
+		if ($pct_slope !== null && ($pct_slope <= 0
+				|| ($capacity !== null && $capacity > 0 && $pct_slope < $byte_floor * 100 / $capacity))) {
 			$pct_slope = null;
 		}
 
@@ -3570,6 +3734,14 @@ final class CapacityPlanningData extends CController {
 			['warning used %', $days_warn_pct_only], ['warning free GB', $days_warn_gb],
 			['critical used %', $days_crit_pct_only], ['critical free GB', $days_crit_gb]
 		]);
+		// A threshold ETA later than the projected full date is a cross-model
+		// divergence (differing window selection, capacity change or coverage).
+		// Each figure is honest on its own basis, but the pair must be explained.
+		if ($days_full !== null && (($days_crit !== null && $days_crit > $days_full)
+				|| ($days_warn !== null && $days_warn > $days_full))) {
+			$divergence_note = _('The used-percentage model and the byte growth model disagree: a threshold ETA is later than the projected full date. This can indicate changing filesystem capacity or differing history coverage; each estimate is reported on its own basis.');
+			$pct_note = $pct_note === null ? $divergence_note : $pct_note.' '.$divergence_note;
+		}
 
 		$current_warn_pct = $current_pused !== null && $spec['warn_pct'] !== null
 			&& $current_pused > $spec['warn_pct'];
@@ -3624,13 +3796,16 @@ final class CapacityPlanningData extends CController {
 			'sel' => $selected_window,
 			'sel_label' => $accelerating ? _('1 month (acceleration override)') : null,
 			'pct_sel' => $selected_pct_window,
-			'pct_sel_label' => $selected_pct !== null ? $selected_pct['label'] : null,
+			'pct_sel_label' => $pct_accelerating
+				? _('1 month (acceleration override)')
+				: ($selected_pct !== null ? $selected_pct['label'] : null),
 			'byte_confidence' => $byte_confidence,
 			'pct_confidence' => $pct_confidence,
 			'byte_severity' => $byte_severity,
 			'pct_severity' => $pct_severity,
 			'confidence' => $confidence,
 			'accelerating' => $accelerating,
+			'pct_accelerating' => $pct_accelerating,
 			'growth_day' => $slope,
 			'growth_pct_day' => $pct_slope !== null ? round($pct_slope, 5) : null,
 			'eta' => [
@@ -3930,7 +4105,20 @@ final class CapacityPlanningData extends CController {
 		$selected = array_values(array_filter($rows,
 			static fn (array $row): bool => $row['clock'] >= $start_clock && $row['clock'] < $end_clock
 				&& (!isset($row['baseline_eligible']) || $row['baseline_eligible'])));
-		usort($selected, static fn (array $a, array $b): int => $a['clock'] <=> $b['clock']);
+		// Stable-sorting rows already ordered by clock is an identity transform;
+		// only genuinely unsorted input (never produced by callers) pays for it.
+		$is_sorted = true;
+		$previous_clock = null;
+		foreach ($selected as $row) {
+			if ($previous_clock !== null && $row['clock'] < $previous_clock) {
+				$is_sorted = false;
+				break;
+			}
+			$previous_clock = $row['clock'];
+		}
+		if (!$is_sorted) {
+			usort($selected, static fn (array $a, array $b): int => $a['clock'] <=> $b['clock']);
+		}
 		if (!$selected) {
 			return ['label' => $label, 'requested_days' => $days, 'days' => 0, 'cov' => 0.0, 'n' => 0,
 				'avg' => null, 'p95' => null, 'peak' => null, 'slope' => null, 'r2' => null,
@@ -4007,13 +4195,49 @@ final class CapacityPlanningData extends CController {
 			'post_change_stats' => null, 'prior_stats' => null];
 		$best = null;
 		$best_score = -1.0;
+		// Rows are sorted ascending by clock at the call site, so each candidate
+		// span is a contiguous slice found by binary search; unsorted input
+		// (never produced by callers) keeps the original full filters.
+		$rows_sorted = true;
+		$previous_clock = null;
+		foreach ($rows as $row) {
+			if ($previous_clock !== null && $row['clock'] < $previous_clock) {
+				$rows_sorted = false;
+				break;
+			}
+			$previous_clock = $row['clock'];
+		}
+		$row_count = count($rows);
+		$lower_bound = static function (int $clock) use ($rows, $row_count): int {
+			$lo = 0;
+			$hi = $row_count;
+			while ($lo < $hi) {
+				$mid = ($lo + $hi) >> 1;
+				if ($rows[$mid]['clock'] < $clock) {
+					$lo = $mid + 1;
+				}
+				else {
+					$hi = $mid;
+				}
+			}
+			return $lo;
+		};
 		foreach ([7, 14, 21, 28, 31] as $days) {
 			$change = $now - $days * 86400;
 			$prior_start = $change - $days * 86400;
-			$recent_rows = array_values(array_filter($rows,
-				static fn (array $row): bool => $row['clock'] >= $change && $row['clock'] < $now));
-			$prior_rows = array_values(array_filter($rows,
-				static fn (array $row): bool => $row['clock'] >= $prior_start && $row['clock'] < $change));
+			if ($rows_sorted) {
+				$prior_index = $lower_bound($prior_start);
+				$change_index = $lower_bound($change);
+				$now_index = $lower_bound($now);
+				$recent_rows = array_slice($rows, $change_index, $now_index - $change_index);
+				$prior_rows = array_slice($rows, $prior_index, $change_index - $prior_index);
+			}
+			else {
+				$recent_rows = array_values(array_filter($rows,
+					static fn (array $row): bool => $row['clock'] >= $change && $row['clock'] < $now));
+				$prior_rows = array_values(array_filter($rows,
+					static fn (array $row): bool => $row['clock'] >= $prior_start && $row['clock'] < $change));
+			}
 			$recent = $this->resourceIntervalStats($recent_rows, $change, $now, $days,
 				'post-change '.$days.' days', $spec['warn'], $spec['crit']);
 			$prior = $this->resourceIntervalStats($prior_rows, $prior_start, $change, $days,

@@ -12,6 +12,7 @@
 	const RISK_BY_KEY = Object.fromEntries(RISKS.map((r) => [r.key, r]));
 	const RISK_ORDER = {Critical: 5, High: 4, Medium: 3, Watch: 2, Healthy: 1, Unknown: 0, Pending: -1};
 	const CONFIDENCE_RANK = {High: 4, Medium: 3, Low: 2, None: 1, 'Current state': 0, '': -1};
+	const HTML_ESCAPES = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'};
 
 	const LOOKBACKS = [
 		{days: 92, label: '3M'}, {days: 183, label: '6M'}, {days: 365, label: '12M'}
@@ -1989,10 +1990,14 @@
 		nameMatch(finding) {
 			const needle = this.filters.name.toLowerCase();
 			if (!needle) { return true; }
-			const facet = this.hostFacet(finding);
-			const hay = `${finding.host} ${finding.fs || ''} ${finding.metric || ''} ${finding.rtype || ''} `
-				+ `${finding.item_key || ''} ${facet ? (facet.groups || []).join(' ') : ''}`;
-			return hay.toLowerCase().includes(needle);
+			// Findings are replaced wholesale on every inventory load, so the lowered
+			// haystack can be cached on the object for the many visibility passes.
+			if (finding._hay === undefined) {
+				const facet = this.hostFacet(finding);
+				finding._hay = (`${finding.host} ${finding.fs || ''} ${finding.metric || ''} ${finding.rtype || ''} `
+					+ `${finding.item_key || ''} ${facet ? (facet.groups || []).join(' ') : ''}`).toLowerCase();
+			}
+			return finding._hay.includes(needle);
 		}
 
 		findingType(finding) {
@@ -2036,7 +2041,8 @@
 			}
 			const all = [...this.inv.disks, ...this.inv.resources];
 			const fieldMatched = all.filter((finding) => this.matchesResultFilters(finding));
-			const shown = fieldMatched.filter((finding) => this.riskVisible(this.severityOf(finding)));
+			const severities = fieldMatched.map((finding) => this.severityOf(finding));
+			const shown = fieldMatched.filter((_finding, index) => this.riskVisible(severities[index]));
 			const hosts = new Set(shown.map((finding) => String(finding.hostid)));
 			const fieldHidden = all.length - fieldMatched.length;
 			const riskHidden = fieldMatched.length - shown.length;
@@ -2046,8 +2052,7 @@
 				+ (hidden ? ` · hidden: ${hidden}` : '');
 
 			const counts = Object.fromEntries(RISKS.map((risk) => [risk.key, 0]));
-			fieldMatched.forEach((finding) => {
-				const severity = this.severityOf(finding);
+			severities.forEach((severity) => {
 				if (counts[severity] !== undefined) { counts[severity]++; }
 			});
 			this.elements.riskFilter.querySelectorAll('[data-risk-count]').forEach((count) => {
@@ -2084,6 +2089,7 @@
 		}
 
 		renderEmpty(message) {
+			this._qualityInv = null; // qualityBody is overwritten below
 			const empty = `<div class="cap-empty">${this.escapeHtml(message || 'No data is available.')}</div>`;
 			this.elements.cards.innerHTML = '';
 			this.elements.runwaySurface.innerHTML = empty;
@@ -2132,9 +2138,9 @@
 				+ progress + cache;
 		}
 
-		riskCounts() {
+		riskCounts(disks = this.visibleDisks(), resources = this.visibleResources()) {
 			const counts = Object.fromEntries(RISKS.map((r) => [r.key, 0]));
-			[...this.visibleDisks(), ...this.visibleResources()].forEach((f) => {
+			[...disks, ...resources].forEach((f) => {
 				const sev = this.severityOf(f);
 				if (counts[sev] !== undefined) { counts[sev]++; }
 			});
@@ -2142,9 +2148,9 @@
 		}
 
 		renderOverview() {
-			const counts = this.riskCounts();
 			const disks = this.visibleDisks();
 			const resources = this.visibleResources();
+			const counts = this.riskCounts(disks, resources);
 			const hosts = new Set([...disks, ...resources].map((finding) => String(finding.hostid)));
 			const actions = counts.Critical + counts.High + counts.Medium;
 			const cards = [
@@ -2158,16 +2164,21 @@
 				`<div class="cap-stat"><div class="cap-stat-value${c.critical ? ' is-critical' : ''}">${c.value}</div><div class="cap-stat-label">${this.escapeHtml(c.label)}</div></div>`
 			).join('');
 
-			this._runwayRows = this.runwayRows();
+			this._runwayRows = this.runwayRows(disks);
 			this.elements.runwaySurface.innerHTML = this.buildRunwaySvg(this._runwayRows, this.getPalette(), true);
 			this.elements.distSurface.innerHTML = this.buildDistributionSvg(counts, this.getPalette());
-			this.renderTopRisks();
-			this.renderQuality();
+			this.renderTopRisks(disks, resources);
+			// The static quality table only changes with a new inventory object; skip
+			// the innerHTML rebuild on the per-forecast-batch re-renders.
+			if (this._qualityInv !== this.inv) {
+				this.renderQuality();
+				this._qualityInv = this.inv;
+			}
 		}
 
-		runwayRows() {
+		runwayRows(disks = this.visibleDisks()) {
 			const rows = [];
-			this.visibleDisks().forEach((d) => {
+			disks.forEach((d) => {
 				const fc = this.fc.get(d.id);
 				if (!fc || !fc.eta || fc.eta.next_days == null) { return; }
 				rows.push({
@@ -2245,9 +2256,9 @@
 			return svg;
 		}
 
-		renderTopRisks() {
+		renderTopRisks(disks = this.visibleDisks(), resources = this.visibleResources()) {
 			const rows = [];
-			this.visibleDisks().forEach((d) => {
+			disks.forEach((d) => {
 				const fc = this.fc.get(d.id);
 				rows.push({
 					kind: 'disk', id: d.id, finding: d, sev: this.severityOf(d), host: d.host,
@@ -2258,7 +2269,7 @@
 					action: (fc && fc.recommendation) || d.current_recommendation || ''
 				});
 			});
-			this.visibleResources().forEach((r) => {
+			resources.forEach((r) => {
 				const fc = this.fc.get(r.id);
 				rows.push({
 					kind: 'res', id: r.id, finding: r, sev: this.severityOf(r), host: r.host,
@@ -2332,10 +2343,11 @@
 		diskRow(d) {
 			const fc = this.fc.get(d.id) || null;
 			const reasons = this.findingReasons(d, fc);
+			const sev = this.severityOf(d);
 			return {
 				id: d.id, d, fc,
-				sev: this.severityOf(d),
-				risk: RISK_ORDER[this.severityOf(d)] ?? -1,
+				sev: sev,
+				risk: RISK_ORDER[sev] ?? -1,
 				host: d.host, fs: d.fs,
 				pused: d.pused, free: d.free, usable: this.diskUsableCapacity(d),
 				growth: fc ? fc.growth_day : null,
@@ -2415,7 +2427,7 @@
 					<td class="cap-num">${this.etaCell(r.warn, this.fmtDays(r.warn))}</td>
 					<td class="cap-num">${this.etaCell(r.crit, this.fmtDays(r.crit))}</td>
 					<td class="cap-num">${this.etaCell(r.full, this.fmtDays(r.full))}</td>
-					<td>${this.escapeHtml(r.conf || (r.fc ? '' : (this.fcReady ? '—' : '…')))}${r.fc && r.fc.accelerating ? ' <span title="Recent growth is accelerating">⚠</span>' : ''}</td>
+					<td>${this.escapeHtml(r.conf || (r.fc ? '' : (this.fcReady ? '—' : '…')))}${r.fc && (r.fc.accelerating || r.fc.pct_accelerating) ? ' <span title="Recent growth is accelerating">⚠</span>' : ''}</td>
 				</tr>`;
 			}).join('');
 
@@ -2454,10 +2466,11 @@
 			const saturation = fc && fc.saturation && typeof fc.saturation === 'object'
 				? fc.saturation
 				: null;
+			const sev = this.severityOf(r);
 			return {
 				id: r.id, r, fc,
-				sev: this.severityOf(r),
-				risk: RISK_ORDER[this.severityOf(r)] ?? -1,
+				sev: sev,
+				risk: RISK_ORDER[sev] ?? -1,
 				host: r.host, rtype: r.rtype,
 				current: r.current,
 				avg: sel ? sel.avg : null,
@@ -2585,13 +2598,16 @@
 			const nullsLast = ['warn', 'crit', 'full', 'growth', 'pused', 'free', 'current', 'avg', 'p95',
 				'peak', 'aboveWarn', 'aboveCrit', 'episodes', 'longest', 'totalDuration', 'nearFullCount',
 				'nearFullDays'];
+			// Key dispatch is hoisted out of the comparator; each branch body is
+			// unchanged, so the resulting order is identical.
+			const isNullsLast = nullsLast.includes(key);
+			const rank = (v) => CONFIDENCE_RANK[String(v || '')] ?? -1;
 			rows.sort((a, b) => {
 				let av = a[key];
 				let bv = b[key];
 				if (key === 'conf') {
 					// Confidence is an ordered scale; alphabetical order would put
 					// Low between High and Medium.
-					const rank = (v) => CONFIDENCE_RANK[String(v || '')] ?? -1;
 					return (rank(av) - rank(bv)) * mul;
 				}
 				if (key === 'host') {
@@ -2599,7 +2615,7 @@
 					bv = String(bv || '').toLowerCase();
 					return av < bv ? -mul : av > bv ? mul : 0;
 				}
-				if (nullsLast.includes(key)) {
+				if (isNullsLast) {
 					// ETA sorting keeps "no projection" at the bottom in both directions.
 					if (av == null && bv == null) { return 0; }
 					if (av == null) { return 1; }
@@ -2642,13 +2658,22 @@
 			document.body.classList.add('cap-modal-open');
 			this.setBackgroundInert(true);
 			if (!wasOpen) {
-				this.elements.detailClose.focus({preventScroll: true});
-				requestAnimationFrame(() => {
+				const focusClose = () => {
 					if (modal.classList.contains('is-open')) { this.elements.detailClose.focus({preventScroll: true}); }
-				});
-				setTimeout(() => {
-					if (modal.classList.contains('is-open')) { this.elements.detailClose.focus({preventScroll: true}); }
-				}, 30);
+				};
+				focusClose();
+				requestAnimationFrame(focusClose);
+				setTimeout(focusClose, 30);
+				// The browser's asynchronous inert focus fixup can land later than
+				// the timed retries under load and silently drop focus to <body>.
+				// Re-assert while the dialog settles whenever focus escapes it;
+				// closing removes is-open first, so focus restoration is untouched.
+				const guard = (e) => {
+					if (!modal.classList.contains('is-open')) { return; }
+					if (!e.relatedTarget || !modal.contains(e.relatedTarget)) { focusClose(); }
+				};
+				modal.addEventListener('focusout', guard);
+				setTimeout(() => modal.removeEventListener('focusout', guard), 400);
 			}
 		}
 
@@ -3025,14 +3050,15 @@
 				}
 			}
 			const palette = this.getPalette();
+			const built = this.buildUsageSvg(spec, palette, true);
 			legendEl.innerHTML = [
 				`<span class="cap-legend-item"><span class="cap-legend-swatch" style="background:${palette.line}"></span>Daily average</span>`,
 				`<span class="cap-legend-item"><span class="cap-legend-swatch is-band" style="background:${palette.line}"></span>Daily min–max</span>`,
 				spec.slope != null ? `<span class="cap-legend-item"><span class="cap-legend-swatch" style="background:${palette.projection}"></span>${this.escapeHtml(spec.projectionLabel)}</span>` : '',
+				built.geom.patternDrawn ? `<span class="cap-legend-item"><span class="cap-legend-swatch" style="background:${palette.projection};opacity:0.55"></span>Possible path (history pattern)</span>` : '',
 				...spec.thresholds.map((t) => `<span class="cap-legend-item"><span class="cap-legend-swatch" style="background:${t.kind === 'crit' ? palette.crit : palette.warn}"></span>${this.escapeHtml(t.label)}</span>`)
 			].filter(Boolean).join('');
 
-			const built = this.buildUsageSvg(spec, palette, true);
 			surface.innerHTML = built.svg;
 			this.detailGeom = built.geom;
 			const svg = surface.querySelector('svg');
@@ -3122,6 +3148,246 @@
 			this.detailZoom = {from: selected[0].clock, to: selected[selected.length - 1].clock};
 			this.drawDetailChart();
 			e.preventDefault();
+		}
+
+		// ---- pattern-aware "possible path" (display only) --------------------------
+		// Detects a genuinely repeating usage pattern in the daily residuals and,
+		// only when every statistical gate passes, returns a zero-mean cycle
+		// template used to draw a SECOND, purely visual line alongside the
+		// authoritative straight projection. Every computed number — ETAs, dates,
+		// crossing markers, severities — still comes from the linear model alone.
+		projectionPattern(spec, nowSec) {
+			if (spec.__projPattern && spec.__projPattern.nowSec === nowSec) {
+				return spec.__projPattern.result;
+			}
+			const result = this.computeProjectionPattern(spec, nowSec);
+			spec.__projPattern = {nowSec, result};
+			return result;
+		}
+
+		computeProjectionPattern(spec, nowSec) {
+			const series = spec.series;
+			if (!series || series.length < 21 || spec.slope == null || spec.currentValue == null) { return null; }
+			const t0 = series[0].clock;
+			const D = Math.round((series[series.length - 1].clock - t0) / 86400) + 1;
+			if (D < 21 || D > 800) { return null; }
+
+			// Daily grid of average values.
+			const sums = new Array(D).fill(0);
+			const counts = new Array(D).fill(0);
+			const spacings = [];
+			let prevDay = null;
+			series.forEach((p) => {
+				const d = Math.round((p.clock - t0) / 86400);
+				if (d < 0 || d >= D) { return; }
+				sums[d] += p.avg;
+				counts[d]++;
+				if (prevDay != null && d > prevDay) { spacings.push(d - prevDay); }
+				prevDay = d;
+			});
+			const bin = new Array(D).fill(0);
+			const mask = new Array(D).fill(false);
+			let nValid = 0;
+			let dFirst = null;
+			let dLast = null;
+			for (let d = 0; d < D; d++) {
+				if (counts[d] > 0) {
+					bin[d] = sums[d] / counts[d];
+					mask[d] = true;
+					nValid++;
+					if (dFirst == null) { dFirst = d; }
+					dLast = d;
+				}
+			}
+			if (nValid < 21) { return null; }
+			spacings.sort((a, b) => a - b);
+			const medianSpacing = spacings.length ? spacings[Math.floor(spacings.length / 2)] : 1;
+
+			// Residuals against the series' own least-squares line (period
+			// detection is invariant to which linear detrend is used).
+			let sx = 0;
+			let sy = 0;
+			let sxx = 0;
+			let sxy = 0;
+			for (let d = 0; d < D; d++) {
+				if (!mask[d]) { continue; }
+				sx += d; sy += bin[d]; sxx += d * d; sxy += d * bin[d];
+			}
+			const denom = nValid * sxx - sx * sx;
+			const olsSlope = denom !== 0 ? (nValid * sxy - sx * sy) / denom : 0;
+			const olsBase = (sy - olsSlope * sx) / nValid;
+			const resid = new Array(D).fill(0);
+			let residMean = 0;
+			for (let d = 0; d < D; d++) {
+				if (mask[d]) { resid[d] = bin[d] - (olsSlope * d + olsBase); residMean += resid[d]; }
+			}
+			residMean /= nValid;
+			let sigma2 = 0;
+			for (let d = 0; d < D; d++) {
+				if (mask[d]) { resid[d] -= residMean; sigma2 += resid[d] * resid[d]; }
+			}
+			sigma2 /= nValid;
+			if (sigma2 <= 0) { return null; }
+
+			// Masked autocorrelation. Candidate periods need >= 3 observed cycles
+			// (P <= D/3); lags run to 2D/3 so the harmonic check at 2P always has data.
+			const lagMin = Math.max(2, Math.ceil(2 * medianSpacing));
+			const periodMax = Math.floor(D / 3);
+			const lagMax = Math.floor(2 * D / 3);
+			if (periodMax < lagMin) { return null; }
+			const rho = new Array(lagMax + 2).fill(null);
+			for (let lag = lagMin; lag <= lagMax; lag++) {
+				let m = 0;
+				let s = 0;
+				for (let d = 0; d + lag < D; d++) {
+					if (mask[d] && mask[d + lag]) { s += resid[d] * resid[d + lag]; m++; }
+				}
+				if (m >= 12) { rho[lag] = Math.min(1, (s / m) / sigma2); }
+			}
+			let period = null;
+			let bestRho = -Infinity;
+			for (let lag = lagMin; lag <= periodMax; lag++) {
+				if (rho[lag] != null && rho[lag] > bestRho) { bestRho = rho[lag]; period = lag; }
+			}
+			if (period == null) { return null; }
+			// Prefer the fundamental when a divisor explains the signal as well
+			// (e.g. a weekly cadence that also autocorrelates at 14 or 21 days).
+			for (let d = lagMin; d < period; d++) {
+				if (period % d !== 0 || rho[d] == null || rho[d] < 0.9 * rho[period]) { continue; }
+				const dl = rho[d - 1];
+				const dr = rho[d + 1];
+				if ((dl == null || rho[d] > dl) && (dr == null || rho[d] >= dr)) { period = d; break; }
+			}
+			// Significance (3-sigma against the white-noise null, floored at 0.5),
+			// true-peak shape, and mandatory harmonic confirmation at 2P.
+			let pairCount = 0;
+			for (let d = 0; d + period < D; d++) {
+				if (mask[d] && mask[d + period]) { pairCount++; }
+			}
+			if (pairCount < 12 || rho[period] == null
+					|| rho[period] < Math.max(0.5, 3 / Math.sqrt(pairCount))) { return null; }
+			const leftRho = rho[period - 1];
+			const rightRho = rho[period + 1];
+			if ((leftRho != null && rho[period] <= leftRho)
+					|| (rightRho != null && rho[period] < rightRho)) { return null; }
+			if (rho[2 * period] == null || rho[2 * period] < 0.25) { return null; }
+			if (dFirst == null || Math.floor((dLast - dFirst) / period) < 3) { return null; }
+
+			// Amplitude stability over the last 3 complete cycles: each window must
+			// be >= 60% filled and peak-to-trough amplitudes must not vary > 2.5x.
+			const windowStart = dLast - 3 * period + 1;
+			if (windowStart < 0) { return null; }
+			let ampMin = Infinity;
+			let ampMax = -Infinity;
+			for (let c = 0; c < 3; c++) {
+				const start = dLast - (c + 1) * period + 1;
+				let filled = 0;
+				let lo = Infinity;
+				let hi = -Infinity;
+				for (let d = start; d < start + period; d++) {
+					if (d < 0 || !mask[d]) { continue; }
+					filled++;
+					if (resid[d] < lo) { lo = resid[d]; }
+					if (resid[d] > hi) { hi = resid[d]; }
+				}
+				if (filled < 0.6 * period || hi <= lo) { return null; }
+				const amp = hi - lo;
+				if (amp < ampMin) { ampMin = amp; }
+				if (amp > ampMax) { ampMax = amp; }
+			}
+			if (ampMin <= 0 || ampMax / ampMin > 2.5) { return null; }
+
+			// Phase-anchored fold: index 0 is TODAY'S phase, so the forward
+			// repetition continues seamlessly; per-phase medians over the last 3
+			// complete cycles resist single anomalous days.
+			const dNow = Math.round((nowSec - t0) / 86400);
+			const phases = [];
+			for (let k = 0; k < period; k++) { phases.push([]); }
+			for (let d = windowStart; d <= dLast; d++) {
+				if (d < 0 || !mask[d]) { continue; }
+				phases[((d - dNow) % period + period) % period].push(resid[d]);
+			}
+			let empty = 0;
+			const template = new Array(period).fill(null);
+			for (let k = 0; k < period; k++) {
+				if (!phases[k].length) { empty++; continue; }
+				phases[k].sort((a, b) => a - b);
+				const mid = Math.floor(phases[k].length / 2);
+				template[k] = phases[k].length % 2 === 1
+					? phases[k][mid]
+					: (phases[k][mid - 1] + phases[k][mid]) / 2;
+			}
+			if (empty > 0.4 * period) { return null; }
+			// Reject folds with a long contiguous run of empty phases, then fill
+			// the short gaps by circular linear interpolation.
+			const gapLimit = Math.max(2, period / 3);
+			let run = 0;
+			let maxRun = 0;
+			for (let k = 0; k < 2 * period; k++) {
+				if (template[k % period] == null) { run++; if (run > maxRun) { maxRun = run; } }
+				else { run = 0; }
+			}
+			if (maxRun > gapLimit) { return null; }
+			for (let k = 0; k < period; k++) {
+				if (template[k] != null) { continue; }
+				let back = 1;
+				while (template[(k - back + period * 2) % period] == null) { back++; }
+				let fwd = 1;
+				while (template[(k + fwd) % period] == null) { fwd++; }
+				const prev = template[(k - back + period * 2) % period];
+				const next = template[(k + fwd) % period];
+				template[k] = prev + (next - prev) * back / (back + fwd);
+			}
+			// One circular 3-point smoothing pass, then exact zero-mean (last step).
+			const smoothed = new Array(period);
+			for (let k = 0; k < period; k++) {
+				smoothed[k] = (template[(k - 1 + period) % period] + template[k]
+					+ template[(k + 1) % period]) / 3;
+			}
+			let mean = 0;
+			for (let k = 0; k < period; k++) { mean += smoothed[k]; }
+			mean /= period;
+			for (let k = 0; k < period; k++) { smoothed[k] -= mean; }
+
+			// The recurring shape must explain a meaningful share of the residual
+			// variance — this is what separates a real sawtooth from noise.
+			let explained = 0;
+			for (let d = 0; d < D; d++) {
+				if (!mask[d]) { continue; }
+				const v = smoothed[((d - dNow) % period + period) % period];
+				explained += v * v;
+			}
+			if (explained / nValid < 0.35 * sigma2) { return null; }
+
+			let tplMin = Infinity;
+			let tplMax = -Infinity;
+			for (let k = 0; k < period; k++) {
+				if (smoothed[k] < tplMin) { tplMin = smoothed[k]; }
+				if (smoothed[k] > tplMax) { tplMax = smoothed[k]; }
+			}
+			if (tplMax - tplMin <= 0) { return null; }
+
+			return {period, template: smoothed, app: tplMax - tplMin};
+		}
+
+		// Pattern value at dDays >= 0 after "today": circularly interpolated
+		// template, amplitude constant for the first two projected cycles then
+		// damped per whole cycle (each full drawn cycle stays exactly zero-mean
+		// around the trend), plus a short cubic seam so the drawn path starts
+		// exactly at the anchor point (nowSec, currentValue).
+		projectionPatternValue(pat, dDays) {
+			const period = pat.period;
+			const phi = ((dDays % period) + period) % period;
+			const idx = Math.floor(phi);
+			const frac = phi - idx;
+			const base = pat.template[idx % period] * (1 - frac) + pat.template[(idx + 1) % period] * frac;
+			const cycle = Math.floor(dDays / period);
+			const amp = cycle <= 1 ? 1 : Math.max(0.35, Math.exp(-(cycle - 2) / 4));
+			const seamSpan = Math.min(period, 21);
+			const seam = dDays < seamSpan
+				? -pat.template[0] * Math.pow(1 - dDays / seamSpan, 3)
+				: 0;
+			return amp * base + seam;
 		}
 
 		buildUsageSvg(spec, palette, interactive) {
@@ -3220,8 +3486,29 @@
 				svg += `<text x="${tx + 4}" y="${margin.top + 12}" font-size="10" fill="${palette.axisText}">today</text>`;
 			}
 
-			// Projection.
+			// Projection. The straight dashed line stays the authoritative model
+			// (ETAs and crossing markers are computed from it); when history shows
+			// a statistically confirmed repeating pattern, a second fainter line
+			// additionally shows the possible path with that rhythm laid on top.
+			let patternDrawn = false;
 			if (projected) {
+				const pat = this.projectionPattern(spec, nowSec);
+				// Draw-time visibility floor: below ~3px peak-to-peak the pattern
+				// would read as rendering noise rather than information.
+				if (pat && pat.app / vMax * plotHeight >= 3) {
+					const points = [];
+					const lastWholeDay = Math.max(0, Math.floor((projT - nowSec) / 86400));
+					for (let k = 0; k <= lastWholeDay; k++) {
+						const t = nowSec + k * 86400;
+						points.push(`${x(t)},${y(spec.currentValue + spec.slope * k + this.projectionPatternValue(pat, k))}`);
+					}
+					if (projT > nowSec + lastWholeDay * 86400) {
+						const dDays = (projT - nowSec) / 86400;
+						points.push(`${x(projT)},${y(spec.currentValue + spec.slope * dDays + this.projectionPatternValue(pat, dDays))}`);
+					}
+					svg += `<polyline points="${points.join(' ')}" fill="none" stroke="${palette.projection}" stroke-width="1.6" stroke-dasharray="2 4" opacity="0.65" stroke-linejoin="round" stroke-linecap="round" />`;
+					patternDrawn = true;
+				}
 				svg += `<line x1="${x(nowSec)}" y1="${y(spec.currentValue)}" x2="${x(projT)}" y2="${y(projEnd)}" stroke="${palette.projection}" stroke-width="2.2" stroke-dasharray="6 5" stroke-linecap="round" />`;
 				svg += `<circle cx="${x(nowSec)}" cy="${y(spec.currentValue)}" r="3.5" fill="${palette.projection}" />`;
 			}
@@ -3245,7 +3532,7 @@
 			return {
 				svg,
 				geom: {margin, plotWidth, plotHeight, tMin, span, vbWidth: width, vbHeight: height,
-					series, spec, nowSec, projEnd, tMax}
+					series, spec, nowSec, projEnd, tMax, patternDrawn}
 			};
 		}
 
@@ -3359,7 +3646,7 @@
 					fc ? fc.pct_source || '' : '', fc ? fc.pct_confidence || '' : '',
 					fc && fc.pct_sel ? (fc.pct_series_direct ? 'Yes' : 'No') : '',
 					fc ? fc.confidence || '' : '',
-					fc && fc.accelerating ? 'Yes' : 'No',
+					fc && (fc.accelerating || fc.pct_accelerating) ? 'Yes' : 'No',
 					fc && fc.eta && fc.eta.warn_days != null ? fc.eta.warn_days : '',
 					fc && fc.eta && fc.eta.warn_date ? this.fmtIsoDate(fc.eta.warn_date) : '',
 					fc && fc.eta ? fc.eta.warn_basis || '' : '',
@@ -3778,8 +4065,7 @@
 		}
 
 		escapeHtml(value) {
-			return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-				.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+			return String(value).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
 		}
 	}
 })();

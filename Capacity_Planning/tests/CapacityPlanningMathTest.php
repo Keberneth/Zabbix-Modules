@@ -70,6 +70,12 @@ final class CapacityPlanningMathTest {
 		$this->testLowConfidencePercentageDoesNotCapByteRisk();
 		$this->testInvalidDirectPercentageFallsBackToDerived();
 		$this->testUnqualifiedDirectPercentageFallsBackToDerived();
+		$this->testDirectPercentageAccelerationRestoresEtaOrdering();
+		$this->testSteadyDirectPercentageIgnoresByteAcceleration();
+		$this->testDivergenceNoteDisclosesCrossModelDisagreement();
+		$this->testSparseNoisyRecentWindowCannotVetoConfidence();
+		$this->testSmallFilesystemGrowthIsForecast();
+		$this->testLargeDiskNoiseSlopeNullsBothModels();
 		$this->testFreshResourceAlternativesBeatStalePreferredItems();
 		$this->testFreshFilesystemCompositionBeatsStaleCompleteness();
 		$this->testStaleOptionalLinuxMetricsDoNotMakeFilesystemStale();
@@ -730,6 +736,212 @@ final class CapacityPlanningMathTest {
 			'Sparse direct pused history should fall back to the qualified byte slope.');
 		$this->assertTrue(strpos((string) $result['note'], 'did not meet') !== false,
 			'The report must disclose why direct pused history was not used.');
+	}
+
+	private function testDirectPercentageAccelerationRestoresEtaOrdering(): void {
+		// Fixed 1 TB capacity: 60 slow days (+1 GB/day) then 31 accelerated days
+		// (+10 GB/day), with an exactly consistent direct pused series. The
+		// percentage model must accelerate with its own recent window so the
+		// critical ETA can never land after the projected full date.
+		$now = 2000000000;
+		$byte_rows = [];
+		$pct_rows = [];
+		for ($hour = 0; $hour < 91 * 24; $hour++) {
+			$t = $hour / 24;
+			$clock = $now - 91 * 86400 + $hour * 3600;
+			$used = 500000000000.0 + min($t, 60.0) * 1000000000.0
+				+ max(0.0, $t - 60.0) * 10000000000.0;
+			$byte_rows[] = $this->hourlyRow($clock, $used);
+			$pct_rows[] = $this->hourlyRow($clock, $used / 10000000000.0);
+		}
+		$spec = [
+			'id' => 'd0', 'used' => 870000000000.0, 'free' => 130000000000.0,
+			'pused' => 87.0, 'total' => 1000000000000.0,
+			'warn_pct' => 90.0, 'crit_pct' => 95.0, 'warn_free' => 0.0, 'crit_free' => 0.0,
+			'os' => 'Linux', 'fs_kind' => 'Local', 'ok' => true
+		];
+		$result = $this->call('forecastDisk', [
+			$spec, $byte_rows, 'trends', $now, null, $pct_rows, 'trends', null
+		]);
+		$this->assertTrue($result['pct_series_direct'],
+			'The consistent direct pused history should remain the percentage source.');
+		$this->assertTrue($result['pct_accelerating'],
+			'The direct percentage model must apply the acceleration override to its own recent window.');
+		$this->assertSame('1m', $result['pct_sel'],
+			'The accelerated percentage model should select the one-month window.');
+		$this->assertTrue(strpos((string) $result['pct_sel_label'], 'acceleration override') !== false,
+			'The percentage window label must disclose the acceleration override.');
+		$this->assertAlmost(1.0, (float) $result['growth_pct_day'], 0.02,
+			'Percentage growth should reflect the accelerated recent slope.');
+		$this->assertAlmost(8.0, (float) $result['eta']['crit_days'], 0.4,
+			'Critical ETA should use the accelerated percentage slope.');
+		$this->assertAlmost(13.0, (float) $result['eta']['full_days'], 0.7,
+			'Full ETA should use the accelerated byte slope.');
+		$this->assertTrue($result['eta']['crit_days'] <= $result['eta']['full_days'],
+			'On a fixed-capacity filesystem critical must not be reported after full.');
+	}
+
+	private function testSteadyDirectPercentageIgnoresByteAcceleration(): void {
+		// Autogrow shape: bytes accelerate while measured pused rises steadily
+		// (capacity grew). The direct percentage model must keep its own long
+		// window; byte acceleration must never leak into a direct pused series.
+		$now = 2000000000;
+		$byte_rows = [];
+		$pct_rows = [];
+		for ($hour = 0; $hour < 91 * 24; $hour++) {
+			$t = $hour / 24;
+			$clock = $now - 91 * 86400 + $hour * 3600;
+			$byte_rows[] = $this->hourlyRow($clock, 500000000000.0 + min($t, 60.0) * 1000000000.0
+				+ max(0.0, $t - 60.0) * 10000000000.0);
+			$pct_rows[] = $this->hourlyRow($clock, 64.0 + $t * 0.25);
+		}
+		$spec = [
+			'id' => 'd0', 'used' => 870000000000.0, 'free' => 130000000000.0,
+			'pused' => 87.0, 'total' => 1000000000000.0,
+			'warn_pct' => 90.0, 'crit_pct' => 95.0, 'warn_free' => 0.0, 'crit_free' => 0.0,
+			'os' => 'Linux', 'fs_kind' => 'Local', 'ok' => true
+		];
+		$result = $this->call('forecastDisk', [
+			$spec, $byte_rows, 'trends', $now, null, $pct_rows, 'trends', null
+		]);
+		$this->assertTrue($result['pct_series_direct'],
+			'The steady direct pused history should remain the percentage source.');
+		$this->assertSame(false, $result['pct_accelerating'],
+			'A steady direct percentage series must not inherit byte acceleration.');
+		$this->assertTrue($result['pct_sel'] !== '1m',
+			'The steady percentage model should keep its long window.');
+		$this->assertAlmost(0.25, (float) $result['growth_pct_day'], 0.005,
+			'Percentage growth should stay on the steady direct slope.');
+	}
+
+	private function testDivergenceNoteDisclosesCrossModelDisagreement(): void {
+		$now = 2000000000;
+		$byte_rows = [];
+		$slow_pct_rows = [];
+		for ($hour = 0; $hour < 70 * 24; $hour++) {
+			$day = $hour / 24;
+			$clock = $now - 70 * 86400 + $hour * 3600;
+			$byte_rows[] = $this->hourlyRow($clock, 250000000000.0 + $day * 10000000000.0);
+			$slow_pct_rows[] = $this->hourlyRow($clock, 63.0 + $day * 0.1);
+		}
+		$spec = [
+			'id' => 'd0', 'used' => 950000000000.0, 'free' => 50000000000.0,
+			'pused' => 70.0, 'total' => 1000000000000.0,
+			'warn_pct' => 90.0, 'crit_pct' => 95.0, 'warn_free' => 0.0, 'crit_free' => 0.0,
+			'os' => 'Linux', 'fs_kind' => 'Local', 'ok' => true
+		];
+		$divergent = $this->call('forecastDisk', [
+			$spec, $byte_rows, 'trends', $now, null, $slow_pct_rows, 'trends', null
+		]);
+		$this->assertTrue($divergent['eta']['crit_days'] > $divergent['eta']['full_days'],
+			'This scenario must exercise a threshold ETA later than the full date.');
+		$this->assertTrue(strpos((string) $divergent['note'], 'disagree') !== false,
+			'A threshold ETA later than the full date must be disclosed as cross-model divergence.');
+
+		// Consistent control: both models describe the same growth and the
+		// current snapshot matches the series endpoint, so no note may appear.
+		$matched_pct_rows = [];
+		foreach ($byte_rows as $row) {
+			$matched_pct_rows[] = $this->hourlyRow($row['clock'], $row['avg'] / 10000000000.0);
+		}
+		$consistent_spec = array_replace($spec, [
+			'used' => 930000000000.0, 'free' => 70000000000.0, 'pused' => 93.0
+		]);
+		$consistent = $this->call('forecastDisk', [
+			$consistent_spec, $byte_rows, 'trends', $now, null, $matched_pct_rows, 'trends', null
+		]);
+		$this->assertTrue($consistent['eta']['crit_days'] <= $consistent['eta']['full_days'],
+			'The control scenario must be internally consistent.');
+		$this->assertTrue(strpos((string) $consistent['note'], 'disagree') === false,
+			'Consistent single-story forecasts must not carry the divergence note.');
+	}
+
+	private function testSparseNoisyRecentWindowCannotVetoConfidence(): void {
+		$now = 2000000000;
+		// 66 dense rising days ending 26 days ago, then 4 isolated low samples:
+		// a slope through sparse noise is not evidence of a trend reversal.
+		$rows = [];
+		for ($hour = 0; $hour < 66 * 24; $hour++) {
+			$rows[] = $this->hourlyRow($now - 92 * 86400 + $hour * 3600,
+				100000000000.0 + ($hour / 24) * 10000000000.0);
+		}
+		foreach ([[20, 600.0], [15, 590.0], [10, 580.0], [2, 570.0]] as [$days_ago, $gb]) {
+			$rows[] = $this->hourlyRow($now - $days_ago * 86400, $gb * 1000000000.0);
+		}
+		$windows = $this->call('summarizeWindows', [$rows, $now, null, null]);
+		$this->assertTrue($windows['1m']['cov'] < 45.0,
+			'The recent window must be genuinely sparse for this scenario.');
+		$this->assertSame('High', $this->call('forecastConfidence', [$windows['3m'], $windows]),
+			'A sparse noisy recent window must not veto a dense well-fitted long model down to Low.');
+
+		// Control: a dense recent reversal is real evidence and must still veto.
+		$dense = [];
+		for ($hour = 0; $hour < 60 * 24; $hour++) {
+			$dense[] = $this->hourlyRow($now - 92 * 86400 + $hour * 3600,
+				100000000000.0 + ($hour / 24) * 10000000000.0);
+		}
+		for ($hour = 0; $hour < 22 * 24; $hour++) {
+			$dense[] = $this->hourlyRow($now - 22 * 86400 + $hour * 3600,
+				700000000000.0 - ($hour / 24) * 5000000000.0);
+		}
+		$dense_windows = $this->call('summarizeWindows', [$dense, $now, null, null]);
+		$this->assertTrue($dense_windows['1m']['days'] >= 14 && $dense_windows['1m']['cov'] >= 45.0,
+			'The control reversal must carry enough recent evidence to qualify for the veto.');
+		$this->assertSame('Low', $this->call('forecastConfidence', [$dense_windows['3m'], $dense_windows]),
+			'A dense recent reversal must still demote confidence.');
+	}
+
+	private function testSmallFilesystemGrowthIsForecast(): void {
+		// 0.5 MiB/day on a 200 MiB volume is a confident fill trend (~100 days),
+		// far above capacity-relative noise, and must not be discarded by an
+		// absolute 1 MiB/day floor sized for large disks.
+		$now = 2000000000;
+		$rows = [];
+		for ($hour = 0; $hour < 70 * 24; $hour++) {
+			$rows[] = $this->hourlyRow($now - 70 * 86400 + $hour * 3600,
+				120586240.0 + ($hour / 24) * 524288.0);
+		}
+		$spec = [
+			'id' => 'd0', 'used' => 157286400.0, 'free' => 52428800.0, 'pused' => 75.0,
+			'total' => 209715200.0,
+			'warn_pct' => 90.0, 'crit_pct' => 95.0, 'warn_free' => 0.0, 'crit_free' => 0.0,
+			'os' => 'Linux', 'fs_kind' => 'Local', 'ok' => true
+		];
+		$result = $this->call('forecastDisk', [$spec, $rows, 'trends', $now, null]);
+		$this->assertTrue($result['growth_day'] !== null,
+			'Real growth on a small filesystem must produce a byte model.');
+		$this->assertAlmost(524288.0, (float) $result['growth_day'], 26214.0,
+			'The small-filesystem slope should be about 0.5 MiB/day.');
+		$this->assertAlmost(100.0, (float) $result['eta']['full_days'], 5.0,
+			'The small filesystem should be projected full in about 100 days.');
+		$this->assertTrue($result['eta']['crit_days'] !== null
+			&& $result['eta']['crit_days'] <= $result['eta']['full_days'],
+			'Threshold ETAs must exist and precede the full date.');
+	}
+
+	private function testLargeDiskNoiseSlopeNullsBothModels(): void {
+		// 0.5 MiB/day on a 5 TB volume is noise. Both the byte model and the
+		// derived percentage model must agree on "no meaningful growth" instead
+		// of printing threshold dates next to "Full: never".
+		$now = 2000000000;
+		$rows = [];
+		for ($hour = 0; $hour < 70 * 24; $hour++) {
+			$rows[] = $this->hourlyRow($now - 70 * 86400 + $hour * 3600,
+				3999963300000.0 + ($hour / 24) * 524288.0);
+		}
+		$spec = [
+			'id' => 'd0', 'used' => 4000000000000.0, 'free' => 1000000000000.0, 'pused' => 80.0,
+			'total' => 5000000000000.0,
+			'warn_pct' => 90.0, 'crit_pct' => 95.0, 'warn_free' => 0.0, 'crit_free' => 0.0,
+			'os' => 'Linux', 'fs_kind' => 'Local', 'ok' => true
+		];
+		$result = $this->call('forecastDisk', [$spec, $rows, 'trends', $now, null]);
+		$this->assertSame(null, $result['growth_day'],
+			'A noise-level byte slope on a large disk must be discarded.');
+		$this->assertSame(null, $result['growth_pct_day'],
+			'The derived percentage model must agree that noise-level growth is no growth.');
+		$this->assertSame(null, $result['eta']['crit_days'],
+			'No threshold date may be printed from a noise-level slope.');
 	}
 
 	private function testFreshResourceAlternativesBeatStalePreferredItems(): void {

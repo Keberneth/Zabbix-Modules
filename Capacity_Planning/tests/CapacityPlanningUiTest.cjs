@@ -1157,6 +1157,90 @@ async function run() {
 			&& document.activeElement.getClientRects().length > 0),
 			'Closing a memory top-risk modal should restore focus to the RAM row.');
 
+		// ---- pattern-aware "possible path" line ---------------------------------
+		// The projection chart may add a second display-only line only when the
+		// history shows a statistically confirmed repeating pattern; a linear
+		// history must keep exactly the single straight projection line.
+		const patternPage = await browser.newPage({viewport: {width: 1280, height: 760}});
+		patternPage.on('pageerror', (error) => browserErrors.push(`pattern: ${error.message}`));
+		patternPage.on('console', (message) => {
+			if (message.type() === 'error') { browserErrors.push(`pattern: ${message.text()}`); }
+		});
+		const patternData = fixture();
+		const patternLastClock = patternData.forecast.series[patternData.forecast.series.length - 1][0];
+		patternData.inventory.disks = [{
+			...patternData.inventory.disks[0],
+			hostid: '3', host: 'dev01', status: 'OK', expected_gap: false,
+			current_observation_usable: true, current_reasons: [],
+			maintenance: {active: false, type: 'none', id: null, since: null},
+			used: 940, free: 60, pused: 94, usable: 1000, total: 1000
+		}];
+		patternData.inventory.resources = [];
+		patternData.forecast.growth_pct_day = 0.05;
+		await patternPage.addInitScript((payload) => {
+			window.__capacityFixture = payload;
+			window.fetch = async (_url, options = {}) => {
+				const params = new URLSearchParams(options.body || '');
+				const mode = params.get('mode') || '';
+				let body;
+				if (mode === 'inventory') { body = window.__capacityFixture.inventory; }
+				else if (mode === 'forecast') { body = {forecasts: [window.__capacityFixture.forecast]}; }
+				else { body = {groupids: [], hostids: [], empty: false}; }
+				return new Response(JSON.stringify(body), {status: 200, headers: {'Content-Type': 'application/json'}});
+			};
+		}, patternData);
+		await patternPage.route('http://pattern.test/**', (route) => route.fulfill({
+			status: 200, contentType: 'text/html', body: '<!doctype html><html><body><main id="capacity-planning-root" data-data-url="/fake" data-csrf-name="csrf_key" data-data-csrf-token="data-token-123" data-initial-lookback="" data-initial-tab="disks"></main></body></html>'
+		}));
+		await patternPage.goto('http://pattern.test/zabbix.php?action=capacity.planning.view&tab=disks');
+		await patternPage.addStyleTag({path: cssAsset});
+		await patternPage.addScriptTag({path: jsAsset});
+		await patternPage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
+		await patternPage.waitForSelector('[data-table="disks"] tbody tr[data-id="d0"]');
+		await patternPage.waitForFunction(() => document.querySelector('[data-role="loading"]').hidden);
+		await patternPage.locator('[data-table="disks"] tbody tr[data-id="d0"]').click();
+		await patternPage.waitForSelector('[data-role="detail-modal"].is-open');
+		const patternChart = patternPage.locator('[data-role="detail-surface"] svg');
+		await patternChart.waitFor();
+		ok(await patternChart.evaluate((svg) => !!svg.querySelector('line[stroke-dasharray="6 5"]')),
+			'A projected linear history should draw the straight projection line.');
+		ok(await patternChart.evaluate((svg) => !svg.querySelector('polyline[stroke-dasharray="2 4"]')),
+			'A linear history must not grow a fabricated pattern line.');
+		ok(!(await patternPage.locator('[data-role="detail-legend"]').textContent()).includes('Possible path'),
+			'The possible-path legend entry requires a confirmed pattern.');
+		await patternPage.keyboard.press('Escape');
+		await patternPage.waitForFunction(() => !document.querySelector('[data-role="detail-modal"]').classList.contains('is-open'));
+
+		// Swap in a weekly cleanup sawtooth and reload: the pattern line and its
+		// legend entry must appear, starting exactly at the projection anchor.
+		await patternPage.evaluate((lastClock) => {
+			const saw = [];
+			for (let day = 60; day >= 0; day--) {
+				const average = 760 + (60 - day) * 3 + (((60 - day) % 7) / 7 - 0.5) * 60;
+				saw.push([lastClock - day * 86400, average - 12, average, average + 12]);
+			}
+			window.__capacityFixture.forecast.series = saw;
+		}, patternLastClock);
+		await patternPage.locator('[data-role="reload"]').click();
+		await patternPage.waitForFunction(() => document.querySelector('[data-role="loading"]').hidden);
+		await patternPage.locator('[data-table="disks"] tbody tr[data-id="d0"]').click();
+		await patternPage.waitForSelector('[data-role="detail-modal"].is-open');
+		await patternChart.waitFor();
+		ok(await patternChart.evaluate((svg) => !!svg.querySelector('line[stroke-dasharray="6 5"]')),
+			'The straight projection stays authoritative when a pattern is drawn.');
+		ok(await patternChart.evaluate((svg) => !!svg.querySelector('polyline[stroke-dasharray="2 4"]')),
+			'A confirmed weekly sawtooth should add the display-only possible-path line.');
+		ok((await patternPage.locator('[data-role="detail-legend"]').textContent()).includes('Possible path (history pattern)'),
+			'The pattern line should be labelled in the legend.');
+		ok(await patternChart.evaluate((svg) => {
+			const line = svg.querySelector('polyline[stroke-dasharray="2 4"]');
+			const anchor = svg.querySelector('circle[r="3.5"]');
+			const first = line.getAttribute('points').trim().split(' ')[0].split(',').map(Number);
+			return Math.abs(first[0] - Number(anchor.getAttribute('cx'))) < 1
+				&& Math.abs(first[1] - Number(anchor.getAttribute('cy'))) < 1;
+		}), 'The possible-path line must start exactly at the projection anchor.');
+		await patternPage.close();
+
 		await page.locator('[data-role="custom-lookback-toggle"]').click();
 		await page.locator('#cap-custom-lookback-days').fill('45');
 		await page.locator('[data-role="apply-custom-lookback"]').click();

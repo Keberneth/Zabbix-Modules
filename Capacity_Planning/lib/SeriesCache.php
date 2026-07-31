@@ -48,6 +48,8 @@ final class SeriesCache {
 	private const USAGE_LEDGER_SCHEMA = 2;
 	private const ALLOWED_KINDS = ['trend', 'history', 'recent_history', 'history_fallback'];
 
+	private static ?bool $gzdecode_available = null;
+
 	private array $settings;
 	private string $base_dir = '';
 	private string $install_root = '';
@@ -128,7 +130,7 @@ final class SeriesCache {
 			(string) self::CACHE_SCHEMA, self::MODULE_GENERATION, $itemid, (string) $valueType, $seriesKind
 		]));
 		$segments = $this->calendarSegments($seriesKind, $from, $to);
-		$all_rows = [];
+		$chunks = [];
 		$hits = 0;
 		$misses = 0;
 		$writes = 0;
@@ -161,9 +163,7 @@ final class SeriesCache {
 				}
 			}
 			catch (SeriesRangeIncompleteException $e) {
-				foreach ($this->normalizeRows($e->rows(), $seriesKind, $segment['from'], $segment['to']) as $row) {
-					$all_rows[] = $row;
-				}
+				$chunks[] = $this->normalizeRows($e->rows(), $seriesKind, $segment['from'], $segment['to']);
 				$misses++;
 				$range_incomplete = true;
 				$incomplete_reason = $e->reason();
@@ -189,11 +189,9 @@ final class SeriesCache {
 					];
 				}
 				catch (SeriesRangeIncompleteException $incomplete) {
-					foreach ($this->normalizeRows(
+					$chunks[] = $this->normalizeRows(
 						$incomplete->rows(), $seriesKind, $segment['from'], $segment['to']
-					) as $row) {
-						$all_rows[] = $row;
-					}
+					);
 					$misses++;
 					$range_incomplete = true;
 					$incomplete_reason = $incomplete->reason();
@@ -201,9 +199,7 @@ final class SeriesCache {
 					break;
 				}
 			}
-			foreach ($result['rows'] as $row) {
-				$all_rows[] = $row;
-			}
+			$chunks[] = $result['rows'];
 			$hits += $result['hit'] ? 1 : 0;
 			$misses += $result['miss'] ? 1 : 0;
 			$writes += $result['written'] ? 1 : 0;
@@ -213,6 +209,13 @@ final class SeriesCache {
 			}
 		}
 
+		// Segments are disjoint and each chunk internally sorted, so chronological
+		// concatenation (raw history shards were processed newest-first) is already
+		// globally ordered; deduplicateAndSort stays as an O(n) verification pass.
+		if ($seriesKind !== 'trend') {
+			$chunks = array_reverse($chunks);
+		}
+		$all_rows = $chunks === [] ? [] : array_merge(...$chunks);
 		$all_rows = $this->deduplicateAndSort($all_rows, $seriesKind);
 
 		$result = [
@@ -581,7 +584,14 @@ final class SeriesCache {
 	}
 
 	private function normalizeRows(array $rows, string $series_kind, int $from, int $to): array {
+		$is_trend = $series_kind === 'trend';
 		$normalized = [];
+		// Rows that leave this loop already strictly ordered by (clock[, ns]) are
+		// provably duplicate-free, so the dedup+sort pass would be an identity
+		// transform and can be skipped. Any other input takes the full path.
+		$needs_sort = false;
+		$prev_clock = null;
+		$prev_ns = 0;
 		foreach ($rows as $row) {
 			if (!is_array($row) || !isset($row['clock']) || !is_numeric($row['clock'])) {
 				continue;
@@ -591,11 +601,17 @@ final class SeriesCache {
 				continue;
 			}
 
-			if ($series_kind === 'trend') {
-				$min = $this->finiteNumber($row['value_min'] ?? $row['min'] ?? null);
-				$avg = $this->finiteNumber($row['value_avg'] ?? $row['avg'] ?? null);
-				$max = $this->finiteNumber($row['value_max'] ?? $row['max'] ?? null);
-				if ($min === null || $avg === null || $max === null) {
+			if ($is_trend) {
+				$min = $row['value_min'] ?? $row['min'] ?? null;
+				if (!is_numeric($min) || !is_finite($min = (float) $min)) {
+					continue;
+				}
+				$avg = $row['value_avg'] ?? $row['avg'] ?? null;
+				if (!is_numeric($avg) || !is_finite($avg = (float) $avg)) {
+					continue;
+				}
+				$max = $row['value_max'] ?? $row['max'] ?? null;
+				if (!is_numeric($max) || !is_finite($max = (float) $max)) {
 					continue;
 				}
 				$normalized[] = [
@@ -605,50 +621,153 @@ final class SeriesCache {
 					'value_avg' => $avg,
 					'value_max' => $max
 				];
+				if ($prev_clock !== null && $clock <= $prev_clock) {
+					$needs_sort = true;
+				}
+				$prev_clock = $clock;
 			}
 			else {
-				$value = $this->finiteNumber($row['value'] ?? null);
-				if ($value === null) {
+				$value = $row['value'] ?? null;
+				if (!is_numeric($value) || !is_finite($value = (float) $value)) {
 					continue;
 				}
+				$ns = max(0, (int) ($row['ns'] ?? 0));
 				$normalized[] = [
 					'clock' => $clock,
-					'ns' => max(0, (int) ($row['ns'] ?? 0)),
+					'ns' => $ns,
 					'value' => $value
 				];
+				if ($prev_clock !== null
+						&& ($clock < $prev_clock || ($clock === $prev_clock && $ns <= $prev_ns))) {
+					$needs_sort = true;
+				}
+				$prev_clock = $clock;
+				$prev_ns = $ns;
 			}
 		}
 
-		return $this->deduplicateAndSort($normalized, $series_kind);
+		return $needs_sort ? $this->deduplicateAndSort($normalized, $series_kind) : $normalized;
 	}
 
 	private function replaceRange(array $old_rows, array $new_rows, int $from, int $to,
 			string $series_kind): array {
-		$kept = array_values(array_filter($old_rows,
-			static fn (array $row): bool => (int) $row['clock'] < $from || (int) $row['clock'] > $to));
+		// $old_rows is sorted ascending by clock, so the kept rows (clock < $from
+		// or clock > $to) are exactly a contiguous prefix plus suffix. $new_rows is
+		// clipped to [$from, $to], so no key can collide across the three parts;
+		// deduplicateAndSort stays as the verification backstop.
+		$count = count($old_rows);
+		$lo = 0;
+		$hi = $count;
+		while ($lo < $hi) {
+			$mid = ($lo + $hi) >> 1;
+			if ((int) $old_rows[$mid]['clock'] < $from) {
+				$lo = $mid + 1;
+			}
+			else {
+				$hi = $mid;
+			}
+		}
+		$head_length = $lo;
+		$hi = $count;
+		while ($lo < $hi) {
+			$mid = ($lo + $hi) >> 1;
+			if ((int) $old_rows[$mid]['clock'] <= $to) {
+				$lo = $mid + 1;
+			}
+			else {
+				$hi = $mid;
+			}
+		}
 
-		return $this->deduplicateAndSort(array_merge($kept, $new_rows), $series_kind);
+		return $this->deduplicateAndSort(array_merge(
+			array_slice($old_rows, 0, $head_length),
+			$new_rows,
+			array_slice($old_rows, $lo)
+		), $series_kind);
 	}
 
 	private function deduplicateAndSort(array $rows, string $series_kind): array {
+		$is_trend = $series_kind === 'trend';
+
+		// Fast path: strictly increasing (clock[, ns]) keys prove the list is
+		// already sorted and duplicate-free, so dedup+sort would be an identity
+		// transform. Every legitimately cached shard satisfies this.
+		$sorted = true;
+		$prev_clock = null;
+		$prev_ns = 0;
+		foreach ($rows as $row) {
+			$clock = (int) $row['clock'];
+			$ns = $is_trend ? 0 : (int) ($row['ns'] ?? 0);
+			if ($prev_clock !== null
+					&& ($clock < $prev_clock || ($clock === $prev_clock && ($is_trend || $ns <= $prev_ns)))) {
+				$sorted = false;
+				break;
+			}
+			$prev_clock = $clock;
+			$prev_ns = $ns;
+		}
+		if ($sorted) {
+			return array_values($rows);
+		}
+
 		$indexed = [];
 		foreach ($rows as $row) {
 			$key = (string) $row['clock'];
-			if ($series_kind !== 'trend') {
+			if (!$is_trend) {
 				$key .= ':'.(string) ($row['ns'] ?? 0);
 			}
 			$indexed[$key] = $row;
 		}
 		$rows = array_values($indexed);
-		usort($rows, static fn (array $a, array $b): int =>
-			((int) $a['clock'] <=> (int) $b['clock']) ?: ((int) ($a['ns'] ?? 0) <=> (int) ($b['ns'] ?? 0)));
+		// Callback-free sort. The index column keeps the order deterministic and
+		// identical to a stable usort even if two rows ever tied on all keys.
+		$clocks = [];
+		$nss = [];
+		foreach ($rows as $row) {
+			$clocks[] = (int) $row['clock'];
+			$nss[] = $is_trend ? 0 : (int) ($row['ns'] ?? 0);
+		}
+		$order = range(0, count($rows) - 1);
+		array_multisort($clocks, SORT_ASC, SORT_NUMERIC, $nss, SORT_ASC, SORT_NUMERIC,
+			$order, SORT_ASC, SORT_NUMERIC, $rows);
 
 		return $rows;
 	}
 
+	/** Rows are sorted ascending by clock at every call site, so the in-range
+	 * rows form one contiguous run that binary search can locate directly. */
 	private function rowsInRange(array $rows, int $from, int $to): array {
-		return array_values(array_filter($rows,
-			static fn (array $row): bool => (int) $row['clock'] >= $from && (int) $row['clock'] <= $to));
+		if ($rows === []) {
+			return [];
+		}
+		$count = count($rows);
+		if ((int) $rows[0]['clock'] >= $from && (int) $rows[$count - 1]['clock'] <= $to) {
+			return $rows;
+		}
+		$lo = 0;
+		$hi = $count;
+		while ($lo < $hi) {
+			$mid = ($lo + $hi) >> 1;
+			if ((int) $rows[$mid]['clock'] < $from) {
+				$lo = $mid + 1;
+			}
+			else {
+				$hi = $mid;
+			}
+		}
+		$start = $lo;
+		$hi = $count;
+		while ($lo < $hi) {
+			$mid = ($lo + $hi) >> 1;
+			if ((int) $rows[$mid]['clock'] <= $to) {
+				$lo = $mid + 1;
+			}
+			else {
+				$hi = $mid;
+			}
+		}
+
+		return $start >= $lo ? [] : array_slice($rows, $start, $lo - $start);
 	}
 
 	private function calendarSegments(string $series_kind, int $from, int $to): array {
@@ -719,7 +838,8 @@ final class SeriesCache {
 		if ($encoded === false) {
 			return $empty;
 		}
-		$json = function_exists('gzdecode') ? @gzdecode($encoded, self::MAX_INFLATED_BYTES + 1) : false;
+		self::$gzdecode_available ??= function_exists('gzdecode');
+		$json = self::$gzdecode_available ? @gzdecode($encoded, self::MAX_INFLATED_BYTES + 1) : false;
 		if ($json === false || strlen($json) > self::MAX_INFLATED_BYTES) {
 			return $empty;
 		}
@@ -1312,15 +1432,6 @@ final class SeriesCache {
 				|| $to > time() + self::MAX_FUTURE_SKEW_SECONDS) {
 			throw new InvalidArgumentException('Invalid series range.');
 		}
-	}
-
-	private function finiteNumber($value): ?float {
-		if (!is_numeric($value)) {
-			return null;
-		}
-		$value = (float) $value;
-
-		return is_finite($value) ? $value : null;
 	}
 
 	private function resultMeta(array $extra): array {
