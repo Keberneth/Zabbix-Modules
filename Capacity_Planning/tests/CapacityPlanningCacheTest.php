@@ -28,6 +28,8 @@ final class CapacityPlanningCacheTest {
 		$this->testDisabledCacheUsesSanitizedLiveRows();
 		$this->testIncompleteRangeIsTruthfulAndSanitized();
 		$this->testFutureRangeRejectedAndRefreshTailBounded();
+		$this->testFreshnessBoundsTheUncoveredTail();
+		$this->testCapacityEvictionStartsBeforeTheHardCap();
 		$this->testWebRootOverlapPredicate();
 		$this->testCalendarOrderAndPublicStatus();
 		$this->testCalendarSegmentsCrossYear();
@@ -217,6 +219,82 @@ final class CapacityPlanningCacheTest {
 		);
 		$this->same(1, count($mutable_plan));
 		$this->same($fresh_segment['to'], $mutable_plan[0][1]);
+	}
+
+	/**
+	 * refreshed_at records when a fetch ran, covered_to how far it reached. A
+	 * request with a historic time_to stamps the first without advancing the
+	 * second, so freshness must bound the uncovered tail as well — otherwise that
+	 * shard serves a silently truncated series to every later request as a hit.
+	 */
+	private function testFreshnessBoundsTheUncoveredTail(): void {
+		$cache = new SeriesCache(['enabled' => false, 'ttl_seconds' => 1800]);
+		$plan_method = new ReflectionMethod($cache, 'refreshPlan');
+		$this->enablePrivateAccess($plan_method);
+		$usable_method = new ReflectionMethod($cache, 'stateUsable');
+		$this->enablePrivateAccess($usable_method);
+
+		$now = time();
+		$segment = ['from' => $now - 30 * 86400, 'to' => $now, 'shard_to' => $now + 86400];
+		$poisoned = [
+			'covered_from' => $segment['from'],
+			// Written moments ago, but only reaching 19 days back.
+			'covered_to' => $now - 19 * 86400,
+			'refreshed_at' => $now,
+			'rows' => []
+		];
+		$plan = $plan_method->invoke($cache, $poisoned, $segment, 'trend', false);
+		$this->same(1, count($plan));
+		$this->same($segment['to'], $plan[0][1]);
+		$this->same(false, $usable_method->invoke($cache, $poisoned, $segment, 'trend'));
+
+		// A gap inside the TTL is ordinary freshness and must still skip the tail.
+		$normal = [
+			'covered_from' => $segment['from'],
+			'covered_to' => $now - 600,
+			'refreshed_at' => $now - 600,
+			'rows' => []
+		];
+		$this->same([], $plan_method->invoke($cache, $normal, $segment, 'trend', false));
+		$this->same(true, $usable_method->invoke($cache, $normal, $segment, 'trend'));
+
+		// A shard ending before the request even begins holds no rows for it and
+		// must never be reported as a usable hit.
+		$empty_slice = [
+			'covered_from' => $segment['from'],
+			'covered_to' => $segment['from'] - 1,
+			'refreshed_at' => $now,
+			'rows' => []
+		];
+		$this->same(false, $usable_method->invoke($cache, $empty_slice, $segment, 'trend'));
+	}
+
+	/**
+	 * Quota reservation makes an actual breach impossible, so eviction has to
+	 * start at a high-water mark or the cache wedges at the ceiling and rejects
+	 * every new shard until the 30-day idle rule frees space.
+	 */
+	private function testCapacityEvictionStartsBeforeTheHardCap(): void {
+		$cache = new SeriesCache(['enabled' => false, 'ttl_seconds' => 1800]);
+		$method = new ReflectionMethod($cache, 'cleanupEvictionCandidates');
+		$this->enablePrivateAccess($method);
+		$now = time();
+		$entries = [];
+		for ($i = 0; $i < 10; $i++) {
+			$entries[] = [
+				'path' => '/private/cache/'.str_pad((string) $i, 2, '0', STR_PAD_LEFT).'.json.gz',
+				'mtime' => $now - 100 + $i,
+				'size' => 10
+			];
+		}
+
+		// 98 of 100 bytes used: under the cap, but past the watermark.
+		$victims = $method->invoke($cache, $entries, $now, 86400, 98, 10, 100, 1000, 5);
+		$this->same(true, count($victims) > 0);
+		$this->same($entries[0]['path'], $victims[0]['path']);
+
+		// Comfortably below the watermark nothing is reclaimed.
+		$this->same([], $method->invoke($cache, $entries, $now, 86400, 50, 10, 100, 1000, 5));
 	}
 
 	private function testWebRootOverlapPredicate(): void {

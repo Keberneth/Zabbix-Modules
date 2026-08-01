@@ -64,6 +64,11 @@ final class CapacityPlanningMathTest {
 		$this->testIncompleteNearFullBucketIsCountedWithUnknownDuration();
 		$this->testDownwardRegimeIsolatedFromCurrentRisk();
 		$this->testImpossiblePercentageRowsAreRejected();
+		$this->testDriftBandPercentageRowPreservesOrdering();
+		$this->testPartialRawCoverageDoesNotInflateConfirmedMinutes();
+		$this->testContinuousSaturationSpansEvidenceSources();
+		$this->testUnknownCapacityStillAppliesPercentageNoiseFloor();
+		$this->testTransformOverflowIsDropped();
 		$this->testDiskUsableCapacityAvoidsLinuxTotal();
 		$this->testSparseDiskSeriesHasNoModel();
 		$this->testCurrentDiskBreachSurvivesMissingHistory();
@@ -727,6 +732,19 @@ final class CapacityPlanningMathTest {
 		$this->assertSame('Critical', $this->call('diskSeverity', [
 			false, false, 1.0, 2.0, null, 'Medium', true
 		]), 'Crossing the warning threshold must not make an imminent Critical forecast less severe.');
+	}
+
+	private function testTransformOverflowIsDropped(): void {
+		// Byte rows skip the percentage sanitation, so a scale overflow would reach
+		// json_encode() and turn the whole response into an unrelated encode error.
+		$rows = [$this->hourlyRow(1000, 1.0e300), $this->hourlyRow(4600, 2.0)];
+		$scaled = $this->call('transformRows', [$rows, 'scale', 1.0e15]);
+		$this->assertSame(1, count($scaled), 'Rows that overflow to INF must be dropped.');
+		$this->assertAlmost(2.0e15, (float) $scaled[0]['avg'], 1.0e9,
+			'Representable rows must still be scaled normally.');
+
+		$identity = $this->call('transformRows', [$rows, 'identity', null]);
+		$this->assertSame(2, count($identity), 'The identity transform must remain a pass-through.');
 	}
 
 	private function testUnknownCapacityStillAppliesPercentageNoiseFloor(): void {
