@@ -6,8 +6,10 @@ namespace Modules\CapacityPlanning\Actions;
 
 use CController;
 use CControllerResponseData;
+use Modules\CapacityPlanning\Lib\Build;
 use Modules\CapacityPlanning\Lib\Config;
 
+require_once dirname(__DIR__).'/lib/Build.php';
 require_once dirname(__DIR__).'/lib/Config.php';
 
 final class CapacityPlanningView extends CController {
@@ -36,6 +38,8 @@ final class CapacityPlanningView extends CController {
 
 		$this->setResponse(new CControllerResponseData([
 			'page_title' => _('Capacity Planning'),
+			'module_version' => Build::VERSION,
+			'build_id' => Build::ID,
 			'data_url' => 'zabbix.php?action=capacity.planning.data',
 			'settings_save_url' => 'zabbix.php?action=capacity.planning.settings.save',
 			'cache_status_url' => 'zabbix.php?action=capacity.planning.cache.status',

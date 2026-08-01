@@ -31,8 +31,10 @@ final class CapacityPlanningCacheTest {
 		$this->testWebRootOverlapPredicate();
 		$this->testCalendarOrderAndPublicStatus();
 		$this->testCalendarSegmentsCrossYear();
+		$this->testFastPathOrderingDeduplicationAndRangeBoundaries();
 		$this->testCleanupPlanningUsesHardLimits();
 		$this->testEnabledCacheRoundTripAndIncrementalExtension();
+		$this->testMultiDayHistoryRoundTripIsChronologicalAndDeduplicated();
 		$this->testResumableClearAndFreshMiss();
 		$this->testResumableEmptyDirectoryClear();
 		$this->testCheckedLedgerInvalidation();
@@ -160,7 +162,7 @@ final class CapacityPlanningCacheTest {
 		}
 
 		$method = new ReflectionMethod($cache, 'refreshPlan');
-		$method->setAccessible(true);
+		$this->enablePrivateAccess($method);
 		$segment_to = time();
 		$segment = [
 			'from' => $segment_to - 3600,
@@ -179,7 +181,7 @@ final class CapacityPlanningCacheTest {
 
 		$fresh_cache = new SeriesCache(['enabled' => false, 'ttl_seconds' => 1800]);
 		$fresh_method = new ReflectionMethod($fresh_cache, 'refreshPlan');
-		$fresh_method->setAccessible(true);
+		$this->enablePrivateAccess($fresh_method);
 		$fresh_segment = [
 			'from' => $segment_to - 7200,
 			'to' => $segment_to,
@@ -198,7 +200,7 @@ final class CapacityPlanningCacheTest {
 
 		$stale_cache = new SeriesCache(['enabled' => false, 'ttl_seconds' => 1800]);
 		$stale_method = new ReflectionMethod($stale_cache, 'refreshPlan');
-		$stale_method->setAccessible(true);
+		$this->enablePrivateAccess($stale_method);
 		$stale_state = [
 			'covered_from' => $fresh_segment['from'],
 			'covered_to' => $fresh_segment['to'],
@@ -220,7 +222,7 @@ final class CapacityPlanningCacheTest {
 	private function testWebRootOverlapPredicate(): void {
 		$cache = new SeriesCache(['enabled' => false, 'ttl_seconds' => 1800]);
 		$method = new ReflectionMethod($cache, 'pathsOverlap');
-		$method->setAccessible(true);
+		$this->enablePrivateAccess($method);
 		$this->same(true, $method->invoke($cache, '/usr/share/zabbix/cache', '/usr/share/zabbix'));
 		$this->same(true, $method->invoke($cache, '/usr/share', '/usr/share/zabbix'));
 		$this->same(false, $method->invoke($cache, '/var/cache/zabbix-capacity', '/usr/share/zabbix'));
@@ -229,7 +231,7 @@ final class CapacityPlanningCacheTest {
 	private function testCalendarOrderAndPublicStatus(): void {
 		$cache = new SeriesCache(['enabled' => false, 'ttl_seconds' => 1800]);
 		$method = new ReflectionMethod($cache, 'calendarSegments');
-		$method->setAccessible(true);
+		$this->enablePrivateAccess($method);
 		$from = gmmktime(0, 0, 0, 1, 30, 2026);
 		$to = gmmktime(0, 0, 0, 2, 2, 2026);
 		$history = $method->invoke($cache, 'history', $from, $to);
@@ -247,7 +249,7 @@ final class CapacityPlanningCacheTest {
 	private function testCalendarSegmentsCrossYear(): void {
 		$cache = new SeriesCache(['enabled' => false, 'ttl_seconds' => 1800]);
 		$method = new ReflectionMethod($cache, 'calendarSegments');
-		$method->setAccessible(true);
+		$this->enablePrivateAccess($method);
 		$from = gmmktime(0, 0, 0, 12, 30, 2025);
 		$to = gmmktime(0, 0, 0, 1, 2, 2026);
 
@@ -268,10 +270,59 @@ final class CapacityPlanningCacheTest {
 		$this->same($from, $history[3]['from']);
 	}
 
+	private function testFastPathOrderingDeduplicationAndRangeBoundaries(): void {
+		$cache = new SeriesCache(['enabled' => false, 'ttl_seconds' => 1800]);
+		$normalize = new ReflectionMethod($cache, 'normalizeRows');
+		$this->enablePrivateAccess($normalize);
+		$rows_in_range = new ReflectionMethod($cache, 'rowsInRange');
+		$this->enablePrivateAccess($rows_in_range);
+		$replace_range = new ReflectionMethod($cache, 'replaceRange');
+		$this->enablePrivateAccess($replace_range);
+
+		$normalized = $normalize->invoke($cache, [
+			['clock' => 300, 'ns' => 2, 'value' => '3'],
+			['clock' => 100, 'ns' => 1, 'value' => '1'],
+			['clock' => 200, 'ns' => 9, 'value' => '2'],
+			['clock' => 200, 'ns' => 1, 'value' => '1.5'],
+			// The later duplicate is the authoritative API row, matching the
+			// established deduplication semantics.
+			['clock' => 200, 'ns' => 9, 'value' => '2.5'],
+			['clock' => 99, 'ns' => 1, 'value' => 'outside-request'],
+			['clock' => 250, 'ns' => 3, 'value' => INF]
+		], 'history', 100, 300);
+		$this->same([
+			['clock' => 100, 'ns' => 1, 'value' => 1.0],
+			['clock' => 200, 'ns' => 1, 'value' => 1.5],
+			['clock' => 200, 'ns' => 9, 'value' => 2.5],
+			['clock' => 300, 'ns' => 2, 'value' => 3.0]
+		], $normalized);
+
+		// Range endpoints are inclusive, and all nanosecond-distinct rows at a
+		// boundary clock must survive the binary-search fast path.
+		$this->same([
+			['clock' => 200, 'ns' => 1, 'value' => 1.5],
+			['clock' => 200, 'ns' => 9, 'value' => 2.5]
+		], $rows_in_range->invoke($cache, $normalized, 200, 200));
+		$this->same([], $rows_in_range->invoke($cache, $normalized, 201, 299));
+		$this->same($normalized, $rows_in_range->invoke($cache, $normalized, 100, 300));
+
+		$replacement = $replace_range->invoke($cache, $normalized, [
+			['clock' => 200, 'ns' => 5, 'value' => 20.0],
+			['clock' => 250, 'ns' => 1, 'value' => 25.0],
+			['clock' => 300, 'ns' => 5, 'value' => 30.0]
+		], 200, 300, 'history');
+		$this->same([
+			['clock' => 100, 'ns' => 1, 'value' => 1.0],
+			['clock' => 200, 'ns' => 5, 'value' => 20.0],
+			['clock' => 250, 'ns' => 1, 'value' => 25.0],
+			['clock' => 300, 'ns' => 5, 'value' => 30.0]
+		], $replacement);
+	}
+
 	private function testCleanupPlanningUsesHardLimits(): void {
 		$cache = new SeriesCache(['enabled' => false, 'ttl_seconds' => 1800]);
 		$method = new ReflectionMethod($cache, 'cleanupEvictionCandidates');
-		$method->setAccessible(true);
+		$this->enablePrivateAccess($method);
 		$now = time();
 		$entries = [];
 		for ($i = 0; $i < 11; $i++) {
@@ -314,13 +365,13 @@ final class CapacityPlanningCacheTest {
 				return;
 			}
 			$uid_method = new ReflectionMethod($cache, 'detectEffectiveUid');
-			$uid_method->setAccessible(true);
+			$this->enablePrivateAccess($uid_method);
 			$this->same(true, is_int($uid_method->invoke($cache, false)));
 			$this->same(true, in_array($cache->publicStatus()['owner_identity_source'], [
 				'proc-self-status', 'private-file-probe'
 			], true));
 			$install_root_property = new ReflectionProperty($cache, 'install_root');
-			$install_root_property->setAccessible(true);
+			$this->enablePrivateAccess($install_root_property);
 			$this->same(true, is_file(
 				(string) $install_root_property->getValue($cache).DIRECTORY_SEPARATOR.'.clear.lock'
 			), 'Initialization must create/use the shared clear guard before exposing the generation.');
@@ -406,7 +457,7 @@ final class CapacityPlanningCacheTest {
 			$this->same(2, $recovery_calls);
 
 			$ledger = new ReflectionMethod($cache, 'writeUsageLedger');
-			$ledger->setAccessible(true);
+			$this->enablePrivateAccess($ledger);
 			$ledger->invoke($cache, ['bytes' => Config::cacheMaxBytes() - 1, 'files' => 1]);
 			$quota_result = $cache->fetchRange('29999', 0, 'trend', $month_start, $month_end, true,
 				static fn (int $from, int $to): array => [[
@@ -441,6 +492,77 @@ final class CapacityPlanningCacheTest {
 			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_DIR', $old_dir);
 			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_NAMESPACE', $old_namespace);
 			$this->restoreEnvironment('CAPACITY_PLANNING_BOOT_ID', $old_boot);
+		}
+	}
+
+	private function testMultiDayHistoryRoundTripIsChronologicalAndDeduplicated(): void {
+		$old_dir = getenv('CAPACITY_PLANNING_CACHE_DIR');
+		$old_namespace = getenv('CAPACITY_PLANNING_CACHE_NAMESPACE');
+		$old_boot = getenv('CAPACITY_PLANNING_BOOT_ID');
+		$base = rtrim(sys_get_temp_dir(), "\\/").DIRECTORY_SEPARATOR
+			.'capacity-planning-history-order-test-'.bin2hex(random_bytes(6));
+		putenv('CAPACITY_PLANNING_CACHE_DIR='.$base);
+		putenv('CAPACITY_PLANNING_CACHE_NAMESPACE=history-order-test');
+		putenv('CAPACITY_PLANNING_BOOT_ID=history-order-test-boot');
+
+		try {
+			$cache = new SeriesCache(['enabled' => true, 'ttl_seconds' => 1800]);
+			if (!$cache->publicStatus()['backend_available']) {
+				echo "CapacityPlanningCacheTest: multi-day history round trip skipped (POSIX backend unavailable).\n";
+				return;
+			}
+
+			$day = (int) (floor((time() - 6 * 86400) / 86400) * 86400);
+			$from = $day + 100;
+			$to = $day + 3 * 86400 + 300;
+			$calls = [];
+			$loader = static function (int $range_from, int $range_to) use (&$calls): array {
+				$calls[] = [$range_from, $range_to];
+				$call = count($calls);
+				$offset = max(1, min(60, intdiv(max(3, $range_to - $range_from), 3)));
+				$early = $range_from + $offset;
+				$late = $range_to - $offset;
+
+				// Deliberately newest-first and duplicated. Normalization must sort
+				// within each shard and retain the later duplicate value.
+				return [
+					['clock' => $late, 'ns' => 2, 'value' => 200 + $call],
+					['clock' => $early, 'ns' => 1, 'value' => 100 + $call],
+					['clock' => $late, 'ns' => 2, 'value' => 300 + $call]
+				];
+			};
+
+			$first = $cache->fetchRange('42001', 0, 'history', $from, $to, true, $loader);
+			$this->same(4, count($calls));
+			$this->same(true, $calls[0][0] > $calls[count($calls) - 1][0]);
+			$this->same(8, count($first['rows']));
+			$keys = array_map(static fn (array $row): string => $row['clock'].':'.$row['ns'], $first['rows']);
+			$this->same(count($keys), count(array_unique($keys)));
+			$sorted_keys = $keys;
+			usort($sorted_keys, static function (string $left, string $right): int {
+				[$left_clock, $left_ns] = array_map('intval', explode(':', $left, 2));
+				[$right_clock, $right_ns] = array_map('intval', explode(':', $right, 2));
+				return ($left_clock <=> $right_clock) ?: ($left_ns <=> $right_ns);
+			});
+			$this->same($sorted_keys, $keys);
+			$this->same([], array_values(array_filter($first['rows'],
+				static fn (array $row): bool => $row['ns'] === 2 && $row['value'] < 300)));
+
+			$cache_loader_called = false;
+			$second = $cache->fetchRange('42001', 0, 'history', $from, $to, true,
+				static function () use (&$cache_loader_called): array {
+					$cache_loader_called = true;
+					return [];
+				});
+			$this->same(false, $cache_loader_called);
+			$this->same(true, $second['cache']['hit']);
+			$this->same($first['rows'], $second['rows']);
+		}
+		finally {
+			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_DIR', $old_dir);
+			$this->restoreEnvironment('CAPACITY_PLANNING_CACHE_NAMESPACE', $old_namespace);
+			$this->restoreEnvironment('CAPACITY_PLANNING_BOOT_ID', $old_boot);
+			$this->removeTree($base);
 		}
 	}
 
@@ -541,7 +663,7 @@ final class CapacityPlanningCacheTest {
 				return;
 			}
 			$generation = new ReflectionProperty($cache, 'generation_root');
-			$generation->setAccessible(true);
+			$this->enablePrivateAccess($generation);
 			$generation_root = (string) $generation->getValue($cache);
 			$bucket = $generation_root.DIRECTORY_SEPARATOR.'00';
 			mkdir($bucket, 0700, true);
@@ -568,7 +690,7 @@ final class CapacityPlanningCacheTest {
 			$this->same(true, $calls > 1);
 			$this->same(0, $result['removed_files']);
 			$scan = new ReflectionMethod($cache, 'scanUsageState');
-			$scan->setAccessible(true);
+			$this->enablePrivateAccess($scan);
 			$this->same(['bytes' => 0, 'files' => 0], $scan->invoke($cache));
 		}
 		finally {
@@ -596,16 +718,16 @@ final class CapacityPlanningCacheTest {
 				return;
 			}
 			$ledger_path = new ReflectionMethod($cache, 'usageLedgerPath');
-			$ledger_path->setAccessible(true);
+			$this->enablePrivateAccess($ledger_path);
 			$path = (string) $ledger_path->invoke($cache);
 			$write = new ReflectionMethod($cache, 'writeUsageLedger');
-			$write->setAccessible(true);
+			$this->enablePrivateAccess($write);
 			$write->invoke($cache, ['bytes' => 123, 'files' => 9]);
 			$this->same(true, is_file($path));
 			$this->same(true, $cache->clear(2)['complete']);
 			$this->same(false, file_exists($path));
 			$install_root_property = new ReflectionProperty($cache, 'install_root');
-			$install_root_property->setAccessible(true);
+			$this->enablePrivateAccess($install_root_property);
 			$install_root = (string) $install_root_property->getValue($cache);
 			$quota_tmp = $install_root.DIRECTORY_SEPARATOR
 				.'.quota-state.json.tmp.'.str_repeat('a', 16);
@@ -669,7 +791,7 @@ final class CapacityPlanningCacheTest {
 				return;
 			}
 			$generation = new ReflectionProperty($cache, 'generation_root');
-			$generation->setAccessible(true);
+			$this->enablePrivateAccess($generation);
 			$generation_root = (string) $generation->getValue($cache);
 			file_put_contents($external, 'must remain');
 			@chmod($external, 0600);
@@ -715,7 +837,7 @@ final class CapacityPlanningCacheTest {
 				return;
 			}
 			$install_root_property = new ReflectionProperty($cache, 'install_root');
-			$install_root_property->setAccessible(true);
+			$this->enablePrivateAccess($install_root_property);
 			$fifo = (string) $install_root_property->getValue($cache)
 				.DIRECTORY_SEPARATOR.'.shard-lock-aa.lock';
 			if (!@posix_mkfifo($fifo, 0600)) {
@@ -880,6 +1002,14 @@ final class CapacityPlanningCacheTest {
 
 	private function restoreEnvironment(string $name, $value): void {
 		putenv($value === false ? $name : $name.'='.$value);
+	}
+
+	private function enablePrivateAccess(object $reflection): void {
+		// Private reflection is directly invokable since PHP 8.1 and calling
+		// setAccessible() is deprecated in PHP 8.5. PHP 8.0 still needs it.
+		if (PHP_VERSION_ID < 80100) {
+			$reflection->setAccessible(true);
+		}
 	}
 
 	private function same($expected, $actual): void {

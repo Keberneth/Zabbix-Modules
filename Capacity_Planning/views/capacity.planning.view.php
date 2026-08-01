@@ -15,6 +15,8 @@ $encode_data_attribute = static function (array $value): string {
 $root = (new CDiv(_('Loading capacity planning report…')))
 	->setId('capacity-planning-root')
 	->addClass('capacity-planning-root')
+	->setAttribute('data-module-version', (string) $data['module_version'])
+	->setAttribute('data-server-build-id', (string) $data['build_id'])
 	->setAttribute('data-data-url', $data['data_url'])
 	->setAttribute('data-settings-save-url', $data['settings_save_url'])
 	->setAttribute('data-cache-status-url', $data['cache_status_url'])

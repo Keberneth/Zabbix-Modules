@@ -110,7 +110,11 @@ final class Config {
 		}
 		$saved = self::normalize(self::decode($readback['config'] ?? []))['cache'];
 		if ($saved['enabled'] !== $enabled || $saved['ttl_seconds'] !== $ttl_seconds) {
-			throw new RuntimeException('Capacity Planning settings write verification failed.');
+			// The update is not transactional, so a second administrator saving
+			// between this write and its readback is the realistic cause. Report the
+			// stored values as a conflict rather than a generic internal error that
+			// sends the operator investigating a database fault that did not occur.
+			throw new ConcurrentSettingsUpdateException($saved);
 		}
 
 		return $saved;
@@ -329,5 +333,25 @@ final class Config {
 		}
 
 		return in_array(strtolower(trim((string) $value)), ['1', 'true', 'yes', 'on'], true);
+	}
+}
+
+/**
+ * Another session committed different cache settings between this request's
+ * write and its readback. Carries the values that are actually stored so the
+ * caller can show them instead of reporting an infrastructure failure.
+ */
+final class ConcurrentSettingsUpdateException extends RuntimeException {
+	/** @var array{enabled: bool, ttl_seconds: int} */
+	private array $stored;
+
+	public function __construct(array $stored) {
+		parent::__construct('Capacity Planning settings were changed by another session.');
+		$this->stored = $stored;
+	}
+
+	/** @return array{enabled: bool, ttl_seconds: int} */
+	public function stored(): array {
+		return $this->stored;
 	}
 }

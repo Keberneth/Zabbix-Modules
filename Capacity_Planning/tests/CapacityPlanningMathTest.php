@@ -47,6 +47,7 @@ final class CapacityPlanningMathTest {
 
 	public function run(): void {
 		$this->testInventoryScopeParserSupportsLiteralsRegexAndEscapes();
+		$this->testUnflaggedRegexWorksOnEverySupportedPhpVersion();
 		$this->testInventoryScopeMatchingUsesOrSemantics();
 		$this->testInventoryScopeRejectsUnsafeExpressions();
 		$this->testInventoryScopeCapUsesSentinelAndFailsClosed();
@@ -66,6 +67,7 @@ final class CapacityPlanningMathTest {
 		$this->testDiskUsableCapacityAvoidsLinuxTotal();
 		$this->testSparseDiskSeriesHasNoModel();
 		$this->testCurrentDiskBreachSurvivesMissingHistory();
+		$this->testCurrentWarningIsASeverityFloorNotCeiling();
 		$this->testDirectPercentageSeriesDrivesPercentageEta();
 		$this->testLowConfidencePercentageDoesNotCapByteRisk();
 		$this->testInvalidDirectPercentageFallsBackToDerived();
@@ -73,9 +75,11 @@ final class CapacityPlanningMathTest {
 		$this->testDirectPercentageAccelerationRestoresEtaOrdering();
 		$this->testSteadyDirectPercentageIgnoresByteAcceleration();
 		$this->testDivergenceNoteDisclosesCrossModelDisagreement();
+		$this->testBasisSpecificThresholdEtasRemainAvailable();
 		$this->testSparseNoisyRecentWindowCannotVetoConfidence();
 		$this->testSmallFilesystemGrowthIsForecast();
 		$this->testLargeDiskNoiseSlopeNullsBothModels();
+		$this->testHugeFilesystemTinyPercentageSlopeKeepsPrecision();
 		$this->testFreshResourceAlternativesBeatStalePreferredItems();
 		$this->testFreshFilesystemCompositionBeatsStaleCompleteness();
 		$this->testStaleOptionalLinuxMetricsDoNotMakeFilesystemStale();
@@ -83,6 +87,7 @@ final class CapacityPlanningMathTest {
 		$this->testInvalidFilesystemValuesDoNotCreateCurrentBreach();
 		$this->testFilesystemStaleStatusRequiresNeededContributor();
 		$this->testPfreeSupportsCurrentAndHistoricalUsedPercent();
+		$this->testCurrentPercentagePrecisionIsPreserved();
 		$this->testSameDepthMacroUsesLowestNumericTemplateId();
 		$this->testTemplateTopologyTraversalIsBoundedAndCycleSafe();
 		$this->testBoundedItemIngestionDetectsSentinelRow();
@@ -102,19 +107,25 @@ final class CapacityPlanningMathTest {
 
 	private function call(string $method, array $arguments = []) {
 		$reflection = new ReflectionMethod(CapacityPlanningData::class, $method);
-		$reflection->setAccessible(true);
+		if (PHP_VERSION_ID < 80100) {
+			$reflection->setAccessible(true);
+		}
 		return $reflection->invokeArgs($this->controller, $arguments);
 	}
 
 	private function resetQuality(): void {
 		$reflection = new ReflectionProperty(CapacityPlanningData::class, 'quality');
-		$reflection->setAccessible(true);
+		if (PHP_VERSION_ID < 80100) {
+			$reflection->setAccessible(true);
+		}
 		$reflection->setValue($this->controller, []);
 	}
 
 	private function qualityIssues(): array {
 		$reflection = new ReflectionProperty(CapacityPlanningData::class, 'quality');
-		$reflection->setAccessible(true);
+		if (PHP_VERSION_ID < 80100) {
+			$reflection->setAccessible(true);
+		}
 		return $reflection->getValue($this->controller);
 	}
 
@@ -209,6 +220,16 @@ final class CapacityPlanningMathTest {
 		$escaped = $this->call('parseFilterExpression', ['\/api\,v1, C:\\\\Windows']);
 		$this->assertSame(['/api,v1', 'C:\Windows'], array_column($escaped['terms'], 'value'),
 			'Escapes must support a literal leading slash, comma and backslash.');
+	}
+
+	private function testUnflaggedRegexWorksOnEverySupportedPhpVersion(): void {
+		$parsed = $this->call('parseFilterExpression', ['/^prod-\d+$/']);
+		$this->assertSame(null, $parsed['error'],
+			'An unflagged regular expression must parse on PHP 8.0 through current PHP.');
+		$this->assertSame('regex', $parsed['terms'][0]['kind'] ?? null,
+			'An unflagged slash-delimited expression must remain a regex term.');
+		$this->assertTrue($this->call('matchesFilterValues', [['prod-42'], $parsed['terms']]),
+			'An unflagged regular expression must remain usable for scope matching.');
 	}
 
 	private function testInventoryScopeMatchingUsesOrSemantics(): void {
@@ -596,6 +617,66 @@ final class CapacityPlanningMathTest {
 			'Harmless percentage rounding drift should clamp to 100%.');
 	}
 
+	private function testDriftBandPercentageRowPreservesOrdering(): void {
+		// A row whose whole range sits inside the accepted (100, 100.5] drift band
+		// must not leave its minimum above its own clamped average and maximum.
+		[$valid, $rejected] = $this->call('sanitizePercentageRows',
+			[[$this->fiveMinuteRow(1000, 100.2, 100.3, 100.4)]]);
+		$this->assertSame(0, $rejected, 'A row inside the drift tolerance band stays accepted.');
+		$this->assertSame(1, count($valid), 'The drift-band row should survive sanitation.');
+		$this->assertAlmost(100.0, (float) $valid[0]['min'], 0.001,
+			'The minimum must be clamped to 100% like the other two columns.');
+		$this->assertTrue($valid[0]['min'] <= $valid[0]['avg'] && $valid[0]['avg'] <= $valid[0]['max'],
+			'Sanitized percentage rows must satisfy min <= avg <= max.');
+	}
+
+	private function testPartialRawCoverageDoesNotInflateConfirmedMinutes(): void {
+		// An hour whose raw coverage stays below the 75% replacement threshold keeps
+		// an ordinary (not saturation_only) trend row. Its overlapping raw buckets
+		// describe the same wall-clock minutes and must not be counted again.
+		$now = 2000000000;
+		$hour = intdiv($now - 7200, 3600) * 3600;
+		$trend = $this->hourlyRow($hour, 97.0);
+		$raw = [];
+		for ($bucket = 0; $bucket < 6; $bucket++) {
+			$raw[] = $this->fiveMinuteRow($hour + $bucket * 300, 97.0, 97.0, 97.0);
+		}
+		$merged = $this->call('mergeRecentResourceRows', [[$trend], $raw]);
+		$retained_trend = array_values(array_filter($merged,
+			static fn (array $row): bool => ($row['source'] ?? '') === 'trend'));
+		$this->assertSame(1, count($retained_trend),
+			'30 minutes of raw evidence is below the replacement threshold, so the trend hour stays.');
+		$this->assertSame(true, empty($retained_trend[0]['saturation_only']),
+			'A trend row kept for an under-covered hour is an ordinary row, not saturation-only.');
+
+		$result = $this->call('analyzeResourceSaturation', [
+			$this->resourceSpec($now), $merged, $now, true
+		]);
+		$this->assertSame(1, $result['confirmed_episode_count'],
+			'The trend hour and the raw buckets inside it are one episode, not two.');
+		$this->assertAlmost(60.0, (float) $result['confirmed_total_minutes'], 0.001,
+			'60 real minutes must not be reported as 90.');
+	}
+
+	private function testContinuousSaturationSpansEvidenceSources(): void {
+		// A run proven first by a trend hour and then by immediately following raw
+		// buckets is one continuous episode: the intervals are adjacent, so the
+		// evidence source must not split it.
+		$now = 2000000000;
+		$hour = intdiv($now, 3600) * 3600 - 3600;
+		$rows = [$this->hourlyRow($hour, 97.0)];
+		for ($bucket = 0; $bucket < 6; $bucket++) {
+			$rows[] = $this->fiveMinuteRow($hour + 3600 + $bucket * 300, 97.0, 97.0, 97.0);
+		}
+		$result = $this->call('analyzeResourceSaturation', [
+			$this->resourceSpec($now, 'CPU', 97.0), $rows, $now, true
+		]);
+		$this->assertSame(1, $result['confirmed_episode_count'],
+			'Adjacent trend and raw evidence must form a single episode.');
+		$this->assertAlmost(90.0, (float) $result['confirmed_longest_minutes'], 0.001,
+			'The longest episode spans both evidence sources.');
+	}
+
 	private function testDiskUsableCapacityAvoidsLinuxTotal(): void {
 		$linux = $this->call('usableFilesystemCapacity', ['Linux', 1000.0, 700.0, 200.0, 77.78]);
 		$this->assertAlmost(900.0, (float) $linux, 0.001,
@@ -628,6 +709,49 @@ final class CapacityPlanningMathTest {
 		$this->assertSame('no_data', $result['status'], 'Missing history should be reported honestly.');
 		$this->assertSame('Critical', $result['severity'],
 			'A fresh current critical breach must remain Critical without history.');
+	}
+
+	private function testCurrentWarningIsASeverityFloorNotCeiling(): void {
+		$this->assertSame('Critical', $this->call('diskSeverity', [
+			true, false, 0.0, 2.0, null, 'Medium', true
+		]), 'A current warning must not mask a medium-confidence Critical ETA inside seven days.');
+		$this->assertSame('Critical', $this->call('diskSeverity', [
+			true, false, 0.0, null, 1.0, 'High', true
+		]), 'A current warning must not mask a high-confidence Full ETA inside seven days.');
+		$this->assertSame('High', $this->call('diskSeverity', [
+			true, false, 0.0, 2.0, null, 'Low', true
+		]), 'Low confidence may cap the projected tier, but a confirmed current warning must stay at least High.');
+		$this->assertSame('High', $this->call('diskSeverity', [
+			true, false, null, null, null, 'Low', false
+		]), 'A confirmed current warning must remain High even without a usable forecast model.');
+		$this->assertSame('Critical', $this->call('diskSeverity', [
+			false, false, 1.0, 2.0, null, 'Medium', true
+		]), 'Crossing the warning threshold must not make an imminent Critical forecast less severe.');
+	}
+
+	private function testUnknownCapacityStillAppliesPercentageNoiseFloor(): void {
+		// With only a direct pused item there is no capacity to translate the byte
+		// floor through, so the fixed pp/day floor must apply. A slope five times
+		// below it is noise and must not produce a growth rate or a threshold date.
+		$now = 2000000000;
+		$pct_rows = [];
+		for ($hour = 0; $hour < 70 * 24; $hour++) {
+			$clock = $now - 70 * 86400 + $hour * 3600;
+			$pct_rows[] = $this->hourlyRow($clock, 50.0 + ($hour / 24) * 0.002);
+		}
+		$spec = [
+			'id' => 'd0', 'used' => null, 'free' => null, 'total' => null,
+			'pused' => 50.0,
+			'warn_pct' => 90.0, 'crit_pct' => 95.0, 'warn_free' => null, 'crit_free' => null,
+			'os' => 'Linux', 'fs_kind' => 'Local', 'ok' => true
+		];
+		$result = $this->call('forecastDisk', [
+			$spec, [], 'trends', $now, null, $pct_rows, 'trends', null
+		]);
+		$this->assertSame(null, $result['growth_pct_day'],
+			'A 0.002 pp/day slope is below the documented noise floor and must be nulled.');
+		$this->assertSame(null, $result['eta']['warn_pct_days'],
+			'A nulled percentage slope must not produce a warning ETA.');
 	}
 
 	private function testDirectPercentageSeriesDrivesPercentageEta(): void {
@@ -856,6 +980,47 @@ final class CapacityPlanningMathTest {
 			'Consistent single-story forecasts must not carry the divergence note.');
 	}
 
+	private function testBasisSpecificThresholdEtasRemainAvailable(): void {
+		$now = 2000000000;
+		$byte_rows = [];
+		$pct_rows = [];
+		for ($hour = 0; $hour < 70 * 24; $hour++) {
+			$day = $hour / 24;
+			$clock = $now - 70 * 86400 + $hour * 3600;
+			$byte_rows[] = $this->hourlyRow($clock, $day * 10000000000.0);
+			$pct_rows[] = $this->hourlyRow($clock, 52.5 + $day * 0.25);
+		}
+		$spec = [
+			'id' => 'd0', 'used' => 700000000000.0, 'free' => 300000000000.0,
+			'pused' => 70.0, 'total' => 1000000000000.0,
+			'warn_pct' => 90.0, 'crit_pct' => 95.0,
+			'warn_free' => 250000000000.0, 'crit_free' => 200000000000.0,
+			'os' => 'Linux', 'fs_kind' => 'Local', 'ok' => true
+		];
+		$result = $this->call('forecastDisk', [
+			$spec, $byte_rows, 'trends', $now, null, $pct_rows, 'trends', null
+		]);
+		$eta = $result['eta'];
+		$this->assertAlmost(80.0, (float) $eta['warn_pct_days'], 0.2,
+			'The percentage warning candidate must retain its own percentage-model ETA.');
+		$this->assertAlmost(5.0, (float) $eta['warn_free_days'], 0.2,
+			'The absolute-free warning candidate must retain its own byte-model ETA.');
+		$this->assertAlmost(100.0, (float) $eta['crit_pct_days'], 0.2,
+			'The percentage critical candidate must retain its own percentage-model ETA.');
+		$this->assertAlmost(10.0, (float) $eta['crit_free_days'], 0.2,
+			'The absolute-free critical candidate must retain its own byte-model ETA.');
+		$this->assertSame('free GB', $eta['warn_basis'],
+			'The combined warning ETA must still select the earliest candidate.');
+		$this->assertSame('free GB', $eta['crit_basis'],
+			'The combined critical ETA must still select the earliest candidate.');
+		$this->assertAlmost((float) $eta['warn_free_days'], (float) $eta['warn_days'], 0.001,
+			'Existing combined warning fields must remain backward compatible.');
+		$this->assertAlmost((float) $eta['crit_free_days'], (float) $eta['crit_days'], 0.001,
+			'Existing combined critical fields must remain backward compatible.');
+		$this->assertAlmost((float) ($now + 5 * 86400), (float) $eta['warn_free_date'], 3600.0,
+			'Basis-specific candidate dates must use the same authoritative ETA clock.');
+	}
+
 	private function testSparseNoisyRecentWindowCannotVetoConfidence(): void {
 		$now = 2000000000;
 		// 66 dense rising days ending 26 days ago, then 4 isolated low samples:
@@ -942,6 +1107,44 @@ final class CapacityPlanningMathTest {
 			'The derived percentage model must agree that noise-level growth is no growth.');
 		$this->assertSame(null, $result['eta']['crit_days'],
 			'No threshold date may be printed from a noise-level slope.');
+	}
+
+	private function testHugeFilesystemTinyPercentageSlopeKeepsPrecision(): void {
+		$now = 2000000000;
+		$capacity = 100 * 1099511627776.0; // 100 TiB
+		$growth = 5 * 1048576.0; // 5 MiB/day: above the 1 MiB/day noise floor
+		$pct_growth = $growth * 100 / $capacity;
+		$current_pused = 94.999123456;
+		$current_used = $capacity * $current_pused / 100;
+		$byte_rows = [];
+		$pct_rows = [];
+		for ($hour = 0; $hour < 70 * 24; $hour++) {
+			$days_before_now = 70.0 - $hour / 24;
+			$clock = $now - 70 * 86400 + $hour * 3600;
+			$used = $current_used - $growth * $days_before_now;
+			$byte_rows[] = $this->hourlyRow($clock, $used);
+			$pct_rows[] = $this->hourlyRow($clock, $used * 100 / $capacity);
+		}
+		$spec = [
+			'id' => 'd0', 'used' => $current_used, 'free' => $capacity - $current_used,
+			'pused' => $current_pused, 'total' => $capacity,
+			'warn_pct' => 94.9995, 'crit_pct' => 95.0, 'warn_free' => 0.0, 'crit_free' => 0.0,
+			'os' => 'Linux', 'fs_kind' => 'Local', 'ok' => true
+		];
+		$result = $this->call('forecastDisk', [
+			$spec, $byte_rows, 'trends', $now, null, $pct_rows, 'trends', null
+		]);
+		$this->assertTrue($pct_growth > 0 && $pct_growth < 0.00001,
+			'The fixture must exercise a valid percentage slope that five-decimal rounding would erase.');
+		$this->assertTrue($result['growth_pct_day'] > 0,
+			'A qualified tiny percentage slope must not become zero in the API payload.');
+		$this->assertAlmost($pct_growth, (float) $result['growth_pct_day'], 0.000000001,
+			'The API must preserve enough percentage-slope precision for chart and ETA math to agree.');
+		$expected_crit_days = (95.0 - $current_pused) / $pct_growth;
+		$this->assertAlmost($expected_crit_days, (float) $result['eta']['crit_days'], 0.2,
+			'A tiny but qualified slope must still produce the correct finite Critical ETA.');
+		$this->assertAlmost((float) $result['eta']['crit_days'], (float) $result['eta']['crit_pct_days'], 0.001,
+			'The basis-specific percentage candidate must retain the same finite ETA.');
 	}
 
 	private function testFreshResourceAlternativesBeatStalePreferredItems(): void {
@@ -1167,6 +1370,20 @@ final class CapacityPlanningMathTest {
 			'Current pused must be derived from the fresher selected pfree composition.');
 		$this->assertSame('5', $result[0]['pct_itemid'],
 			'The percentage history item must match the selected composition contributor.');
+	}
+
+	private function testCurrentPercentagePrecisionIsPreserved(): void {
+		$now = 2000000000;
+		$current_pused = 60.123456789;
+		$items = ['h1' => [
+			$this->item('1', 'vfs.fs.size[/precision,free]', 400.0, $now - 60),
+			$this->item('2', 'vfs.fs.size[/precision,pused]', $current_pused, $now - 30)
+		]];
+		$result = $this->call('buildDiskFindings', [
+			['h1' => $this->host()], $items, $this->macroIndex(), $now
+		]);
+		$this->assertAlmost($current_pused, (float) $result[0]['pused'], 0.000000001,
+			'Inventory payloads must preserve current percentage precision for near-threshold ETA anchoring.');
 	}
 
 	private function testSameDepthMacroUsesLowestNumericTemplateId(): void {

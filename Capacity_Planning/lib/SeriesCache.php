@@ -45,6 +45,11 @@ final class SeriesCache {
 	private const MAX_ROWS_PER_SHARD = 100000;
 	private const MAX_CACHE_ENTRIES = 100000;
 	private const MAX_USAGE_SCAN_ENTRIES = 200000;
+	// Reclaim before the hard cap. writeShard() reserves quota before publishing,
+	// so recorded usage can never actually exceed the cap; evicting only after a
+	// breach would therefore never run and leave the cache wedged at the ceiling.
+	private const CAPACITY_WATERMARK_RATIO = 0.95;
+	private const CAPACITY_TARGET_RATIO = 0.9;
 	private const USAGE_LEDGER_SCHEMA = 2;
 	private const ALLOWED_KINDS = ['trend', 'history', 'recent_history', 'history_fallback'];
 
@@ -469,8 +474,16 @@ final class SeriesCache {
 					$partial_rows = $this->normalizeRows(
 						$e->rows(), $series_kind, $range_from, $range_to
 					);
+					// A partial result is authoritative only for what it actually
+					// covers. Loaders read newest-first, so replace from the oldest
+					// returned row upward and keep the cached rows below it; using the
+					// whole planned range would delete evidence that earlier requests
+					// already served and report a gap the cache does not have.
+					$replace_from = $partial_rows === []
+						? $range_to + 1
+						: max($range_from, (int) $partial_rows[0]['clock']);
 					$combined = $this->replaceRange(
-						$state['rows'], $partial_rows, $range_from, $range_to, $series_kind
+						$state['rows'], $partial_rows, $replace_from, $range_to, $series_kind
 					);
 					throw new SeriesRangeIncompleteException(
 						$this->rowsInRange($combined, $segment['from'], $segment['to']),
@@ -544,7 +557,13 @@ final class SeriesCache {
 
 		$is_mutable = $segment['shard_to'] >= time();
 		$ttl = (int) $this->settings['ttl_seconds'];
-		$fresh = $ttl > 0 && time() - (int) $state['refreshed_at'] < $ttl;
+		// Freshness must bound the uncovered tail, not only the age of the last
+		// write. refreshed_at records when a fetch ran, covered_to how far it
+		// reached; a request with a historic `to` stamps the first without
+		// advancing the second, so age alone would serve an arbitrarily
+		// truncated series to every later request as a clean hit.
+		$fresh = $ttl > 0 && time() - (int) $state['refreshed_at'] < $ttl
+			&& $segment['to'] - (int) $state['covered_to'] <= $ttl;
 		$prefix_backfill = $plan !== [];
 		if ($state['covered_to'] < $segment['to']
 				&& (!$is_mutable || !$fresh || $prefix_backfill)) {
@@ -570,8 +589,14 @@ final class SeriesCache {
 		}
 
 		$ttl = (int) $this->settings['ttl_seconds'];
+		// Same uncovered-tail bound as refreshPlan(). A shard that stops before
+		// the requested range even begins holds no rows for it, so serving it as
+		// a stale hit would hand the caller an empty series instead of falling
+		// back to the live loader.
 		return $segment['shard_to'] >= time() && $ttl > 0
-			&& time() - (int) $state['refreshed_at'] < $ttl;
+			&& time() - (int) $state['refreshed_at'] < $ttl
+			&& (int) $state['covered_to'] >= $segment['from']
+			&& $segment['to'] - (int) $state['covered_to'] <= $ttl;
 	}
 
 	private function loadLive(callable $loader, string $series_kind, int $from, int $to): array {
@@ -962,10 +987,11 @@ final class SeriesCache {
 			@chmod($path, 0600);
 			$this->assertPrivateFile($path);
 			$this->writeUsageLedger([
-				// Never reduce the ledger during replacement. This remains safe if
-				// an abrupt OS stop persists the ledger rename but not the shard
-				// replacement; advisory cleanup later reconciles conservative excess.
-				'bytes' => max($usage['bytes'], $usage['bytes'] - $old_size + $new_size),
+				// The rename above already succeeded and was verified, so the old
+				// shard is gone and its bytes must be released. Refusing to decrease
+				// here would leak (old_size - new_size) on every shrinking rewrite
+				// and march the ledger toward the quota with no matching disk usage.
+				'bytes' => max(0, $usage['bytes'] - $old_size + $new_size),
 				'files' => $usage['files'] + $missing_directories + ($old_exists ? 0 : 1)
 			]);
 		}
@@ -1531,10 +1557,12 @@ final class SeriesCache {
 			($a['mtime'] <=> $b['mtime']) ?: strcmp($a['path'], $b['path']));
 		$total_bytes = max(0, $current_bytes);
 		$remaining = max(0, $current_entries);
-		$over_bytes = $total_bytes > $max_bytes;
-		$over_entries = $remaining > $max_entries;
-		$target_bytes = $over_bytes ? (int) floor($max_bytes * 0.9) : $total_bytes;
-		$target_entries = $over_entries ? (int) floor($max_entries * 0.9) : $remaining;
+		$over_bytes = $total_bytes > (int) floor($max_bytes * self::CAPACITY_WATERMARK_RATIO);
+		$over_entries = $remaining > (int) floor($max_entries * self::CAPACITY_WATERMARK_RATIO);
+		$target_bytes = $over_bytes ? (int) floor($max_bytes * self::CAPACITY_TARGET_RATIO) : $total_bytes;
+		$target_entries = $over_entries
+			? (int) floor($max_entries * self::CAPACITY_TARGET_RATIO)
+			: $remaining;
 		$selected = [];
 		$selected_paths = [];
 
@@ -1551,7 +1579,9 @@ final class SeriesCache {
 			}
 		}
 
-		// Capacity eviction only starts after an actual byte or hard-entry breach.
+		// Capacity eviction starts at the high-water mark and reclaims to the lower
+		// target, so headroom exists for the next publish instead of every write
+		// failing once usage settles against the ceiling.
 		foreach ($entries as $entry) {
 			if (count($selected) >= $limit
 					|| ($total_bytes <= $target_bytes && $remaining <= $target_entries)) {

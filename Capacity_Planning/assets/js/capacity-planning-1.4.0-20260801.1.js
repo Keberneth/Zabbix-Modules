@@ -1,5 +1,6 @@
 (function () {
 	'use strict';
+	// The build-versioned filename forces browsers and proxies to fetch this release.
 
 	const RISKS = [
 		{key: 'Critical', color: '#b42318', dark: true},
@@ -26,6 +27,8 @@
 	};
 	const HORIZON_DAYS = 365;
 	const FORECAST_WORKER_LIMIT = 3;
+	const MODULE_VERSION = '1.4.0';
+	const CLIENT_BUILD_ID = '1.4.0-20260801.1';
 	// The backend removes at most 10,000 entries per request and the cache has a
 	// hard 100,000-entry bound. Twenty attempts leave room for fixed metadata and
 	// directory cleanup without allowing an unbounded browser loop.
@@ -59,6 +62,9 @@
 	class CapacityPlanningApp {
 		constructor(root) {
 			this.root = root;
+			this.serverModuleVersion = String(root.dataset.moduleVersion || '').trim();
+			this.serverBuildId = String(root.dataset.serverBuildId || '').trim();
+			this.initialBuildError = this.initialDeploymentError();
 			this.dataUrl = root.dataset.dataUrl || 'zabbix.php?action=capacity.planning.data';
 			this.settingsSaveUrl = root.dataset.settingsSaveUrl
 				|| 'zabbix.php?action=capacity.planning.settings.save';
@@ -142,6 +148,11 @@
 			this.applyInitialState();
 			this.renderSettings();
 			this.updateExportState();
+			if (this.initialBuildError) {
+				this.setLoading(false);
+				this.showError(this.initialBuildError);
+				return;
+			}
 			if (this.activeTab === 'settings') {
 				this.setLoading(false);
 				this.updateLocationState();
@@ -156,6 +167,29 @@
 			const themed = this.root.closest('[theme]');
 			const theme = themed ? themed.getAttribute('theme') : '';
 			return (theme === 'dark-theme' || theme === 'hc-dark') ? PALETTE_DARK : PALETTE_LIGHT;
+		}
+
+		initialDeploymentError() {
+			if (this.serverModuleVersion === MODULE_VERSION && this.serverBuildId === CLIENT_BUILD_ID) {
+				return '';
+			}
+			return this.deploymentMismatchMessage('initial page', this.serverBuildId,
+				this.serverModuleVersion);
+		}
+
+		deploymentMismatchMessage(source, serverBuildId, moduleVersion = this.serverModuleVersion) {
+			const phpVersion = String(moduleVersion || '').trim() || 'missing';
+			const serverBuild = String(serverBuildId || '').trim() || 'missing';
+			return `Mixed or stale Capacity Planning deployment detected in ${source}: PHP module ${phpVersion}, server build ${serverBuild}, browser build ${CLIENT_BUILD_ID}. Deploy matching ${MODULE_VERSION} module files, restart PHP-FPM/Apache to clear OPcache, hard-refresh the browser, then reload.`;
+		}
+
+		assertResponseBuild(payload, source) {
+			const buildId = payload && typeof payload === 'object'
+				? String(payload.build_id || '').trim()
+				: '';
+			if (buildId !== CLIENT_BUILD_ID) {
+				throw new Error(this.deploymentMismatchMessage(source, buildId));
+			}
 		}
 
 		scopeFieldHtml(key, label, placeholder, grow = false) {
@@ -335,7 +369,7 @@
 								<p class="cap-modal-eyebrow" data-role="detail-eyebrow">Capacity evidence</p>
 								<h2 class="cap-modal-title" id="cap-detail-modal-title" data-role="detail-title">Capacity detail</h2>
 								<p class="cap-card-subtitle" data-role="detail-subtitle" aria-live="polite"></p>
-								<div class="cap-modal-zoombar"><span data-role="detail-zoom-label" hidden></span><button type="button" class="cap-link-btn" data-role="detail-zoom-reset" hidden>Reset zoom</button></div>
+								<div class="cap-modal-zoombar"><span data-role="detail-zoom-label" hidden></span><button type="button" class="cap-link-btn" data-role="detail-zoom-reset" hidden>Reset zoom</button><button type="button" class="cap-link-btn" data-role="detail-export-png" hidden>Export chart PNG</button></div>
 								<div class="cap-detail-stats" data-role="detail-stats"></div>
 								<div class="cap-legend" data-role="detail-legend"></div>
 								<div class="cap-chart-surface cap-modal-chart" data-role="detail-surface" tabindex="0" aria-label="Interactive capacity history chart"></div>
@@ -380,6 +414,7 @@
 				detailSubtitle: q('[data-role="detail-subtitle"]'), detailStats: q('[data-role="detail-stats"]'),
 				detailLegend: q('[data-role="detail-legend"]'), detailSurface: q('[data-role="detail-surface"]'),
 				detailZoomLabel: q('[data-role="detail-zoom-label"]'), detailZoomReset: q('[data-role="detail-zoom-reset"]'),
+			detailExportPng: q('[data-role="detail-export-png"]'),
 				panelOverview: q('[data-panel="overview"]'), panelDisks: q('[data-panel="disks"]'),
 				panelResources: q('[data-panel="resources"]'), panelSettings: q('[data-panel="settings"]')
 			};
@@ -474,6 +509,11 @@
 				el.addEventListener('click', () => this.hideDetail());
 			});
 			this.elements.detailZoomReset.addEventListener('click', () => this.resetDetailZoom());
+			// The toolbar button is inert while the modal is open and the selection is
+			// cleared on close, so the detail chart can only be exported from here.
+			this.elements.detailExportPng.addEventListener('click', () => {
+				this.exportPng().catch((err) => this.showError(err instanceof Error ? err.message : 'Failed to export PNG.'));
+			});
 			document.addEventListener('keydown', (e) => this.onDetailModalKeydown(e));
 			this.bindDetailSurface(this.elements.detailSurface);
 
@@ -741,6 +781,9 @@
 
 			this.elements.cacheSummary.innerHTML = `<span class="cap-cache-state ${stateClass}">${this.escapeHtml(stateLabel)}</span><span>${this.escapeHtml(stateDetail)}</span>`;
 			const rows = [
+				['PHP module version', this.serverModuleVersion || 'Missing'],
+				['PHP/server build', this.serverBuildId || 'Missing'],
+				['Browser build', CLIENT_BUILD_ID],
 				['Configuration', enabled ? `Enabled; mutable shards refresh after ${this.cacheIntervalLabel()}` : 'Disabled'],
 				['Scope', 'Shared by this Zabbix installation; not tied to a browser session']
 			];
@@ -810,6 +853,7 @@
 				let payload = {};
 				try { payload = text.trim() ? JSON.parse(text) : {}; }
 				catch (_error) { throw new Error('The server returned an invalid cache status response.'); }
+				this.assertResponseBuild(payload, 'cache-status response');
 				if (!response.ok || payload.ok !== true || !payload.cache_status
 						|| typeof payload.cache_status !== 'object') {
 					throw new Error('Detailed cache status is temporarily unavailable.');
@@ -819,8 +863,11 @@
 				}
 				this.cacheStatus = payload.cache_status;
 			}
-			catch (_error) {
-				this.showSettingsMessage('Detailed cache health could not be loaded. The configured cache setting shown above is still valid.', true);
+			catch (error) {
+				const message = error instanceof Error && error.message.includes('Mixed or stale')
+					? error.message
+					: 'Detailed cache health could not be loaded. The configured cache setting shown above is still valid.';
+				this.showSettingsMessage(message, true);
 			}
 			finally {
 				this.cacheStatusLoading = false;
@@ -843,6 +890,7 @@
 			let payload = {};
 			try { payload = text.trim() ? JSON.parse(text) : {}; }
 			catch (_error) { throw new Error('The server returned an invalid settings response.'); }
+			this.assertResponseBuild(payload, 'settings response');
 			const rawError = payload.error && typeof payload.error === 'object'
 				? payload.error
 				: String(payload.error || 'The cache operation failed.');
@@ -1502,6 +1550,7 @@
 				try { payload = JSON.parse(text); }
 				catch (_e) { throw new Error('The server returned an invalid JSON response.'); }
 			}
+			this.assertResponseBuild(payload, 'capacity-data response');
 			if (payload && payload.error) {
 				const error = new Error(payload.error.message || 'Failed to load capacity data.');
 				if (payload.error.field) { error.field = String(payload.error.field); }
@@ -1835,6 +1884,26 @@
 				return fc.selected;
 			}
 			return fc.sel && fc.windows && fc.windows[fc.sel] ? fc.windows[fc.sel] : null;
+		}
+
+		percentageSelectedStats(fc) {
+			if (!fc) { return null; }
+			if (fc.pct_selected && typeof fc.pct_selected === 'object' && !Array.isArray(fc.pct_selected)) {
+				return fc.pct_selected;
+			}
+			return fc.pct_sel && fc.pct_windows && fc.pct_windows[fc.pct_sel]
+				? fc.pct_windows[fc.pct_sel]
+				: null;
+		}
+
+		modelWindowEvidence(stats) {
+			if (!stats || typeof stats !== 'object') { return '' ; }
+			const parts = [];
+			if (stats.days != null) { parts.push(`${stats.days} days`); }
+			if (stats.cov != null) { parts.push(`${stats.cov}% coverage`); }
+			const r2 = stats.r2 != null ? Number(stats.r2) : NaN;
+			parts.push(Number.isFinite(r2) ? `linear-fit R² ${r2.toFixed(3)}` : 'linear-fit R² unavailable');
+			return parts.length ? ` (${parts.join(', ')})` : '';
 		}
 
 		selectedLabel(fc) {
@@ -2413,7 +2482,7 @@
 				if (r.growth != null || r.growthPct != null) {
 					const capacityGrowth = r.growth != null ? `${this.fmtBytes(r.growth)}/day` : 'No byte trend';
 					const percentageGrowth = r.growthPct != null
-						? `${r.growthPct >= 0 ? '+' : ''}${this.trimNum(r.growthPct)} pp/day`
+						? `${r.growthPct >= 0 ? '+' : ''}${this.fmtPctSlope(r.growthPct)} pp/day`
 						: 'No percentage trend';
 					growth = `<div class="cap-cell-name">${this.escapeHtml(capacityGrowth)}</div><div class="cap-cell-sub">${this.escapeHtml(percentageGrowth)}</div>`;
 				}
@@ -2674,6 +2743,16 @@
 				};
 				modal.addEventListener('focusout', guard);
 				setTimeout(() => modal.removeEventListener('focusout', guard), 400);
+				// Some Chromium builds move focus to <body> without a usable focusout
+				// transition after inert propagation. Poll for the same short settling
+				// window so that silent fixups cannot permanently strand keyboard focus.
+				const focusGuardUntil = performance.now() + 400;
+				const keepFocusInside = () => {
+					if (!modal.classList.contains('is-open')) { return; }
+					if (!modal.contains(document.activeElement)) { focusClose(); }
+					if (performance.now() < focusGuardUntil) { requestAnimationFrame(keepFocusInside); }
+				};
+				requestAnimationFrame(keepFocusInside);
 			}
 		}
 
@@ -2775,6 +2854,7 @@
 				els.diskDetailSurface.innerHTML = '<div class="cap-empty">No chart data.</div>';
 				this.detailGeom = null;
 				this.detailEls = null;
+				this.updateDetailZoomUi();
 				return;
 			}
 
@@ -2784,14 +2864,14 @@
 			const windowLabel = this.selectedLabel(fc);
 			const pctWindowLabel = this.percentageSelectedLabel(fc);
 			const sel = this.selectedStats(fc);
+			const pctSel = this.percentageSelectedStats(fc);
 			if (hasModel) {
 				const modelParts = [];
 				if (fc.sel) {
-					modelParts.push(`used-capacity window ${windowLabel}`
-						+ (sel ? ` (${sel.days} days, ${sel.cov}% coverage${sel.r2 != null ? `, R² ${sel.r2}` : ''})` : ''));
+					modelParts.push(`used-capacity window ${windowLabel}${this.modelWindowEvidence(sel)}`);
 				}
 				if (fc.pct_sel) {
-					modelParts.push(`used-percentage window ${pctWindowLabel}`);
+					modelParts.push(`used-percentage window ${pctWindowLabel}${this.modelWindowEvidence(pctSel)}`);
 				}
 				els.diskDetailSubtitle.textContent =
 					`Historical disk-growth evidence${Array.isArray(fc.series) && fc.series.length ? ' with a projected trend' : ''}. `
@@ -2812,7 +2892,7 @@
 			const recommendation = (fc && fc.recommendation) || d.current_recommendation || '';
 			const basis = (value) => value ? ` · basis <b>${this.escapeHtml(value)}</b>` : '';
 			const pctTrend = fc && fc.growth_pct_day != null
-				? `${fc.growth_pct_day >= 0 ? '+' : ''}${this.trimNum(fc.growth_pct_day)} pp/day`
+				? `${fc.growth_pct_day >= 0 ? '+' : ''}${this.fmtPctSlope(fc.growth_pct_day)} pp/day`
 				: 'no sustained percentage growth';
 			const pctOrigin = fc && fc.pct_sel
 				? (fc.pct_series_direct ? ' · direct percentage history' : ' · derived percentage history')
@@ -2820,7 +2900,7 @@
 			const stats = [
 				maintenanceDetail,
 				`Overall risk: <b>${this.escapeHtml(this.severityOf(d))}</b> · data status: <b>${this.escapeHtml(d.status || 'Unknown')}</b>`,
-				`${this.currentObservationUsable(d) ? 'Now' : 'Last accepted'}: <b>${this.fmtPct(d.pused)}</b> used, <b>${this.fmtBytes(d.free)}</b> free · usable capacity <b>${this.fmtBytes(usable)}</b>${reportedTotal}`,
+				`${this.currentObservationUsable(d) ? 'Now' : 'Last accepted'}: <b>${this.fmtPctDetail(d.pused)}</b> used, <b>${this.fmtBytes(d.free)}</b> free · usable capacity <b>${this.fmtBytes(usable)}</b>${reportedTotal}`,
 				hasModel
 					? `Used-capacity trend: <b>${fc.growth_day != null ? this.fmtBytes(fc.growth_day) + '/day' : 'no sustained byte growth'}</b> · window <b>${this.escapeHtml(windowLabel)}</b> · source <b>${this.escapeHtml(fc.source || 'n/a')}</b>${fc.accelerating ? ' (accelerating)' : ''}`
 					: 'Growth model: <b>unavailable</b>',
@@ -2849,6 +2929,7 @@
 				els.diskDetailSurface.innerHTML = `<div class="cap-empty">${modelPending ? 'Historical forecast still loading.' : 'No historical model; current-state evidence is shown above.'}</div>`;
 				this.detailGeom = null;
 				this.detailEls = null;
+				this.updateDetailZoomUi();
 			}
 		}
 
@@ -2890,17 +2971,32 @@
 				: (asPct && fc.growth_pct_day != null
 					? fc.growth_pct_day
 					: (fc.growth_day != null ? fc.growth_day * scale : null));
+			const eta = fc.eta && typeof fc.eta === 'object' ? fc.eta : {};
+			const marker = (daysField, dateField, basisName) => ({
+				markerProvided: Object.prototype.hasOwnProperty.call(eta, daysField),
+				markerDays: eta[daysField],
+				markerDate: eta[dateField],
+				markerBasis: basisName
+			});
 			const thresholds = [];
 			if (asPct) {
-				if (d.warn_pct && d.warn_pct.v != null) { thresholds.push({value: d.warn_pct.v, label: `Warning ${this.trimNum(d.warn_pct.v)}%`, kind: 'warn'}); }
-				if (d.crit_pct && d.crit_pct.v != null) { thresholds.push({value: d.crit_pct.v, label: `Critical ${this.trimNum(d.crit_pct.v)}%`, kind: 'crit'}); }
+				if (d.warn_pct && d.warn_pct.v != null) {
+					thresholds.push({value: d.warn_pct.v, label: `Warning ${this.trimNum(d.warn_pct.v)}%`,
+						kind: 'warn', markerId: 'warn-pct', ...marker('warn_pct_days', 'warn_pct_date', 'used % model')});
+				}
+				if (d.crit_pct && d.crit_pct.v != null) {
+					thresholds.push({value: d.crit_pct.v, label: `Critical ${this.trimNum(d.crit_pct.v)}%`,
+						kind: 'crit', markerId: 'crit-pct', ...marker('crit_pct_days', 'crit_pct_date', 'used % model')});
+				}
 				if (d.warn_free && d.warn_free.v > 0) {
 					const value = Math.max(0, Math.min(100, (capacity - d.warn_free.v) / capacity * 100));
-					thresholds.push({value, label: `Warning free ${this.fmtBytes(d.warn_free.v)} (${this.trimNum(value)}% used)`, kind: 'warn'});
+					thresholds.push({value, label: `Warning free ${this.fmtBytes(d.warn_free.v)} (${this.trimNum(value)}% used)`,
+						kind: 'warn', markerId: 'warn-free', ...marker('warn_free_days', 'warn_free_date', 'absolute free-space model')});
 				}
 				if (d.crit_free && d.crit_free.v > 0) {
 					const value = Math.max(0, Math.min(100, (capacity - d.crit_free.v) / capacity * 100));
-					thresholds.push({value, label: `Critical free ${this.fmtBytes(d.crit_free.v)} (${this.trimNum(value)}% used)`, kind: 'crit'});
+					thresholds.push({value, label: `Critical free ${this.fmtBytes(d.crit_free.v)} (${this.trimNum(value)}% used)`,
+						kind: 'crit', markerId: 'crit-free', ...marker('crit_free_days', 'crit_free_date', 'absolute free-space model')});
 				}
 			}
 			return {
@@ -2908,7 +3004,9 @@
 				unit: asPct ? '%' : ' GiB',
 				yMax: asPct ? 100 : null,
 				series, currentValue, slope, thresholds,
-				projectionLabel: currentUsable ? 'Projected growth' : ''
+				projectionLabel: currentUsable
+					? `Projected growth (${asPct && fc.growth_pct_day != null ? 'used % basis' : 'used-capacity basis'})`
+					: ''
 			};
 		}
 
@@ -2929,6 +3027,7 @@
 				els.resDetailSurface.innerHTML = '<div class="cap-empty">No chart data.</div>';
 				this.detailGeom = null;
 				this.detailEls = null;
+				this.updateDetailZoomUi();
 				return;
 			}
 
@@ -3015,6 +3114,7 @@
 				els.resDetailSurface.innerHTML = `<div class="cap-empty">${analysisPending ? 'Historical analysis still loading.' : 'No qualified historical baseline; current-state evidence is shown above.'}</div>`;
 				this.detailGeom = null;
 				this.detailEls = null;
+				this.updateDetailZoomUi();
 			}
 		}
 
@@ -3025,6 +3125,7 @@
 				this.detailGeom = null;
 				this.detailEls = null;
 				this.detailChartSpec = null;
+				this.updateDetailZoomUi();
 				return;
 			}
 			const chartId = this.selected ? this.selected.id : null;
@@ -3060,6 +3161,8 @@
 			].filter(Boolean).join('');
 
 			surface.innerHTML = built.svg;
+			surface.dataset.patternDetected = built.geom.patternDetected ? '1' : '0';
+			surface.dataset.patternDrawn = built.geom.patternDrawn ? '1' : '0';
 			this.detailGeom = built.geom;
 			const svg = surface.querySelector('svg');
 			this.detailEls = svg ? {svg, crosshair: svg.querySelector('.cap-crosshair'), surface} : null;
@@ -3068,6 +3171,7 @@
 
 		updateDetailZoomUi() {
 			const zoomed = !!this.detailZoom;
+			this.elements.detailExportPng.hidden = !this.detailGeom;
 			this.elements.detailZoomReset.hidden = !zoomed;
 			this.elements.detailZoomLabel.hidden = !zoomed;
 			this.elements.detailZoomLabel.textContent = zoomed
@@ -3223,11 +3327,19 @@
 			}
 			residMean /= nValid;
 			let sigma2 = 0;
+			let signalScale = 1;
 			for (let d = 0; d < D; d++) {
-				if (mask[d]) { resid[d] -= residMean; sigma2 += resid[d] * resid[d]; }
+				if (mask[d]) {
+					resid[d] -= residMean;
+					sigma2 += resid[d] * resid[d];
+					signalScale = Math.max(signalScale, Math.abs(bin[d]));
+				}
 			}
 			sigma2 /= nValid;
-			if (sigma2 <= 0) { return null; }
+			// Exact linear histories can leave machine-epsilon OLS residuals. Treat
+			// those as zero signal so numerical dust cannot become a "pattern".
+			const residualFloor = signalScale * 1e-9;
+			if (sigma2 <= residualFloor * residualFloor) { return null; }
 
 			// Masked autocorrelation. Candidate periods need >= 3 observed cycles
 			// (P <= D/3); lags run to 2D/3 so the harmonic check at 2P always has data.
@@ -3349,15 +3461,20 @@
 			mean /= period;
 			for (let k = 0; k < period; k++) { smoothed[k] -= mean; }
 
-			// The recurring shape must explain a meaningful share of the residual
-			// variance — this is what separates a real sawtooth from noise.
-			let explained = 0;
+			// The recurring shape must reduce residual SSE by a meaningful share —
+			// actual variance reduction, rather than template energy alone, separates
+			// a phase-aligned recurring path from a merely large folded shape.
+			let residualSse = 0;
+			let patternSse = 0;
 			for (let d = 0; d < D; d++) {
 				if (!mask[d]) { continue; }
 				const v = smoothed[((d - dNow) % period + period) % period];
-				explained += v * v;
+				residualSse += resid[d] * resid[d];
+				const error = resid[d] - v;
+				patternSse += error * error;
 			}
-			if (explained / nValid < 0.35 * sigma2) { return null; }
+			const explainedFraction = residualSse > 0 ? 1 - patternSse / residualSse : 0;
+			if (explainedFraction < 0.35) { return null; }
 
 			let tplMin = Infinity;
 			let tplMax = -Infinity;
@@ -3367,14 +3484,14 @@
 			}
 			if (tplMax - tplMin <= 0) { return null; }
 
-			return {period, template: smoothed, app: tplMax - tplMin};
+			return {period, template: smoothed, app: tplMax - tplMin, explainedFraction};
 		}
 
-		// Pattern value at dDays >= 0 after "today": circularly interpolated
-		// template, amplitude constant for the first two projected cycles then
-		// damped per whole cycle (each full drawn cycle stays exactly zero-mean
-		// around the trend), plus a short cubic seam so the drawn path starts
-		// exactly at the anchor point (nowSec, currentValue).
+		// Pattern value at dDays >= 0 after "today": a circularly interpolated,
+		// zero-mean template whose amplitude is constant for two cycles and then
+		// damped per whole cycle. A short cubic anchor transition is intentionally
+		// non-zero-mean during the first cycle so the display-only path starts
+		// exactly at (nowSec, currentValue) without changing the linear forecast.
 		projectionPatternValue(pat, dDays) {
 			const period = pat.period;
 			const phi = ((dDays % period) + period) % period;
@@ -3459,7 +3576,9 @@
 				const t = tMin + span * i / tickCount;
 				const lx = x(t);
 				const ly = margin.top + plotHeight + 14;
-				svg += `<text x="${lx}" y="${ly}" font-size="10" fill="${palette.axisText}" transform="rotate(45 ${lx} ${ly})" text-anchor="start">${this.escapeHtml(this.fmtDate(t))}</text>`;
+				const edge = i === 0 ? 'left' : (i === tickCount ? 'right' : 'middle');
+				const anchor = i === tickCount ? 'end' : 'start';
+				svg += `<text x="${lx}" y="${ly}" font-size="10" fill="${palette.axisText}" transform="rotate(45 ${lx} ${ly})" text-anchor="${anchor}" data-axis-edge="${edge}">${this.escapeHtml(this.fmtDate(t))}</text>`;
 			}
 
 			// Min–max band.
@@ -3486,13 +3605,15 @@
 				svg += `<text x="${tx + 4}" y="${margin.top + 12}" font-size="10" fill="${palette.axisText}">today</text>`;
 			}
 
-			// Projection. The straight dashed line stays the authoritative model
-			// (ETAs and crossing markers are computed from it); when history shows
-			// a statistically confirmed repeating pattern, a second fainter line
-			// additionally shows the possible path with that rhythm laid on top.
+			// Projection. The straight dashed line stays authoritative for its named
+			// model basis. Threshold markers use their own percentage/free-space ETA
+			// candidates, while a confirmed recurring pattern adds only a fainter,
+			// display-only possible path around the straight projection.
+			let patternDetected = false;
 			let patternDrawn = false;
 			if (projected) {
 				const pat = this.projectionPattern(spec, nowSec);
+				patternDetected = !!pat;
 				// Draw-time visibility floor: below ~3px peak-to-peak the pattern
 				// would read as rendering noise rather than information.
 				if (pat && pat.app / vMax * plotHeight >= 3) {
@@ -3506,11 +3627,11 @@
 						const dDays = (projT - nowSec) / 86400;
 						points.push(`${x(projT)},${y(spec.currentValue + spec.slope * dDays + this.projectionPatternValue(pat, dDays))}`);
 					}
-					svg += `<polyline points="${points.join(' ')}" fill="none" stroke="${palette.projection}" stroke-width="1.6" stroke-dasharray="2 4" opacity="0.65" stroke-linejoin="round" stroke-linecap="round" />`;
+					svg += `<polyline data-role="possible-path" points="${points.join(' ')}" fill="none" stroke="${palette.projection}" stroke-width="1.6" stroke-dasharray="2 4" opacity="0.65" stroke-linejoin="round" stroke-linecap="round"><title>Possible path from a zero-mean recurring-history template with a short anchor transition at today; display only.</title></polyline>`;
 					patternDrawn = true;
 				}
-				svg += `<line x1="${x(nowSec)}" y1="${y(spec.currentValue)}" x2="${x(projT)}" y2="${y(projEnd)}" stroke="${palette.projection}" stroke-width="2.2" stroke-dasharray="6 5" stroke-linecap="round" />`;
-				svg += `<circle cx="${x(nowSec)}" cy="${y(spec.currentValue)}" r="3.5" fill="${palette.projection}" />`;
+				svg += `<line data-role="authoritative-projection" x1="${x(nowSec)}" y1="${y(spec.currentValue)}" x2="${x(projT)}" y2="${y(projEnd)}" stroke="${palette.projection}" stroke-width="2.2" stroke-dasharray="6 5" stroke-linecap="round" />`;
+				svg += `<circle data-role="projection-anchor" cx="${x(nowSec)}" cy="${y(spec.currentValue)}" r="3.5" fill="${palette.projection}" />`;
 			}
 
 			// Threshold lines.
@@ -3519,11 +3640,28 @@
 				const color = t.kind === 'crit' ? palette.crit : palette.warn;
 				svg += `<line x1="${margin.left}" y1="${ty}" x2="${width - margin.right}" y2="${ty}" stroke="${color}" stroke-width="1.4" stroke-dasharray="7 4" />`;
 				svg += `<text x="${width - margin.right - 4}" y="${ty - 4}" font-size="10" text-anchor="end" fill="${color}">${this.escapeHtml(t.label)}</text>`;
-				// Crossing marker where the projection meets the threshold.
-				if (projected && spec.slope > 0 && spec.currentValue < t.value && projEnd >= t.value) {
-					const crossT = nowSec + (t.value - spec.currentValue) / spec.slope * 86400;
-					if (crossT <= tMax) {
-						svg += `<circle cx="${x(crossT)}" cy="${ty}" r="4.5" fill="${color}" stroke="#ffffff" stroke-width="1.2" />`;
+				// Each threshold marker uses the ETA from its own model basis. This is
+				// deliberately independent of the displayed used-% projection when an
+				// absolute-free model diverges. Legacy payloads fall back to the plotted
+				// slope; an explicit null candidate remains unprojected.
+				let markerDays = null;
+				if (t.markerProvided === true) {
+					const candidate = Number(t.markerDays);
+					if (t.markerDays !== null && Number.isFinite(candidate) && candidate >= 0) {
+						markerDays = candidate;
+					}
+				}
+				else if (projected && spec.slope > 0 && spec.currentValue < t.value && projEnd >= t.value) {
+					markerDays = (t.value - spec.currentValue) / spec.slope;
+				}
+				if (projected && spec.currentValue < t.value && markerDays !== null) {
+					const crossT = nowSec + markerDays * 86400;
+					if (crossT >= nowSec && crossT <= tMax) {
+						const markerId = String(t.markerId || `${t.kind}-legacy`);
+						const markerBasis = String(t.markerBasis || 'displayed projection');
+						const dateText = t.markerDate ? ` (${this.fmtDate(t.markerDate)})` : '';
+						const title = `${t.label}: ${this.fmtDays(markerDays)}${dateText}; basis ${markerBasis}`;
+						svg += `<circle data-threshold-marker="${this.escapeHtml(markerId)}" data-threshold-basis="${this.escapeHtml(markerBasis)}" data-marker-days="${markerDays}" cx="${x(crossT)}" cy="${ty}" r="4.5" fill="${color}" stroke="#ffffff" stroke-width="1.2"><title>${this.escapeHtml(title)}</title></circle>`;
 					}
 				}
 			});
@@ -3532,7 +3670,7 @@
 			return {
 				svg,
 				geom: {margin, plotWidth, plotHeight, tMin, span, vbWidth: width, vbHeight: height,
-					series, spec, nowSec, projEnd, tMax, patternDrawn}
+					series, spec, nowSec, projEnd, tMax, patternDetected, patternDrawn}
 			};
 		}
 
@@ -3640,8 +3778,8 @@
 					d.crit_pct && d.crit_pct.v != null ? d.crit_pct.v : '',
 					d.warn_free && d.warn_free.v > 0 ? gib(d.warn_free.v) : '',
 					d.crit_free && d.crit_free.v > 0 ? gib(d.crit_free.v) : '',
-					fc && fc.growth_day != null ? (fc.growth_day / GIB).toFixed(4) : '',
-					fc && fc.growth_pct_day != null ? Number(fc.growth_pct_day).toFixed(5) : '',
+					fc && fc.growth_day != null ? String(Number(fc.growth_day) / GIB) : '',
+					fc && fc.growth_pct_day != null ? String(Number(fc.growth_pct_day)) : '',
 					fc ? this.selectedLabel(fc) : '', fc ? this.percentageSelectedLabel(fc) : '',
 					fc ? fc.pct_source || '' : '', fc ? fc.pct_confidence || '' : '',
 					fc && fc.pct_sel ? (fc.pct_series_direct ? 'Yes' : 'No') : '',
@@ -3729,7 +3867,11 @@
 
 		downloadCsv(rows, prefix) {
 			const csv = rows.map((r) => r.map((v) => this.csvEscape(v)).join(',')).join('\n');
-			this.downloadBlob(new Blob([csv], {type: 'text/csv;charset=utf-8;'}), this.buildFileName(prefix, 'csv'));
+			// The BOM is what makes Excel read a double-clicked file as UTF-8; the
+			// Blob charset only reaches HTTP-context consumers, so without it
+			// non-ASCII host and filesystem names arrive as mojibake.
+			this.downloadBlob(new Blob(['﻿', csv], {type: 'text/csv;charset=utf-8;'}),
+				this.buildFileName(prefix, 'csv'));
 		}
 
 		buildReportHtml() {
@@ -3753,7 +3895,7 @@
 
 			const diskRows = this.visibleDisks().map((d) => this.diskRow(d)).sort((a, b) => b.risk - a.risk).slice(0, 500);
 			const diskTable = diskRows.length ? `<div class="table-scroll"><table><thead><tr><th>Risk</th><th>Host</th><th>Filesystem</th><th>Current / last accepted used</th><th>Current / last accepted free</th><th>Usable capacity</th><th>Growth (capacity / percentage)</th><th>Model evidence (capacity / percentage)</th><th>Warning ETA / basis</th><th>Critical ETA / basis</th><th>Full ETA</th><th>Confidence</th><th>Data status</th><th>Maintenance</th><th>Current-state explanation</th><th>Evidence / note</th><th>Assessment</th></tr></thead><tbody>${
-				diskRows.map((r) => `<tr><td>${this.riskPill(r.sev)}</td><td>${this.escapeHtml(r.host)}${this.maintenanceBadgeHtml(r.d)}</td><td>${this.escapeHtml(r.fs)}</td><td>${this.escapeHtml(this.currentObservationText(r.d, this.fmtPct(r.pused)))}</td><td>${this.escapeHtml(this.currentObservationText(r.d, this.fmtBytes(r.free)))}</td><td>${this.fmtBytes(r.usable)}</td><td>${r.growth != null ? this.fmtBytes(r.growth) + '/day' : '—'} / ${r.growthPct != null ? `${r.growthPct >= 0 ? '+' : ''}${this.trimNum(r.growthPct)} pp/day` : '—'}</td><td>${this.escapeHtml(`${r.modelWindow || '—'} / ${r.pctWindow || '—'} · ${r.pctSource || '—'}${r.pctWindow && r.pctWindow !== 'n/a' ? (r.pctSeriesDirect ? ' (direct)' : ' (derived)') : ''}`)}</td><td>${this.fmtDays(r.warn)}${r.warnBasis ? ` / ${this.escapeHtml(r.warnBasis)}` : ''}</td><td>${this.fmtDays(r.crit)}${r.critBasis ? ` / ${this.escapeHtml(r.critBasis)}` : ''}</td><td>${this.fmtDays(r.full)}</td><td>${this.escapeHtml(r.conf || '—')}</td><td>${this.escapeHtml(r.status || '—')}</td><td>${this.escapeHtml(this.maintenanceSummary(r.d) || '—')}</td><td>${this.escapeHtml(this.currentStateExplanation(r.d, r.reasons) || '—')}</td><td>${this.escapeHtml([r.reasons.join('; '), r.note].filter(Boolean).join(' · ') || '—')}</td><td>${this.escapeHtml(r.action || '—')}</td></tr>`).join('')
+				diskRows.map((r) => `<tr><td>${this.riskPill(r.sev)}</td><td>${this.escapeHtml(r.host)}${this.maintenanceBadgeHtml(r.d)}</td><td>${this.escapeHtml(r.fs)}</td><td>${this.escapeHtml(this.currentObservationText(r.d, this.fmtPct(r.pused)))}</td><td>${this.escapeHtml(this.currentObservationText(r.d, this.fmtBytes(r.free)))}</td><td>${this.fmtBytes(r.usable)}</td><td>${r.growth != null ? this.fmtBytes(r.growth) + '/day' : '—'} / ${r.growthPct != null ? `${r.growthPct >= 0 ? '+' : ''}${this.fmtPctSlope(r.growthPct)} pp/day` : '—'}</td><td>${this.escapeHtml(`${r.modelWindow || '—'} / ${r.pctWindow || '—'} · ${r.pctSource || '—'}${r.pctWindow && r.pctWindow !== 'n/a' ? (r.pctSeriesDirect ? ' (direct)' : ' (derived)') : ''}`)}</td><td>${this.fmtDays(r.warn)}${r.warnBasis ? ` / ${this.escapeHtml(r.warnBasis)}` : ''}</td><td>${this.fmtDays(r.crit)}${r.critBasis ? ` / ${this.escapeHtml(r.critBasis)}` : ''}</td><td>${this.fmtDays(r.full)}</td><td>${this.escapeHtml(r.conf || '—')}</td><td>${this.escapeHtml(r.status || '—')}</td><td>${this.escapeHtml(this.maintenanceSummary(r.d) || '—')}</td><td>${this.escapeHtml(this.currentStateExplanation(r.d, r.reasons) || '—')}</td><td>${this.escapeHtml([r.reasons.join('; '), r.note].filter(Boolean).join(' · ') || '—')}</td><td>${this.escapeHtml(r.action || '—')}</td></tr>`).join('')
 			}</tbody></table></div>` : '<p>No filesystem findings.</p>';
 
 			const resRows = this.visibleResources().map((r) => this.resourceRow(r)).sort((a, b) => b.risk - a.risk).slice(0, 500);
@@ -3799,7 +3941,9 @@
 
 		async exportPng() {
 			let svgs = [];
-			if (this.activeTab !== 'overview' && this.selected && this.detailGeom) {
+			// A rendered detail chart is the whole condition: the active tab is only a
+			// proxy for it, and the modal is the only place this can be triggered.
+			if (this.selected && this.detailGeom) {
 				const finding = this.inv.byId.get(this.selected.id);
 				const fc = this.fc.get(this.selected.id);
 				if (finding && fc && fc.status === 'ok') {
@@ -3980,8 +4124,11 @@
 		csvEscape(value) {
 			// Neutralize spreadsheet formula injection: host/filesystem names can start
 			// with = + - @ (or tab/CR) and would execute as formulas.
+			// A bare number cannot be a formula, so exempt it: prefixing negative
+			// growth rates turned them into text that spreadsheets refuse to sum and
+			// importers read as NaN.
 			let s = String(value ?? '');
-			if (/^[=+\-@\t\r]/.test(s)) { s = `'${s}`; }
+			if (/^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(s)) { s = `'${s}`; }
 			return `"${s.replace(/"/g, '""')}"`;
 		}
 
@@ -4002,6 +4149,22 @@
 
 		fmtPct(v) {
 			return v == null || !isFinite(v) ? 'N/A' : `${Number(v).toFixed(1)}%`;
+		}
+
+		fmtPctDetail(v) {
+			return v == null || !isFinite(v) ? 'N/A' : `${Number(v).toFixed(2)}%`;
+		}
+
+		fmtPctSlope(v) {
+			if (v == null || !isFinite(v)) { return 'N/A'; }
+			const n = Number(v);
+			const magnitude = Math.abs(n);
+			if (magnitude === 0 || magnitude >= 0.01) { return this.trimNum(n); }
+			if (magnitude < 0.0000001) {
+				return n.toExponential(2).replace(/\.00e/, 'e').replace(/(\.\d*[1-9])0+e/, '$1e');
+			}
+			const decimals = Math.min(8, Math.ceil(-Math.log10(magnitude)) + 2);
+			return n.toFixed(decimals).replace(/0+$/, '').replace(/\.$/, '');
 		}
 
 		fmtCount(v) {

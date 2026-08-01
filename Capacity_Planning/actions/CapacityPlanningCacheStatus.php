@@ -6,9 +6,11 @@ namespace Modules\CapacityPlanning\Actions;
 
 use CController;
 use CControllerResponseData;
+use Modules\CapacityPlanning\Lib\Build;
 use Modules\CapacityPlanning\Lib\Config;
 use Modules\CapacityPlanning\Lib\SeriesCache;
 
+require_once __DIR__.'/../lib/Build.php';
 require_once __DIR__.'/../lib/Config.php';
 require_once __DIR__.'/../lib/SeriesCache.php';
 
@@ -45,6 +47,7 @@ final class CapacityPlanningCacheStatus extends CController {
 	}
 
 	private function respond(array $payload, int $http_status = 200): void {
+		$payload['build_id'] = Build::ID;
 		http_response_code($http_status);
 		header('Content-Type: application/json; charset=UTF-8');
 		$json = json_encode(
@@ -52,7 +55,11 @@ final class CapacityPlanningCacheStatus extends CController {
 			JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
 		);
 		if ($json === false) {
-			$json = '{"ok":false,"error":"Failed to encode response."}';
+			// The client validates the build handshake before reading the error, so
+			// the fallback must still carry build_id or an encode failure surfaces
+			// as a stale-deployment mismatch.
+			$json = '{"ok":false,"error":"Failed to encode response.","build_id":'
+				.json_encode(Build::ID).'}';
 		}
 
 		$this->setResponse(

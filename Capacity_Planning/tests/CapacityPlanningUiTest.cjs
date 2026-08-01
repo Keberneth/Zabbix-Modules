@@ -6,10 +6,19 @@ const path = require('path');
 const {chromium} = require('playwright');
 
 const root = path.resolve(__dirname, '..');
-const jsAsset = path.join(root, 'assets', 'js', 'capacity-planning.js');
+const jsAsset = path.join(root, 'assets', 'js', 'capacity-planning-1.4.0-20260801.1.js');
 const cssAsset = path.join(root, 'assets', 'css', 'capacity-planning.css');
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
 	|| 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const MODULE_VERSION = '1.4.0';
+const CLIENT_BUILD_ID = '1.4.0-20260801.1';
+
+function appDocument(initialTab = 'disks', extraAttributes = '') {
+	return `<!doctype html><html><body><main id="capacity-planning-root" data-data-url="/fake"
+		data-module-version="${MODULE_VERSION}" data-server-build-id="${CLIENT_BUILD_ID}"
+		data-csrf-name="csrf_key" data-data-csrf-token="data-token-123" data-initial-lookback=""
+		data-initial-tab="${initialTab}" ${extraAttributes}></main></body></html>`;
+}
 
 function fixture() {
 	const now = Math.floor(Date.now() / 1000);
@@ -66,6 +75,7 @@ function fixture() {
 	];
 	return {
 		inventory: {
+			build_id: CLIENT_BUILD_ID,
 			disks, resources, quality: [],
 			facets: {hosts, hostgroups: ['Databases', 'Development', 'Production', 'Web']},
 			meta: {generated_at: now - 120, hosts_analyzed: 3, forecast_batch_max: 10, resource_forecast_batch_max: 2,
@@ -75,10 +85,13 @@ function fixture() {
 			id: 'd0', status: 'ok', severity: 'Critical', confidence: 'High', source: 'trends',
 			sel: '3m', sel_label: '3 months', selected: {days: 60, cov: 100, r2: 0.98},
 			pct_sel: '3m', pct_sel_label: '3 months', pct_source: 'trends', pct_confidence: 'High',
+			pct_windows: {'3m': {days: 60, cov: 100, r2: 0.97}},
 			pct_series_direct: false, growth_day: 3, growth_pct_day: 0.3, accelerating: false,
 			series, pct_series: [], reasons: ['Recurring growth fixture'], recommendation: 'Plan capacity.',
 			eta: {warn_days: 0, warn_date: now, warn_basis: 'used percentage', crit_days: 0,
 				crit_date: now, crit_basis: 'used percentage', full_days: 14, full_date: now + 14 * 86400,
+				warn_pct_days: 0, warn_pct_date: now, warn_free_days: null, warn_free_date: null,
+				crit_pct_days: 0, crit_pct_date: now, crit_free_days: null, crit_free_date: null,
 				next_days: 0, next_date: now, next_basis: 'used percentage'}
 		}
 	};
@@ -106,6 +119,7 @@ function settingsDocument(canManage, enabled = true, ttlSeconds = 1800) {
 	const status = JSON.stringify({enabled, ttl_seconds: ttlSeconds, status_pending: canManage});
 	return `<!doctype html><html><body><main id="capacity-planning-root"
 		data-data-url="/fake" data-settings-save-url="/settings-save" data-cache-status-url="/cache-status"
+		data-module-version="${MODULE_VERSION}" data-server-build-id="${CLIENT_BUILD_ID}"
 		data-cache-settings='${settings}' data-cache-status='${status}'
 		data-can-manage-settings="${canManage ? '1' : '0'}" data-csrf-name="csrf_key"
 		data-csrf-token="${canManage ? 'csrf-value-123' : ''}" data-data-csrf-token="data-token-123"
@@ -124,6 +138,102 @@ async function run() {
 	const same = (expected, actual, message) => { assertions++; assert.strictEqual(actual, expected, message); };
 
 	try {
+		const initialMismatchPage = await browser.newPage({viewport: {width: 1000, height: 700}});
+		await initialMismatchPage.addInitScript(() => {
+			window.__mismatchFetches = 0;
+			window.fetch = async () => { window.__mismatchFetches++; return new Response('{}'); };
+		});
+		await initialMismatchPage.route('http://initial-build-mismatch.test/**', (route) => route.fulfill({
+			status: 200, contentType: 'text/html',
+			body: appDocument('disks').replace(`data-server-build-id="${CLIENT_BUILD_ID}"`,
+				'data-server-build-id="1.4.0-stale-server"')
+		}));
+		await initialMismatchPage.goto('http://initial-build-mismatch.test/zabbix.php?action=capacity.planning.view');
+		await initialMismatchPage.addScriptTag({path: jsAsset});
+		await initialMismatchPage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
+		await initialMismatchPage.waitForFunction(() =>
+			document.querySelector('[data-role="error"]').textContent.includes('Mixed or stale'));
+		const initialMismatchText = await initialMismatchPage.locator('[data-role="error"]').textContent();
+		ok(initialMismatchText.includes('server build 1.4.0-stale-server')
+			&& initialMismatchText.includes(`browser build ${CLIENT_BUILD_ID}`)
+			&& initialMismatchText.includes('restart PHP-FPM/Apache')
+			&& initialMismatchText.includes('hard-refresh'),
+			'An initial build mismatch should immediately show actionable PHP/browser recovery steps.');
+		same(0, await initialMismatchPage.evaluate(() => window.__mismatchFetches),
+			'An initial build mismatch must fail closed before any API request.');
+		await initialMismatchPage.close();
+
+		const responseMismatchPage = await browser.newPage({viewport: {width: 1000, height: 700}});
+		await responseMismatchPage.addInitScript(() => {
+			window.fetch = async () => new Response(JSON.stringify({build_id: '1.4.0-stale-response'}),
+				{status: 200, headers: {'Content-Type': 'application/json'}});
+		});
+		await responseMismatchPage.route('http://response-build-mismatch.test/**', (route) => route.fulfill({
+			status: 200, contentType: 'text/html', body: appDocument('disks')
+		}));
+		await responseMismatchPage.goto('http://response-build-mismatch.test/zabbix.php?action=capacity.planning.view');
+		await responseMismatchPage.addScriptTag({path: jsAsset});
+		await responseMismatchPage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
+		await responseMismatchPage.waitForFunction(() =>
+			document.querySelector('[data-role="error"]').textContent.includes('Mixed or stale'));
+		ok((await responseMismatchPage.locator('[data-role="error"]').textContent())
+			.includes('server build 1.4.0-stale-response'),
+			'Every capacity-data response should reject a mismatched build identity.');
+		await responseMismatchPage.close();
+
+		const cacheMismatchPage = await browser.newPage({viewport: {width: 1000, height: 700}});
+		await cacheMismatchPage.addInitScript(() => {
+			window.fetch = async () => new Response(JSON.stringify({
+				build_id: '1.4.0-stale-cache', ok: true, cache_status: {}
+			}), {status: 200, headers: {'Content-Type': 'application/json'}});
+		});
+		await cacheMismatchPage.route('http://cache-build-mismatch.test/**', (route) => route.fulfill({
+			status: 200, contentType: 'text/html', body: settingsDocument(true)
+		}));
+		await cacheMismatchPage.goto('http://cache-build-mismatch.test/zabbix.php?action=capacity.planning.view&tab=settings');
+		await cacheMismatchPage.addScriptTag({path: jsAsset});
+		await cacheMismatchPage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
+		await cacheMismatchPage.waitForFunction(() =>
+			document.querySelector('[data-role="settings-message"]').textContent.includes('Mixed or stale'));
+		ok((await cacheMismatchPage.locator('[data-role="settings-message"]').textContent())
+			.includes('cache-status response')
+			&& (await cacheMismatchPage.locator('[data-role="settings-message"]').textContent())
+				.includes('server build 1.4.0-stale-cache'),
+			'A cache-status response with a stale build must fail closed with deployment recovery guidance.');
+		await cacheMismatchPage.close();
+
+		const settingsMismatchPage = await browser.newPage({viewport: {width: 1000, height: 700}});
+		await settingsMismatchPage.addInitScript((buildId) => {
+			window.fetch = async (url) => {
+				if (String(url).includes('/cache-status')) {
+					return new Response(JSON.stringify({
+						build_id: buildId, ok: true,
+						cache: {enabled: true, ttl_seconds: 1800},
+						cache_status: {backend_available: true, files: 0, bytes: 0,
+							max_bytes: 1048576, private_permissions_verified: true, scan_complete: true}
+					}), {status: 200, headers: {'Content-Type': 'application/json'}});
+				}
+				return new Response(JSON.stringify({build_id: '1.4.0-stale-settings', ok: true}),
+					{status: 200, headers: {'Content-Type': 'application/json'}});
+			};
+		}, CLIENT_BUILD_ID);
+		await settingsMismatchPage.route('http://settings-build-mismatch.test/**', (route) => route.fulfill({
+			status: 200, contentType: 'text/html', body: settingsDocument(true)
+		}));
+		await settingsMismatchPage.goto('http://settings-build-mismatch.test/zabbix.php?action=capacity.planning.view&tab=settings');
+		await settingsMismatchPage.addScriptTag({path: jsAsset});
+		await settingsMismatchPage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
+		await settingsMismatchPage.waitForFunction(() =>
+			!document.querySelector('[data-role="save-cache-settings"]').disabled);
+		await settingsMismatchPage.locator('[data-role="save-cache-settings"]').click();
+		await settingsMismatchPage.waitForFunction(() =>
+			document.querySelector('[data-role="settings-message"]').textContent.includes('Mixed or stale'));
+		const staleSettingsMessage = await settingsMismatchPage.locator('[data-role="settings-message"]').textContent();
+		ok(staleSettingsMessage.includes('settings response')
+			&& staleSettingsMessage.includes('server build 1.4.0-stale-settings'),
+			'A settings-save response with a stale build must fail closed instead of applying its payload.');
+		await settingsMismatchPage.close();
+
 		const adminPage = await browser.newPage({viewport: {width: 1180, height: 760}});
 		adminPage.on('pageerror', (error) => browserErrors.push(`settings admin: ${error.message}`));
 		adminPage.on('console', (message) => {
@@ -136,6 +246,7 @@ async function run() {
 			window.__settingsForecastEnds = [];
 			let selectedTtl = 1800;
 			let clearStep = 0;
+			const buildId = window.__capacityFixture.inventory.build_id;
 			const fullStatus = (files, scanComplete = true) => ({
 				enabled: selectedTtl !== 0, ttl_seconds: selectedTtl, backend_available: true,
 				unavailable_reason: '', private_permissions_verified: true, files,
@@ -147,7 +258,7 @@ async function run() {
 				const request = {url: href, method: options.method || 'GET', body: String(options.body || '')};
 				window.__settingsRequests.push(request);
 				if (href.includes('/cache-status')) {
-					return new Response(JSON.stringify({ok: true,
+					return new Response(JSON.stringify({build_id: buildId, ok: true,
 						cache: {enabled: true, ttl_seconds: selectedTtl}, cache_status: fullStatus(4, false)}),
 					{status: 200, headers: {'Content-Type': 'application/json'}});
 				}
@@ -162,6 +273,7 @@ async function run() {
 						: {ok: true, complete: true, progress: false, reason: '',
 							removed_files: 1, removed_directories: 0});
 					return new Response(JSON.stringify({
+						build_id: buildId,
 						ok: true,
 						message: clearing
 							? (clearResult.complete ? 'Shared cache cleared.' : 'Shared cache clearing is in progress.')
@@ -177,8 +289,8 @@ async function run() {
 				if (mode === 'forecast') { window.__settingsForecastEnds.push(Number(params.get('time_to'))); }
 				let body;
 				if (mode === 'inventory') { body = window.__capacityFixture.inventory; }
-				else if (mode === 'forecast') { body = {forecasts: [window.__capacityFixture.forecast]}; }
-				else { body = {groupids: [], hostids: [], empty: false}; }
+				else if (mode === 'forecast') { body = {build_id: buildId, forecasts: [window.__capacityFixture.forecast]}; }
+				else { body = {build_id: buildId, groupids: [], hostids: [], empty: false}; }
 				return new Response(JSON.stringify(body), {status: 200, headers: {'Content-Type': 'application/json'}});
 			};
 		}, data);
@@ -210,6 +322,10 @@ async function run() {
 			.includes('Storage usedAt least 4.0 KiB of 1.0 MiB limit'),
 			'An incomplete status scan should label both shard count and storage bytes as lower bounds.');
 		const settingsCopy = await adminPage.locator('[data-panel="settings"]').textContent();
+		ok(settingsCopy.includes(`PHP module version${MODULE_VERSION}`)
+			&& settingsCopy.includes(`PHP/server build${CLIENT_BUILD_ID}`)
+			&& settingsCopy.includes(`Browser build${CLIENT_BUILD_ID}`),
+			'The Settings view should expose matching PHP and browser build identities.');
 		ok(settingsCopy.includes('Recent-shard refresh interval') && settingsCopy.includes('not retention')
 			&& settingsCopy.includes('historical shards remain'),
 			'The Settings copy should explain that 15/30/60 minutes refreshes mutable shards and does not delete history.');
@@ -282,7 +398,8 @@ async function run() {
 			window.__readOnlyFetches = [];
 			window.fetch = async (url, options = {}) => {
 				window.__readOnlyFetches.push({url: String(url), body: String(options.body || '')});
-				return new Response(JSON.stringify({ok: false, error: 'Unexpected request'}), {status: 500});
+				return new Response(JSON.stringify({build_id: '1.4.0-20260801.1', ok: false,
+					error: 'Unexpected request'}), {status: 500});
 			};
 		});
 		await readOnlyPage.route('http://settings-user.test/**', (route) => route.fulfill({
@@ -306,14 +423,14 @@ async function run() {
 
 		const statusFailurePage = await browser.newPage({viewport: {width: 1000, height: 700}});
 		statusFailurePage.on('pageerror', (error) => browserErrors.push(`settings status fallback: ${error.message}`));
-		await statusFailurePage.addInitScript(() => {
+		await statusFailurePage.addInitScript((buildId) => {
 			window.__statusFailureFetches = [];
 			window.fetch = async (url) => {
 				window.__statusFailureFetches.push(String(url));
-				return new Response(JSON.stringify({ok: false, error: 'cache_busy'}),
+				return new Response(JSON.stringify({build_id: buildId, ok: false, error: 'cache_busy'}),
 					{status: 503, headers: {'Content-Type': 'application/json'}});
 			};
-		});
+		}, CLIENT_BUILD_ID);
 		await statusFailurePage.route('http://settings-fallback.test/**', (route) => route.fulfill({
 			status: 200, contentType: 'text/html', body: settingsDocument(true)
 		}));
@@ -344,19 +461,20 @@ async function run() {
 				window.fetch = async (url, options = {}) => {
 					const href = String(url);
 					if (href.includes('/cache-status')) {
-						return new Response(JSON.stringify({ok: true, cache: {enabled: true, ttl_seconds: 1800},
+						return new Response(JSON.stringify({build_id: scenario.buildId, ok: true,
+							cache: {enabled: true, ttl_seconds: 1800},
 							cache_status: {enabled: true, ttl_seconds: 1800, backend_available: true,
 								private_permissions_verified: true, files: 2, bytes: 2048, max_bytes: 1048576,
 								scan_complete: true, boot_invalidation: {available: true}}}),
 						{status: 200, headers: {'Content-Type': 'application/json'}});
 					}
 					window.__clearFailureRequests.push(String(options.body || ''));
-					return new Response(JSON.stringify({ok: false,
+					return new Response(JSON.stringify({build_id: scenario.buildId, ok: false,
 						error: {code: scenario.code, message: 'Server-provided safe fallback message.'},
 						clear_result: {ok: false, complete: false, reason: scenario.code, removed_files: 0}}),
 						{status: scenario.status, headers: {'Content-Type': 'application/json'}});
 				};
-			}, failure);
+			}, {...failure, buildId: CLIENT_BUILD_ID});
 			const host = `settings-${failure.code.replaceAll('_', '-')}.test`;
 			await failurePage.route(`http://${host}/**`, (route) => route.fulfill({
 				status: 200, contentType: 'text/html', body: settingsDocument(true)
@@ -379,12 +497,13 @@ async function run() {
 
 		const noProgressPage = await browser.newPage({viewport: {width: 1000, height: 700}});
 		noProgressPage.on('pageerror', (error) => browserErrors.push(`settings clear no progress: ${error.message}`));
-		await noProgressPage.addInitScript(() => {
+		await noProgressPage.addInitScript((buildId) => {
 			window.__noProgressClearRequests = 0;
 			window.__malformedClearFinal = false;
 			window.fetch = async (url) => {
 				if (String(url).includes('/cache-status')) {
-					return new Response(JSON.stringify({ok: true, cache: {enabled: true, ttl_seconds: 1800},
+					return new Response(JSON.stringify({build_id: buildId, ok: true,
+						cache: {enabled: true, ttl_seconds: 1800},
 						cache_status: {enabled: true, ttl_seconds: 1800, backend_available: true,
 							private_permissions_verified: true, files: 2, bytes: 2048, max_bytes: 1048576,
 							scan_complete: true, boot_invalidation: {available: true}}}),
@@ -392,18 +511,18 @@ async function run() {
 				}
 				window.__noProgressClearRequests++;
 				if (window.__malformedClearFinal) {
-					return new Response(JSON.stringify({ok: true, message: 'Shared cache cleared.',
+					return new Response(JSON.stringify({build_id: buildId, ok: true, message: 'Shared cache cleared.',
 						cache: {enabled: true, ttl_seconds: 1800},
 						clear_result: {ok: true, removed_files: 0, removed_directories: 0}}),
 					{status: 200, headers: {'Content-Type': 'application/json'}});
 				}
-				return new Response(JSON.stringify({ok: true, message: 'Shared cache clearing is in progress.',
+				return new Response(JSON.stringify({build_id: buildId, ok: true, message: 'Shared cache clearing is in progress.',
 					cache: {enabled: true, ttl_seconds: 1800},
 					clear_result: {ok: true, complete: false, progress: true,
 						reason: 'clear_in_progress', removed_files: 0}}),
 				{status: 200, headers: {'Content-Type': 'application/json'}});
 			};
-		});
+		}, CLIENT_BUILD_ID);
 		await noProgressPage.route('http://settings-no-progress.test/**', (route) => route.fulfill({
 			status: 200, contentType: 'text/html', body: settingsDocument(true)
 		}));
@@ -445,6 +564,7 @@ async function run() {
 		});
 		await scopePage.addInitScript((payload) => {
 			window.__scopeFixture = payload;
+			const buildId = payload.inventory.build_id;
 			window.__scopeRequests = [];
 			window.__scopeAborts = 0;
 			const delay = (milliseconds, signal) => new Promise((resolve, reject) => {
@@ -481,21 +601,22 @@ async function run() {
 						{status: 200, headers: {'Content-Type': 'application/json'}});
 				}
 				if (request.mode === 'forecast') {
-					return new Response(JSON.stringify({forecasts: []}),
+					return new Response(JSON.stringify({build_id: buildId, forecasts: []}),
 						{status: 200, headers: {'Content-Type': 'application/json'}});
 				}
 				if (request.mode !== 'resolve') {
-					return new Response(JSON.stringify({groupids: [], hostids: [], empty: false}),
+					return new Response(JSON.stringify({build_id: buildId, groupids: [], hostids: [], empty: false}),
 						{status: 200, headers: {'Content-Type': 'application/json'}});
 				}
 				await delay(request.group === 'slow' ? 450 : 20, options.signal);
 				if (request.template.includes('/bad[/')) {
-					return new Response(JSON.stringify({error: {
+					return new Response(JSON.stringify({build_id: buildId, error: {
 						message: 'Invalid regular expression in Templates.', field: 'template'
 					}}), {status: 400, headers: {'Content-Type': 'application/json'}});
 				}
 				if (request.group === 'wide') {
 					return new Response(JSON.stringify({
+						build_id: buildId,
 						groupids: ['10'], hostids: ['1'], empty: false, truncated: true,
 						summary: 'Too many hosts matched. Narrow the inventory scope.',
 						preview: {groups: section(6000, ['Wide group']), hosts: section(0, []),
@@ -527,6 +648,7 @@ async function run() {
 				}
 				const combinedAvailable = !!(request.host || request.template);
 				return new Response(JSON.stringify({
+					build_id: buildId,
 					groupids: request.group ? ['10'] : [], hostids: ['1'], empty: false, truncated: false,
 					preview: {
 						groups: groupSection,
@@ -539,7 +661,7 @@ async function run() {
 			};
 		}, scopeData);
 		await scopePage.route('http://scope.test/**', (route) => route.fulfill({
-			status: 200, contentType: 'text/html', body: '<!doctype html><html><body><main id="capacity-planning-root" data-data-url="/fake" data-csrf-name="csrf_key" data-data-csrf-token="data-token-123" data-initial-lookback="" data-initial-tab="disks"></main></body></html>'
+			status: 200, contentType: 'text/html', body: appDocument('disks')
 		}));
 		await scopePage.goto('http://scope.test/zabbix.php?action=capacity.planning.view&tab=disks');
 		await scopePage.addStyleTag({path: cssAsset});
@@ -732,6 +854,7 @@ async function run() {
 		});
 		await poolPage.addInitScript((payload) => {
 			window.__capacityFixture = payload;
+			const buildId = payload.inventory.build_id;
 			window.__poolStats = {
 				active: 0, maxActive: 0, activeByDays: {}, maxByDays: {},
 				started: [], finished: [], failed: [], aborted: []
@@ -765,7 +888,7 @@ async function run() {
 						{status: 200, headers: {'Content-Type': 'application/json'}});
 				}
 				if (mode !== 'forecast') {
-					return new Response(JSON.stringify({groupids: [], hostids: [], empty: false}),
+					return new Response(JSON.stringify({build_id: buildId, groupids: [], hostids: [], empty: false}),
 						{status: 200, headers: {'Content-Type': 'application/json'}});
 				}
 
@@ -783,12 +906,14 @@ async function run() {
 					await abortableDelay(days === 183 ? 300 : (days === 365 ? 15 : delayById[id]), options.signal);
 					if (days === 92 && id === 'pool-1') {
 						stats.failed.push({id, days});
-						return new Response(JSON.stringify({error: {message: 'Fixture forecast batch failed.'}}),
+						return new Response(JSON.stringify({build_id: buildId,
+							error: {message: 'Fixture forecast batch failed.'}}),
 							{status: 500, headers: {'Content-Type': 'application/json'}});
 					}
 					stats.finished.push({id, days});
 					const cacheFallback = days === 92 && id === 'pool-0';
-					return new Response(JSON.stringify({forecasts: [forecast(id)], meta: {cache: {
+					return new Response(JSON.stringify({build_id: buildId,
+						forecasts: [forecast(id)], meta: {cache: {
 						enabled: true, backend_available: !cacheFallback, ttl_seconds: 3600,
 						request: {requests: 1, shard_hits: 1, shard_misses: 2,
 							shards_written: cacheFallback ? 1 : 2, live_fallbacks: cacheFallback ? 1 : 0,
@@ -808,7 +933,7 @@ async function run() {
 		}, poolData);
 		await poolPage.route('http://forecast-pool.test/**', (route) => route.fulfill({
 			status: 200, contentType: 'text/html',
-			body: '<!doctype html><html><body><main id="capacity-planning-root" data-data-url="/fake" data-csrf-name="csrf_key" data-data-csrf-token="data-token-123" data-initial-lookback="" data-initial-tab="disks"></main></body></html>'
+			body: appDocument('disks')
 		}));
 		await poolPage.goto('http://forecast-pool.test/zabbix.php?action=capacity.planning.view&tab=disks');
 		await poolPage.addStyleTag({path: cssAsset});
@@ -895,13 +1020,15 @@ async function run() {
 				}
 				let body;
 				if (mode === 'inventory') { body = window.__capacityFixture.inventory; }
-				else if (mode === 'forecast') { body = {forecasts: [window.__capacityFixture.forecast]}; }
-				else { body = {groupids: [], hostids: [], empty: false}; }
+				else if (mode === 'forecast') { body = {build_id: window.__capacityFixture.inventory.build_id,
+					forecasts: [window.__capacityFixture.forecast]}; }
+				else { body = {build_id: window.__capacityFixture.inventory.build_id,
+					groupids: [], hostids: [], empty: false}; }
 				return new Response(JSON.stringify(body), {status: 200, headers: {'Content-Type': 'application/json'}});
 			};
 		}, data);
 		await page.route('http://capacity.test/**', (route) => route.fulfill({
-			status: 200, contentType: 'text/html', body: '<!doctype html><html><body><main id="capacity-planning-root" data-data-url="/fake" data-csrf-name="csrf_key" data-data-csrf-token="data-token-123" data-initial-lookback="" data-initial-tab="disks"></main></body></html>'
+			status: 200, contentType: 'text/html', body: appDocument('disks')
 		}));
 		await page.goto('http://capacity.test/zabbix.php?action=capacity.planning.view&tab=resources');
 		await page.addStyleTag({path: cssAsset});
@@ -1068,6 +1195,12 @@ async function run() {
 			&& diskMaintenanceText.includes('Last accepted')
 			&& diskMaintenanceText.includes('not live current observations'),
 			'The filesystem modal should clearly distinguish retained values from live observations.');
+		ok(diskMaintenanceText.includes('96.00% used'),
+			'The detail view should retain two percentage decimals near an exact threshold.');
+		const diskSubtitleText = await page.locator('[data-role="detail-subtitle"]').textContent();
+		ok(diskSubtitleText.includes('used-capacity window 3 months (60 days, 100% coverage, linear-fit R² 0.980)')
+			&& diskSubtitleText.includes('used-percentage window 3 months (60 days, 100% coverage, linear-fit R² 0.970)'),
+			'The modal should identify both byte and percentage linear-fit R² values without conflating them.');
 		same('false', await page.locator('[data-role="detail-modal"]').getAttribute('aria-hidden'),
 			'The open modal should be exposed to assistive technology.');
 		await page.waitForFunction(() => document.activeElement
@@ -1094,6 +1227,15 @@ async function run() {
 
 		const chart = page.locator('[data-role="detail-surface"] svg');
 		await chart.waitFor();
+		same('end', await chart.locator('text[data-axis-edge="right"]').getAttribute('text-anchor'),
+			'The rightmost rotated date should anchor inward instead of clipping past the SVG edge.');
+		ok(await chart.evaluate((svg) => {
+			const tick = svg.querySelector('text[data-axis-edge="right"]');
+			if (!tick) { return false; }
+			const svgRect = svg.getBoundingClientRect();
+			const tickRect = tick.getBoundingClientRect();
+			return tickRect.right <= svgRect.right + 1 && tickRect.left >= svgRect.left - 1;
+		}), 'The rightmost date label should remain inside the rendered SVG bounds.');
 		const drag = await chart.evaluate((svg) => {
 			const rect = svg.getBoundingClientRect();
 			const vb = svg.viewBox.baseVal;
@@ -1173,10 +1315,21 @@ async function run() {
 			hostid: '3', host: 'dev01', status: 'OK', expected_gap: false,
 			current_observation_usable: true, current_reasons: [],
 			maintenance: {active: false, type: 'none', id: null, since: null},
-			used: 940, free: 60, pused: 94, usable: 1000, total: 1000
+			used: 940, free: 60, pused: 94, usable: 1000, total: 1000,
+			warn_pct: {v: 95, src: 'fixture', fb: false},
+			crit_pct: {v: 99, src: 'fixture', fb: false},
+			warn_free: {v: 40, src: 'fixture', fb: false},
+			crit_free: {v: 20, src: 'fixture', fb: false}
 		}];
 		patternData.inventory.resources = [];
 		patternData.forecast.growth_pct_day = 0.05;
+		patternData.forecast.eta = {
+			warn_days: 5, warn_date: null, warn_basis: 'free GB',
+			crit_days: 12, crit_date: null, crit_basis: 'free GB',
+			full_days: 20, full_date: null, next_days: 5, next_date: null, next_basis: 'warning free GB',
+			warn_pct_days: 20, warn_pct_date: null, warn_free_days: 5, warn_free_date: null,
+			crit_pct_days: 100, crit_pct_date: null, crit_free_days: 12, crit_free_date: null
+		};
 		await patternPage.addInitScript((payload) => {
 			window.__capacityFixture = payload;
 			window.fetch = async (_url, options = {}) => {
@@ -1184,13 +1337,15 @@ async function run() {
 				const mode = params.get('mode') || '';
 				let body;
 				if (mode === 'inventory') { body = window.__capacityFixture.inventory; }
-				else if (mode === 'forecast') { body = {forecasts: [window.__capacityFixture.forecast]}; }
-				else { body = {groupids: [], hostids: [], empty: false}; }
+				else if (mode === 'forecast') { body = {build_id: window.__capacityFixture.inventory.build_id,
+					forecasts: [window.__capacityFixture.forecast]}; }
+				else { body = {build_id: window.__capacityFixture.inventory.build_id,
+					groupids: [], hostids: [], empty: false}; }
 				return new Response(JSON.stringify(body), {status: 200, headers: {'Content-Type': 'application/json'}});
 			};
 		}, patternData);
 		await patternPage.route('http://pattern.test/**', (route) => route.fulfill({
-			status: 200, contentType: 'text/html', body: '<!doctype html><html><body><main id="capacity-planning-root" data-data-url="/fake" data-csrf-name="csrf_key" data-data-csrf-token="data-token-123" data-initial-lookback="" data-initial-tab="disks"></main></body></html>'
+			status: 200, contentType: 'text/html', body: appDocument('disks')
 		}));
 		await patternPage.goto('http://pattern.test/zabbix.php?action=capacity.planning.view&tab=disks');
 		await patternPage.addStyleTag({path: cssAsset});
@@ -1208,37 +1363,183 @@ async function run() {
 			'A linear history must not grow a fabricated pattern line.');
 		ok(!(await patternPage.locator('[data-role="detail-legend"]').textContent()).includes('Possible path'),
 			'The possible-path legend entry requires a confirmed pattern.');
-		await patternPage.keyboard.press('Escape');
-		await patternPage.waitForFunction(() => !document.querySelector('[data-role="detail-modal"]').classList.contains('is-open'));
+		same('0', await patternPage.locator('[data-role="detail-surface"]').getAttribute('data-pattern-detected'),
+			'Linear history should not pass the statistical detector.');
+		const baselineChartState = await patternChart.evaluate((svg) => ({
+			projection: Object.fromEntries(['x1', 'y1', 'x2', 'y2'].map((name) =>
+				[name, svg.querySelector('[data-role="authoritative-projection"]').getAttribute(name)])),
+			markers: [...svg.querySelectorAll('[data-threshold-marker]')].map((marker) => ({
+				id: marker.getAttribute('data-threshold-marker'),
+				basis: marker.getAttribute('data-threshold-basis'),
+				days: marker.getAttribute('data-marker-days'),
+				cx: marker.getAttribute('cx'), cy: marker.getAttribute('cy')
+			})).sort((a, b) => a.id.localeCompare(b.id))
+		}));
+		same(4, baselineChartState.markers.length,
+			'Each configured percentage/free-space threshold should get its own marker.');
+		const markerById = Object.fromEntries(baselineChartState.markers.map((marker) => [marker.id, marker]));
+		same('20', markerById['warn-pct'].days, 'The percentage warning marker should use its percentage ETA.');
+		same('5', markerById['warn-free'].days, 'The free-space warning marker should use its byte-model ETA.');
+		same('used % model', markerById['crit-pct'].basis,
+			'The percentage marker should expose its own model basis.');
+		same('absolute free-space model', markerById['crit-free'].basis,
+			'The converted free-space marker should expose its independent byte-model basis.');
+		ok(Number(markerById['warn-free'].cx) < Number(markerById['warn-pct'].cx),
+			'A sooner absolute-free ETA must plot before a later percentage ETA even at nearby thresholds.');
+		const baselineStatsText = await patternPage.locator('[data-role="detail-stats"]').textContent();
 
-		// Swap in a weekly cleanup sawtooth and reload: the pattern line and its
-		// legend entry must appear, starting exactly at the projection anchor.
-		await patternPage.evaluate((lastClock) => {
-			const saw = [];
-			for (let day = 60; day >= 0; day--) {
-				const average = 760 + (60 - day) * 3 + (((60 - day) % 7) / 7 - 0.5) * 60;
-				saw.push([lastClock - day * 86400, average - 12, average, average + 12]);
-			}
-			window.__capacityFixture.forecast.series = saw;
-		}, patternLastClock);
-		await patternPage.locator('[data-role="reload"]').click();
-		await patternPage.waitForFunction(() => document.querySelector('[data-role="loading"]').hidden);
-		await patternPage.locator('[data-table="disks"] tbody tr[data-id="d0"]').click();
-		await patternPage.waitForSelector('[data-role="detail-modal"].is-open');
-		await patternChart.waitFor();
+		const closePatternModal = async () => {
+			await patternPage.keyboard.press('Escape');
+			await patternPage.waitForFunction(() =>
+				!document.querySelector('[data-role="detail-modal"]').classList.contains('is-open'));
+		};
+		const reopenPatternModal = async () => {
+			await patternPage.locator('[data-role="reload"]').click();
+			await patternPage.waitForFunction(() => document.querySelector('[data-role="loading"]').hidden);
+			await patternPage.locator('[data-table="disks"] tbody tr[data-id="d0"]').click();
+			await patternPage.waitForSelector('[data-role="detail-modal"].is-open');
+			await patternChart.waitFor();
+		};
+		const loadPatternCase = async (kind) => {
+			await closePatternModal();
+			await patternPage.evaluate(({caseName, lastClock}) => {
+				const point = (day, average, band = 12) =>
+					[lastClock - day * 86400, average - band, average, average + band];
+				const series = [];
+				if (caseName === 'two-cycle') {
+					for (let day = 91; day >= 0; day--) {
+						const index = 91 - day;
+						const inCleanup = (index >= 10 && index <= 12) || (index >= 62 && index <= 64);
+						series.push(point(day, 650 + index * 3 - (inCleanup ? 60 : 0)));
+					}
+				}
+				else if (caseName === 'noise') {
+					let seed = 0x5f3759df;
+					for (let day = 91; day >= 0; day--) {
+						seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+						const index = 91 - day;
+						series.push(point(day, 650 + index * 3 + (seed / 4294967296 - 0.5) * 60));
+					}
+				}
+				else if (caseName === 'tiny-weekly') {
+					for (let day = 60; day >= 0; day--) {
+						const index = 60 - day;
+						series.push(point(day, 760 + index * 3 + ((index % 7) / 7 - 0.5) * 0.5, 0.05));
+					}
+				}
+				else if (caseName === 'long-period') {
+					for (let day = 182; day >= 0; day--) {
+						const index = 182 - day;
+						const phase = index % 52;
+						series.push(point(day, 390 + index * 3 - (phase >= 10 && phase <= 12 ? 60 : 0)));
+					}
+				}
+				else {
+					for (let day = 60; day >= 0; day--) {
+						const index = 60 - day;
+						series.push(point(day, 760 + index * 3 + ((index % 7) / 7 - 0.5) * 60));
+					}
+				}
+				window.__capacityFixture.forecast.series = series;
+			}, {caseName: kind, lastClock: patternLastClock});
+			await reopenPatternModal();
+		};
+
+		// Explicit null candidate ETAs are authoritative "no projection" results;
+		// they must never fall back to the displayed percentage slope. Exercise all
+		// four bases at once, then keep the same payload to prove that a tiny but
+		// nonzero full-precision trend is still drawn rather than rounded to zero.
+		await closePatternModal();
+		await patternPage.evaluate(() => {
+			const forecast = window.__capacityFixture.forecast;
+			forecast.growth_pct_day = 0.0000049;
+			forecast.eta.warn_pct_days = null;
+			forecast.eta.warn_free_days = null;
+			forecast.eta.crit_pct_days = null;
+			forecast.eta.crit_free_days = null;
+		});
+		await reopenPatternModal();
+		same(0, await patternChart.locator('[data-threshold-marker]').count(),
+			'Explicit null ETA candidates must suppress all legacy slope-derived threshold markers.');
+		const tinyProjection = await patternChart.locator('[data-role="authoritative-projection"]')
+			.evaluate((line) => ({y1: Number(line.getAttribute('y1')), y2: Number(line.getAttribute('y2'))}));
+		ok(tinyProjection.y1 !== tinyProjection.y2,
+			'A tiny nonzero full-precision percentage slope must remain a non-flat authoritative projection.');
+		ok((await patternPage.locator('[data-role="detail-stats"]').textContent())
+			.includes('+0.0000049 pp/day'),
+			'A tiny qualified slope must remain visibly nonzero beside its finite ETA.');
+		await closePatternModal();
+		const tinyDownloadPromise = patternPage.waitForEvent('download');
+		await patternPage.locator('[data-role="export-csv"]').click();
+		const tinyDownload = await tinyDownloadPromise;
+		const tinyCsv = fs.readFileSync(await tinyDownload.path(), 'utf8');
+		ok(tinyCsv.includes('"0.0000049"'),
+			'A tiny qualified percentage slope must retain its precision in the filesystem CSV.');
+		await reopenPatternModal();
+		await patternPage.evaluate(() => {
+			const forecast = window.__capacityFixture.forecast;
+			forecast.growth_pct_day = 0.05;
+			forecast.eta.warn_pct_days = 20;
+			forecast.eta.warn_free_days = 5;
+			forecast.eta.crit_pct_days = 100;
+			forecast.eta.crit_free_days = 12;
+		});
+
+		await loadPatternCase('two-cycle');
+		same('0', await patternPage.locator('[data-role="detail-surface"]').getAttribute('data-pattern-detected'),
+			'Two long cleanup cycles must not satisfy the three-cycle evidence gate.');
+		ok(!await patternChart.locator('[data-role="possible-path"]').count(),
+			'Two cleanup events must leave the chart on its authoritative straight projection only.');
+
+		await loadPatternCase('noise');
+		same('0', await patternPage.locator('[data-role="detail-surface"]').getAttribute('data-pattern-detected'),
+			'Deterministic non-recurring noise must fail the pattern detector.');
+
+		await loadPatternCase('tiny-weekly');
+		same('1', await patternPage.locator('[data-role="detail-surface"]').getAttribute('data-pattern-detected'),
+			'A real but sub-pixel weekly rhythm should pass statistical detection.');
+		same('0', await patternPage.locator('[data-role="detail-surface"]').getAttribute('data-pattern-drawn'),
+			'A detected rhythm below the three-pixel visibility floor must not be drawn as noise.');
+
+		await loadPatternCase('long-period');
+		same('1', await patternPage.locator('[data-role="detail-surface"]').getAttribute('data-pattern-detected'),
+			'A 6-month history with more than three stable 52-day cleanup cycles should be detected.');
+		ok(!!await patternChart.locator('[data-role="possible-path"]').count(),
+			'The confirmed long-period cleanup rhythm should draw a possible path.');
+
+		// Return to the original 61-day horizon with a weekly sawtooth: the added
+		// visual line must not mutate printed ETAs or any authoritative marker.
+		await loadPatternCase('weekly');
 		ok(await patternChart.evaluate((svg) => !!svg.querySelector('line[stroke-dasharray="6 5"]')),
 			'The straight projection stays authoritative when a pattern is drawn.');
-		ok(await patternChart.evaluate((svg) => !!svg.querySelector('polyline[stroke-dasharray="2 4"]')),
+		ok(await patternChart.evaluate((svg) => !!svg.querySelector('[data-role="possible-path"]')),
 			'A confirmed weekly sawtooth should add the display-only possible-path line.');
 		ok((await patternPage.locator('[data-role="detail-legend"]').textContent()).includes('Possible path (history pattern)'),
 			'The pattern line should be labelled in the legend.');
 		ok(await patternChart.evaluate((svg) => {
-			const line = svg.querySelector('polyline[stroke-dasharray="2 4"]');
-			const anchor = svg.querySelector('circle[r="3.5"]');
+			const line = svg.querySelector('[data-role="possible-path"]');
+			const anchor = svg.querySelector('[data-role="projection-anchor"]');
 			const first = line.getAttribute('points').trim().split(' ')[0].split(',').map(Number);
 			return Math.abs(first[0] - Number(anchor.getAttribute('cx'))) < 1
 				&& Math.abs(first[1] - Number(anchor.getAttribute('cy'))) < 1;
 		}), 'The possible-path line must start exactly at the projection anchor.');
+		ok((await patternChart.locator('[data-role="possible-path"] title').textContent())
+			.includes('zero-mean recurring-history template with a short anchor transition'),
+			'The possible-path wording should distinguish the zero-mean template from its anchor seam.');
+		const patternedChartState = await patternChart.evaluate((svg) => ({
+			projection: Object.fromEntries(['x1', 'y1', 'x2', 'y2'].map((name) =>
+				[name, svg.querySelector('[data-role="authoritative-projection"]').getAttribute(name)])),
+			markers: [...svg.querySelectorAll('[data-threshold-marker]')].map((marker) => ({
+				id: marker.getAttribute('data-threshold-marker'),
+				basis: marker.getAttribute('data-threshold-basis'),
+				days: marker.getAttribute('data-marker-days'),
+				cx: marker.getAttribute('cx'), cy: marker.getAttribute('cy')
+			})).sort((a, b) => a.id.localeCompare(b.id))
+		}));
+		same(JSON.stringify(baselineChartState), JSON.stringify(patternedChartState),
+			'The possible path must not move the straight projection or basis-specific threshold markers.');
+		same(baselineStatsText, await patternPage.locator('[data-role="detail-stats"]').textContent(),
+			'The possible path must not alter any printed ETA or assessment text.');
 		await patternPage.close();
 
 		await page.locator('[data-role="custom-lookback-toggle"]').click();

@@ -7,10 +7,12 @@ namespace Modules\CapacityPlanning\Actions;
 use API;
 use CController;
 use CControllerResponseData;
+use Modules\CapacityPlanning\Lib\Build;
 use Modules\CapacityPlanning\Lib\Config;
 use Modules\CapacityPlanning\Lib\SeriesCache;
 use Modules\CapacityPlanning\Lib\SeriesRangeIncompleteException;
 
+require_once dirname(__DIR__).'/lib/Build.php';
 require_once dirname(__DIR__).'/lib/Config.php';
 require_once dirname(__DIR__).'/lib/SeriesCache.php';
 
@@ -35,6 +37,12 @@ final class CapacityPlanningData extends CController {
 	private const MAX_FILTER_TERM_BYTES = 256;
 	private const MAX_FILTER_TERMS = 20;
 	private const MAX_FILTER_REGEX_TERMS = 5;
+	// Per-match backtracking is capped by pcre.backtrack_limit, but the number of
+	// matches is the product of rows x terms x name keys x passes and reaches
+	// ~100k for a large installation. Bound the total so a set of deliberately
+	// slow (yet individually legal) patterns cannot burn a whole worker.
+	private const MAX_FILTER_REGEX_EVALUATIONS = 20000;
+	private const FILTER_PCRE_BACKTRACK_LIMIT = 10000;
 	private const MAX_FILTER_SAMPLES = 12;
 	private const MAX_FILTER_TERM_SAMPLES = 6;
 	private const FILTER_REGEX_FLAGS = 'imsux';
@@ -57,6 +65,8 @@ final class CapacityPlanningData extends CController {
 	private const RESOURCE_HISTORY_DAYS = 31;
 	private const RECENT_RESOURCE_BUCKET_SECONDS = 5 * 60;
 	private const SERIES_MAX_POINTS = 420;
+	// Unit-conversion factor/offset ceiling for the invert and scale transforms.
+	private const MAX_TRANSFORM_PARAMETER = 1.0e15;
 
 	private const STALE_DISK_SECONDS = 24 * 3600;
 	private const STALE_RESOURCE_SECONDS = 4 * 3600;
@@ -125,6 +135,8 @@ final class CapacityPlanningData extends CController {
 	 * math regression suite instantiates this class without its constructor. */
 	private array $macro_scope_buckets = [];
 	private ?array $macro_scopes_index = null;
+	/** Request-scoped budget for caller-supplied filter pattern evaluations. */
+	private int $filter_regex_evaluations = 0;
 
 	public function init(): void {
 		$this->disableCsrfValidation();
@@ -147,7 +159,16 @@ final class CapacityPlanningData extends CController {
 			self::csrfTokenField() => 'string'
 		];
 
-		return $this->validateInput($fields);
+		$valid = $this->validateInput($fields);
+		if (!$valid) {
+			// doAction() never runs when validation fails, so this endpoint must
+			// emit its own JSON envelope here; otherwise the framework returns a
+			// non-JSON body that the client reports as invalid JSON or, worse, as a
+			// deployment mismatch because no build_id is present.
+			$this->respondJsonError(_('Invalid capacity data request.'), 400);
+		}
+
+		return $valid;
 	}
 
 	protected function checkPermissions(): bool {
@@ -195,6 +216,11 @@ final class CapacityPlanningData extends CController {
 		];
 		$labels = ['group' => _('Host group'), 'host' => _('Host'), 'template' => _('Template')];
 		$filters = [];
+		// Caller-supplied patterns are matched against entity names here and
+		// nowhere else, so this phase gets a tighter backtracking cap than the
+		// macro regex contexts evaluated later. Legitimate contains/anchor filters
+		// never approach it.
+		ini_set('pcre.backtrack_limit', (string) self::FILTER_PCRE_BACKTRACK_LIMIT);
 
 		// Parse and validate every field before making an API request. In addition
 		// to giving immediate UI feedback, this keeps malformed or oversized regex
@@ -490,7 +516,10 @@ final class CapacityPlanningData extends CController {
 				self::FILTER_REGEX_FLAGS
 			)];
 		}
-		if (count(array_unique(str_split($flags))) !== strlen($flags)) {
+		// PHP 8.0/8.1 return [''] for str_split(''), while PHP 8.2+ return
+		// an empty array. An unflagged /pattern/ is valid on every supported
+		// runtime and must not be mistaken for a repeated flag.
+		if ($flags !== '' && count(array_unique(str_split($flags))) !== strlen($flags)) {
 			return ['pattern' => '', 'error' => _('repeats a regular-expression flag.')];
 		}
 
@@ -546,6 +575,11 @@ final class CapacityPlanningData extends CController {
 					}
 				}
 				else {
+					if (++$this->filter_regex_evaluations > self::MAX_FILTER_REGEX_EVALUATIONS) {
+						throw new \UnexpectedValueException(
+							_('This filter requires too many regular-expression evaluations; narrow the host group, template or host scope, or use fewer patterns.')
+						);
+					}
 					$result = @preg_match($term['pattern'], $value);
 					if ($result === false) {
 						throw new \UnexpectedValueException(
@@ -1217,8 +1251,15 @@ final class CapacityPlanningData extends CController {
 		// Threshold macros, however, mostly live on TEMPLATES, which regular users
 		// usually cannot read — resolving them without permission checks reproduces
 		// the thresholds the Zabbix server actually alarms on. Only text macros
-		// matching three threshold-name prefixes are read; secret/vault macros are
-		// skipped during resolution and raw values are never sent to the client.
+		// matching three threshold-name prefixes are read, and secret/vault macros
+		// are skipped during resolution.
+		//
+		// Accepted disclosure: the resolved plain-text threshold NUMBERS for a host
+		// the caller can read are returned to that caller even when the macro is
+		// defined on a template or globally, which the caller may not be able to
+		// read directly. The report cannot classify risk without them, and Zabbix
+		// already exposes the same effective values to the same user through
+		// trigger expressions. Secret and vault values are never returned.
 		$direct_template_ids = [];
 		foreach ($hosts as $host) {
 			foreach (($host['templates'] ?? []) as $template) {
@@ -1982,7 +2023,10 @@ final class CapacityPlanningData extends CController {
 					'used' => $used,
 					'free' => $free,
 					'usable' => $usable_capacity,
-					'pused' => $pused !== null ? round($pused, 3) : null,
+					// Preserve the observation used by ETA math. Presentation rounds in
+					// the browser; rounding here can materially move a near-threshold ETA
+					// when a large volume has a very small but qualified percentage slope.
+					'pused' => $pused,
 					'lastclock' => $lastclock ?: null,
 					'stale_metrics' => array_keys($stale_items),
 					'warn_pct' => $warn_pct,
@@ -2742,8 +2786,12 @@ final class CapacityPlanningData extends CController {
 				'current_observation_usable' => $current_observation_usable,
 				'ok' => !isset($entry['ok']) || !empty($entry['ok']),
 				'lastclock' => (int) ($num($entry['lastclock'] ?? null, 0.0, 5000000000.0) ?? 0),
-				'pr' => $num($entry['pr'] ?? null),
-				'pct_pr' => $num($entry['pct_pr'] ?? null),
+				// Transform parameters are multiplied into (or subtracted from) every
+				// row, so they need the same bounding as the other numeric fields.
+				'pr' => $num($entry['pr'] ?? null, -self::MAX_TRANSFORM_PARAMETER,
+					self::MAX_TRANSFORM_PARAMETER),
+				'pct_pr' => $num($entry['pct_pr'] ?? null, -self::MAX_TRANSFORM_PARAMETER,
+					self::MAX_TRANSFORM_PARAMETER),
 				'total' => $num($entry['total'] ?? null, 0.0),
 				'used' => $num($entry['used'] ?? null, 0.0),
 				'free' => $num($entry['free'] ?? null, 0.0),
@@ -3075,24 +3123,57 @@ final class CapacityPlanningData extends CController {
 			if (!is_array($batch) || !$batch) {
 				break;
 			}
-			$edge_clock = $cursor;
+			$edge_clock = null;
+			$batch_rows = [];
 			foreach ($batch as $row) {
 				$clock = (int) ($row['clock'] ?? 0);
+				if ($clock <= 0) {
+					continue;
+				}
 				$value = $this->safeFloat($row['value'] ?? null);
-				if ($clock > 0 && $value !== null) {
-					$values[] = [
+				if ($value !== null) {
+					$batch_rows[] = [
 						'clock' => $clock,
 						'ns' => max(0, (int) ($row['ns'] ?? 0)),
 						'value' => $value
 					];
 				}
-				$edge_clock = $newest_first ? min($edge_clock, $clock) : max($edge_clock, $clock);
+				$edge_clock = $edge_clock === null
+					? $clock
+					: ($newest_first ? min($edge_clock, $clock) : max($edge_clock, $clock));
 			}
 			$fetched += count($batch);
-			if (count($batch) < $limit) {
+			if (count($batch) < $limit || $edge_clock === null) {
+				foreach ($batch_rows as $batch_row) {
+					$values[] = $batch_row;
+				}
 				break;
 			}
-			$cursor = $newest_first ? $edge_clock - 1 : $edge_clock + 1;
+
+			// The API sorts by clock alone, so a full batch can stop part-way
+			// through a second that holds several samples. Moving the cursor past
+			// that second would drop the remaining ones for good — and because the
+			// loader returns normally, the cache would then record the range as
+			// fully covered. Withhold the edge second and re-read it inclusively.
+			$spans_multiple_seconds = false;
+			foreach ($batch_rows as $batch_row) {
+				if ($batch_row['clock'] !== $edge_clock) {
+					$spans_multiple_seconds = true;
+					break;
+				}
+			}
+			if (!$spans_multiple_seconds) {
+				// A whole full batch inside one second cannot be paged any further
+				// without losing samples. Flag the range incomplete instead.
+				$truncated = true;
+				break;
+			}
+			foreach ($batch_rows as $batch_row) {
+				if ($batch_row['clock'] !== $edge_clock) {
+					$values[] = $batch_row;
+				}
+			}
+			$cursor = $edge_clock;
 			if (($newest_first && $cursor < $time_from) || (!$newest_first && $cursor > $time_to)) {
 				break;
 			}
@@ -3152,8 +3233,19 @@ final class CapacityPlanningData extends CController {
 	private function forecastCacheMeta(): array {
 		$summary = $this->cache_request_meta;
 		$summary['reasons'] = array_keys($summary['reasons']);
+		$runtime = $this->cache_runtime_meta;
 
-		return array_replace($this->cache_runtime_meta, [
+		// Cache failure codes name concrete server misconfigurations (cache directory
+		// inside the web root, owner mismatch, missing POSIX support). The dedicated
+		// status endpoint restricts the same diagnostics to Super admins, so this
+		// response must not be the way around that. Everyone still gets the
+		// operational fields the report itself renders.
+		if ($this->getUserType() !== USER_TYPE_SUPER_ADMIN) {
+			unset($runtime['protection'], $runtime['cache_schema'], $runtime['module_generation']);
+			$summary['reasons'] = [];
+		}
+
+		return array_replace($runtime, [
 			'forced_refresh' => $this->force_series_refresh,
 			'request' => $summary
 		]);
@@ -3236,6 +3328,13 @@ final class CapacityPlanningData extends CController {
 				$transformed['avg'] = $row['avg'] * $parameter;
 				$transformed['max'] = $row['max'] * $parameter;
 			}
+			// Byte series skip the percentage sanitation, so an overflow here would
+			// otherwise reach json_encode(), which rejects non-finite floats and
+			// turns the whole response into an unrelated encode failure.
+			if (!is_finite($transformed['min']) || !is_finite($transformed['avg'])
+					|| !is_finite($transformed['max'])) {
+				continue;
+			}
 			$out[] = $transformed;
 		}
 		return $out;
@@ -3255,9 +3354,13 @@ final class CapacityPlanningData extends CController {
 				$rejected++;
 				continue;
 			}
-			$row['min'] = max(0.0, $minimum);
+			// Clamp all three symmetrically. A row whose whole range sits inside the
+			// accepted (100, 100.5] drift band would otherwise keep an unclamped
+			// minimum above its own clamped average and maximum, and every consumer
+			// downstream assumes min <= avg <= max.
+			$row['min'] = min(100.0, max(0.0, $minimum));
 			$row['avg'] = min(100.0, max(0.0, $average));
-			$row['max'] = min(100.0, $maximum);
+			$row['max'] = min(100.0, max(0.0, $maximum));
 			$valid[] = $row;
 		}
 		return [$valid, $rejected];
@@ -3640,6 +3743,13 @@ final class CapacityPlanningData extends CController {
 		$byte_floor = ($capacity !== null && $capacity > 0)
 			? min(self::MIN_DISK_GROWTH_BYTES_DAY, $capacity * 0.00001)
 			: self::MIN_DISK_GROWTH_BYTES_DAY;
+		// The same floor expressed in percentage points: the byte floor translated
+		// through usable capacity, or the fixed pp/day floor when capacity is
+		// unknown. Both the acceleration rule and the slope nulling use it, so the
+		// two models cannot disagree about what counts as noise.
+		$pct_noise_floor = ($capacity !== null && $capacity > 0)
+			? $byte_floor * 100 / $capacity
+			: self::MIN_DISK_GROWTH_PCT_DAY;
 		$recent = $windows['1m'] ?? null;
 		$recent_pct = $pct_windows['1m'] ?? null;
 		if ($slope !== null && $recent !== null && $recent['slope'] !== null
@@ -3664,10 +3774,7 @@ final class CapacityPlanningData extends CController {
 		if ($pct_series_direct && $pct_slope !== null && $recent_pct !== null
 				&& $recent_pct['slope'] !== null && $recent_pct['days'] >= 21
 				&& $recent_pct['cov'] >= 70 && ($recent_pct['r2'] ?? 0) >= 0.35) {
-			$pct_floor = ($capacity !== null && $capacity > 0)
-				? $byte_floor * 100 / $capacity
-				: self::MIN_DISK_GROWTH_PCT_DAY;
-			if ($recent_pct['slope'] > max($pct_slope * 1.5, $pct_floor)) {
+			if ($recent_pct['slope'] > max($pct_slope * 1.5, $pct_noise_floor)) {
 				$selected_pct_window = '1m';
 				$selected_pct = $recent_pct;
 				$pct_slope = $recent_pct['slope'];
@@ -3680,10 +3787,9 @@ final class CapacityPlanningData extends CController {
 			$slope = null;
 		}
 		// Both bases must agree on what counts as no meaningful growth: a pct
-		// slope whose byte equivalent sits under the noise floor must not keep
-		// producing threshold dates next to a nulled byte model ("Full: never").
-		if ($pct_slope !== null && ($pct_slope <= 0
-				|| ($capacity !== null && $capacity > 0 && $pct_slope < $byte_floor * 100 / $capacity))) {
+		// slope under the noise floor must not keep producing threshold dates next
+		// to a nulled byte model ("Full: never").
+		if ($pct_slope !== null && ($pct_slope <= 0 || $pct_slope < $pct_noise_floor)) {
 			$pct_slope = null;
 		}
 
@@ -3807,14 +3913,25 @@ final class CapacityPlanningData extends CController {
 			'accelerating' => $accelerating,
 			'pct_accelerating' => $pct_accelerating,
 			'growth_day' => $slope,
-			'growth_pct_day' => $pct_slope !== null ? round($pct_slope, 5) : null,
+			// Keep calculation precision in the API. The browser formats this value
+			// independently; five decimal places can turn a valid large-volume slope
+			// into zero and detach the chart from the server-computed ETA.
+			'growth_pct_day' => $pct_slope,
 			'eta' => [
 				'warn_days' => $this->roundDays($days_warn),
 				'warn_date' => $this->dateAfter($now, $days_warn),
 				'warn_basis' => $warn_basis,
+				'warn_pct_days' => $this->roundDays($days_warn_pct_only),
+				'warn_pct_date' => $this->dateAfter($now, $days_warn_pct_only),
+				'warn_free_days' => $this->roundDays($days_warn_gb),
+				'warn_free_date' => $this->dateAfter($now, $days_warn_gb),
 				'crit_days' => $this->roundDays($days_crit),
 				'crit_date' => $this->dateAfter($now, $days_crit),
 				'crit_basis' => $crit_basis,
+				'crit_pct_days' => $this->roundDays($days_crit_pct_only),
+				'crit_pct_date' => $this->dateAfter($now, $days_crit_pct_only),
+				'crit_free_days' => $this->roundDays($days_crit_gb),
+				'crit_free_date' => $this->dateAfter($now, $days_crit_gb),
 				'full_days' => $this->roundDays($days_full),
 				'full_date' => $this->dateAfter($now, $days_full),
 				'next_days' => $this->roundDays($days_next),
@@ -3833,9 +3950,10 @@ final class CapacityPlanningData extends CController {
 		if ($current_crit) {
 			return 'Critical';
 		}
-		if ($current_warn) {
-			return 'High';
-		}
+		// A current warning is a severity floor, not an early result. Otherwise a
+		// filesystem can perversely fall from Critical to High as it crosses the
+		// warning threshold even though Critical/Full is only days away.
+		$current_floor = $current_warn ? 'High' : 'Healthy';
 		$next_critical = null;
 		foreach ([$days_crit, $days_full] as $candidate) {
 			if ($candidate !== null && ($next_critical === null || $candidate < $next_critical)) {
@@ -3843,7 +3961,7 @@ final class CapacityPlanningData extends CController {
 			}
 		}
 		if ($next_critical === null && $days_warn === null) {
-			return $data_ok ? 'Healthy' : 'Unknown';
+			return $current_warn ? 'High' : ($data_ok ? 'Healthy' : 'Unknown');
 		}
 
 		// The critical-ETA and warning-ETA tiers are ranked independently and the
@@ -3880,9 +3998,12 @@ final class CapacityPlanningData extends CController {
 			: $from_warning;
 
 		if ($confidence === 'Low' && self::SEVERITY_ORDER[$proposed] > self::SEVERITY_ORDER['Medium']) {
-			return 'Medium';
+			$proposed = 'Medium';
 		}
-		return $proposed;
+
+		return self::SEVERITY_ORDER[$current_floor] >= self::SEVERITY_ORDER[$proposed]
+			? $current_floor
+			: $proposed;
 	}
 
 	private function diskRecommendation(string $severity, string $filesystem_kind): string {
@@ -4392,13 +4513,19 @@ final class CapacityPlanningData extends CController {
 		foreach ($unknown_rows as $row) {
 			$unknown_days[intdiv($row['clock'], 86400)] = true;
 		}
-		$confirmed_saturation_only_hours = [];
+		// A confirmed trend hour already contributes its full 60 minutes. Raw
+		// buckets inside that same hour describe the same wall-clock time, so they
+		// must not add minutes on top of it. This applies to every confirmed trend
+		// hour, not only the saturation_only ones: an hour whose raw coverage stays
+		// below the replacement threshold keeps an ordinary trend row while its
+		// partial raw buckets survive alongside it.
+		$confirmed_trend_hours = [];
 		foreach ($complete as $row) {
-			if (!empty($row['saturation_only']) && ($row['source'] ?? '') === 'trend'
+			if (($row['source'] ?? '') === 'trend'
 					&& !empty($row['duration_confirmable'])
 					&& ($row['bucket_coverage_pct'] ?? 0) >= self::SATURATION_MIN_BUCKET_COVERAGE_PCT
 					&& $row['min'] >= $threshold) {
-				$confirmed_saturation_only_hours[intdiv($row['clock'], 3600)] = true;
+				$confirmed_trend_hours[intdiv($row['clock'], 3600)] = true;
 			}
 		}
 		$confirmed = array_values(array_filter($complete,
@@ -4406,15 +4533,18 @@ final class CapacityPlanningData extends CController {
 				&& ($row['bucket_coverage_pct'] ?? 0) >= self::SATURATION_MIN_BUCKET_COVERAGE_PCT
 				&& $row['min'] >= $threshold
 				&& !(($row['source'] ?? '') === 'recent_history'
-					&& isset($confirmed_saturation_only_hours[intdiv($row['clock'], 3600)]))));
+					&& isset($confirmed_trend_hours[intdiv($row['clock'], 3600)]))));
 		$episodes = [];
 		$active = [];
 		foreach ($confirmed as $row) {
 			if ($active) {
 				$previous = $active[count($active) - 1];
-				$contiguous = ($row['source'] ?? '') === ($previous['source'] ?? '')
-					&& ($row['bucket_seconds'] ?? 3600) === ($previous['bucket_seconds'] ?? 3600)
-					&& $row['clock'] === $previous['clock'] + ($previous['bucket_seconds'] ?? 3600);
+				// Adjacency alone decides contiguity: one interval ending exactly
+				// where the next begins is continuous saturation regardless of which
+				// evidence source proved it. Requiring a matching source and bucket
+				// size split a single run at the trend/raw boundary, which understated
+				// both the longest and the still-ongoing episode.
+				$contiguous = $row['clock'] === $previous['clock'] + ($previous['bucket_seconds'] ?? 3600);
 				if (!$contiguous) {
 					$episodes[] = $active;
 					$active = [];
@@ -4719,12 +4849,23 @@ final class CapacityPlanningData extends CController {
 	// -------------------------------------------------------------------------
 
 	private function respondJson(array $payload): void {
+		$payload['build_id'] = Build::ID;
 		$json = json_encode(
 			$payload,
 			JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
 		);
 		if ($json === false) {
-			$json = '{"error":{"code":500,"message":"Failed to encode JSON response."}}';
+			// Keep build_id in the fallback: the client checks the build handshake
+			// before the error field, so omitting it reports an encode failure as a
+			// stale-deployment mismatch and sends operators on a redeploy hunt.
+			$json = json_encode([
+				'error' => ['code' => 500, 'message' => _('Failed to encode JSON response.')],
+				'build_id' => Build::ID
+			], JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+			if ($json === false) {
+				$json = '{"error":{"code":500,"message":"Failed to encode JSON response."},'
+					.'"build_id":'.json_encode(Build::ID).'}';
+			}
 		}
 		$this->setResponse(new CControllerResponseData(['main_block' => $json]));
 	}

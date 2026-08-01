@@ -4,6 +4,8 @@ A Zabbix **frontend report module** that turns the trend and history data you al
 
 Built and tested on **Zabbix 7.0**.
 
+Current release: **1.4.0** (build **1.4.0-20260801.1**).
+
 ---
 
 ## Quick installation
@@ -98,6 +100,19 @@ On an SELinux Docker host, use `:ro,Z` and `:rw,Z` on those two bind mounts for 
 ```bash
 docker compose up -d --force-recreate zabbix-web-nginx-mysql
 ```
+
+### Upgrade checklist
+
+Treat the PHP controllers and libraries, JavaScript/CSS assets and manifest as one release. A partial copy can leave the browser and PHP-FPM running different builds.
+
+1. Confirm `manifest.json` reports version **1.4.0**, registers `assets/js/capacity-planning-1.4.0-20260801.1.js`, and `lib/Build.php` reports build **1.4.0-20260801.1**. The build-versioned JavaScript URL forces browsers and proxies to fetch each release instead of reusing an older bundle.
+2. Replace the complete runtime set together: `Module.php`, `manifest.json`, `actions/`, `assets/`, `lib/` (including `lib/Build.php`) and `views/`. Both installation examples copy the complete `lib/` directory, so the build handshake is included. Build a clean runtime-only directory first when using a bind mount; do not overlay only the files that appeared in a commit.
+3. Restart the frontend PHP runtime after the copy so no old OPcache bytecode remains (`sudo systemctl restart php-fpm` on the Linux example). Recreate the web frontend container for Docker deployments. Reload Nginx/Apache too when its static-asset policy requires it.
+4. In **Administration → General → Modules**, use **Scan directory** when the module/version is not refreshed automatically, then confirm that Capacity Planning remains enabled.
+5. Hard-refresh the browser (or clear this site's cached assets) before validating the report. Confirm the displayed/frontend and server build identifiers agree when the build check is available.
+6. Open one representative filesystem and verify that Warning, Critical and Full dates are ordered and that the selected model windows match the detail text.
+
+The shared series cache contains sanitized numeric history/trend shards, not PHP code, JavaScript, forecasts, thresholds or recommendations. Clearing it does **not** fix a partial deployment, stale OPcache or stale browser assets. Use **Clear shared cache** only for cache-health/invalidation work; use the complete copy, PHP restart and browser refresh above for a code upgrade.
 
 For either installation, finish in **Administration → General → Modules**: press **Scan directory**, then enable **Capacity Planning & Prediction**. Open **Reports → Capacity Planning**, and check **Settings** to confirm that the cache backend is available. The report still works from live Zabbix data if the private cache cannot be initialized.
 
@@ -209,14 +224,25 @@ The pure calculation suite covers sparse resource data, isolated maxima, recurri
 php tests/CapacityPlanningMathTest.php
 ```
 
-The cache suite covers authorization-before-cache access, namespace failure behavior, range completeness, future-range rejection, incremental extension, private storage, restart generations and the hard storage quota. Its full disk round-trip runs on a POSIX filesystem:
+The cache suite covers authorization-before-cache access, namespace failure behavior, range completeness, future-range rejection, incremental extension, private storage, restart generations, hard storage quota, chronological multi-day raw-history assembly, duplicate replacement and inclusive range-boundary fast paths. Its full disk round-trip runs on a POSIX filesystem:
 
 ```bash
 php tests/CapacityPlanningCacheTest.php
 ```
 
-The browser regression test covers Settings permissions and lazy loading, live multi-value/regex scope previews, pagination, instant facets, risk filtering, modal keyboard behavior, focus restoration, no-scroll opening, drag-to-zoom and custom lookback. It requires Node.js, Playwright and a Chromium/Chrome executable:
+The browser regression test covers Settings permissions and lazy loading, live multi-value/regex scope previews, pagination, instant facets, risk filtering, modal keyboard behavior, focus restoration, no-scroll opening, drag-to-zoom and custom lookback. Playwright is pinned in `package-lock.json`; install exactly that dependency set and its Chromium binary before running it:
 
 ```bash
-node tests/CapacityPlanningUiTest.cjs
+npm ci
+npx playwright install chromium
+export PLAYWRIGHT_CHROMIUM_EXECUTABLE="$(node -e "process.stdout.write(require('playwright').chromium.executablePath())")"
+npm test
 ```
+
+`npm test` first checks that the manifest, package version, PHP build constant, JavaScript build constant and build-versioned JavaScript filename agree, then runs the browser suite. Use `npm run test:build` or `npm run test:ui` to run either stage alone.
+
+Linux/macOS must set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` as shown (or point it at another compatible Chrome/Chromium). On Windows, set the same environment variable when needed; if it is omitted, the test runner uses the standard Google Chrome installation path.
+
+### Release validation matrix
+
+The root-level GitHub Actions workflow runs both PHP suites on Linux with every PHP version supported by Zabbix 7.0 (**8.0, 8.1, 8.2, 8.3, 8.4 and 8.5**), and runs the build-consistency and browser suites on Node.js 20 with the locked Playwright Chromium. It syntax-checks every runtime and test `.php` file and rejects any manifest/PHP/JavaScript version mismatch. Production deployment still excludes `tests/`, `package.json` and `package-lock.json`.
