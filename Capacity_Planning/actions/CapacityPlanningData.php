@@ -3143,10 +3143,14 @@ final class CapacityPlanningData extends CController {
 					: ($newest_first ? min($edge_clock, $clock) : max($edge_clock, $clock));
 			}
 			$fetched += count($batch);
-			if (count($batch) < $limit || $edge_clock === null) {
+			$batch_full = count($batch) >= $limit;
+			if (!$batch_full || $edge_clock === null) {
 				foreach ($batch_rows as $batch_row) {
 					$values[] = $batch_row;
 				}
+				// A full batch with no usable clock cannot be paged any further, so
+				// the rest of the range is unproven rather than empty.
+				$truncated = $truncated || $batch_full;
 				break;
 			}
 
