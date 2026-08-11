@@ -9,38 +9,38 @@ class ReportDataHelper {
 	public const SLA_MONTHS = 12;
 
 	/**
-	 * Hard bounds (DESIGN_SYSTEM.md §6 performance baseline). All heavy fetches clamp to these and
-	 * surface a note via getNotes() when a cap is hit, so a single oversized request can never
-	 * white-screen the frontend.
+	 * Hard bounds. All heavy fetches clamp to these and surface a warning when a
+	 * cap is hit, so a single oversized request can never white-screen the frontend.
 	 */
 	public const MAX_RANGE_DAYS = 768;
-	public const MAX_HOSTS = 5000;
+	public const MAX_HOSTS = 2000;
 	public const MAX_SLAS = 200;
+	public const MAX_GROUP_OPTIONS = 500;
 	public const FETCH_BATCH = 2000;
-	public const MAX_HISTORY_ROWS = 200000;
-	public const HISTORY_ITEM_CHUNK = 1000;
-	public const TREND_ITEM_CHUNK = 1000;
+	public const MAX_HISTORY_ROWS = 400000;
+	public const HISTORY_ITEM_CHUNK = 500;
 	public const ITEM_HOST_CHUNK = 1000;
 	public const TRENDS_THRESHOLD_SECONDS = 7 * 86400;
 
 	/**
-	 * Availability is detected from any one of these item keys (priority order: first match wins).
-	 * All three are unsigned-integer items where value 1 means "up/available".
+	 * Trend fetches are chunked so one API call never returns more than roughly
+	 * this many rows (chunk size = cap / expected rows per item for the window).
+	 */
+	public const TREND_ROWS_PER_CALL = 200000;
+
+	/**
+	 * Availability is detected from any one of these item keys (priority order:
+	 * first match wins). All are unsigned items where value 1 means "up".
 	 */
 	public const AVAILABILITY_ITEM_KEYS = ['agent.ping', 'icmpping', 'zabbix[host,agent,available]'];
 
-	/**
-	 * Human-readable truncation/limit notes accumulated during a fetch, surfaced to the UI.
-	 *
-	 * @var array<string, string>
-	 */
+	/** Below this availability a host is always in the red band. */
+	public const BAD_THRESHOLD = 90.0;
+
+	/** @var array<string,string> */
 	private array $notes = [];
 
-	/**
-	 * Return de-duplicated limit/truncation notes collected while building the report.
-	 *
-	 * @return array<int, string>
-	 */
+	/** @return array<int,string> */
 	public function getNotes(): array {
 		return array_values($this->notes);
 	}
@@ -49,18 +49,23 @@ class ReportDataHelper {
 		$this->notes[$note] = $note;
 	}
 
+	// ------------------------------------------------------------------ filter
+
 	public static function getDefaultFilter(): array {
 		$prev_month = gmdate('Y-m', gmmktime(0, 0, 0, (int) gmdate('n') - 1, 1, (int) gmdate('Y')));
 
 		return [
-			'mode' => 'prev_month',
+			'mode' => 'days_back',
 			'month' => $prev_month,
 			'date_from' => '',
 			'date_to' => '',
 			'days_back' => 30,
 			'hostgroupids' => [],
 			'slaids' => [],
-			'exclude_disabled' => 1
+			'exclude_disabled' => 1,
+			'target' => 99.0,
+			'top' => 100,
+			'tab' => 'overview'
 		];
 	}
 
@@ -71,13 +76,23 @@ class ReportDataHelper {
 		$filter['mode'] = in_array($input['mode'] ?? $defaults['mode'], ['prev_month', 'specific_month', 'custom_range', 'days_back'], true)
 			? (string) $input['mode']
 			: $defaults['mode'];
-		$filter['month'] = trim((string) ($input['month'] ?? $defaults['month']));
+		$filter['month'] = preg_match('/^\d{4}-\d{2}$/', trim((string) ($input['month'] ?? ''))) === 1
+			? trim((string) $input['month'])
+			: $defaults['month'];
 		$filter['date_from'] = trim((string) ($input['date_from'] ?? ''));
 		$filter['date_to'] = trim((string) ($input['date_to'] ?? ''));
 		$filter['days_back'] = max(1, min(366, (int) ($input['days_back'] ?? $defaults['days_back'])));
 		$filter['hostgroupids'] = self::normalizeIdArray($input['hostgroupids'] ?? []);
 		$filter['slaids'] = self::normalizeIdArray($input['slaids'] ?? []);
 		$filter['exclude_disabled'] = !empty($input['exclude_disabled']) ? 1 : 0;
+
+		$target = (float) ($input['target'] ?? $defaults['target']);
+		$filter['target'] = ($target >= 50.0 && $target <= 99.999) ? round($target, 3) : $defaults['target'];
+
+		$filter['top'] = max(10, min(500, (int) ($input['top'] ?? $defaults['top'])));
+		$filter['tab'] = in_array($input['tab'] ?? '', ['overview', 'slas', 'availability'], true)
+			? (string) $input['tab']
+			: $defaults['tab'];
 
 		return $filter;
 	}
@@ -121,11 +136,7 @@ class ReportDataHelper {
 	}
 
 	/**
-	 * Clamp a [from, to] window to MAX_RANGE_DAYS, anchoring on the end so the most recent data is
-	 * always covered. Keeps the displayed period consistent with the data actually fetched.
-	 *
 	 * @param array{0:int,1:int} $range
-	 *
 	 * @return array{0:int,1:int}
 	 */
 	private static function clampRange(array $range): array {
@@ -139,162 +150,186 @@ class ReportDataHelper {
 		return [$from, $to];
 	}
 
-	public function getSelectedHostGroupOptions(array $groupids): array {
-		if ($groupids === []) {
-			return [];
+	// ------------------------------------------------------------------ report
+
+	/**
+	 * Build the whole report from one place, so every tab and the export read
+	 * the same numbers.
+	 */
+	public function buildReport(array $filter, int $time_from, int $time_to): array {
+		$report = $this->emptyReport($filter);
+
+		$report['period'] = [
+			'from' => $time_from,
+			'to' => $time_to,
+			'days' => max(1, (int) ceil(($time_to - $time_from + 1) / 86400)),
+			'label' => $this->formatPeriodLabel($time_from, $time_to)
+		];
+
+		// Span without the inclusive +1: a "7 days back" selection is exactly
+		// the threshold and must still take the precise raw-history path.
+		$report['source_used'] = ($time_to - $time_from) > self::TRENDS_THRESHOLD_SECONDS ? 'trends' : 'history';
+
+		$report['group_options'] = $this->getGroupOptions();
+		$report['sla_options'] = $this->getSlaOptions();
+		$report['selected_groupids'] = array_values(array_intersect(
+			$filter['hostgroupids'],
+			array_map(static fn(array $g): string => (string) $g['groupid'], $report['group_options'])
+		));
+		$report['selected_slaids'] = array_values(array_intersect(
+			$filter['slaids'],
+			array_map(static fn(array $s): string => (string) $s['slaid'], $report['sla_options'])
+		));
+
+		$availability = $this->buildAvailability(
+			$report['selected_groupids'],
+			$time_from,
+			$time_to,
+			(bool) $filter['exclude_disabled'],
+			(float) $filter['target'],
+			(int) $filter['top'],
+			$report['group_options']
+		);
+		$report['groups'] = $availability['groups'];
+		$report['fleet'] = $availability['fleet'];
+		$report['daily'] = $availability['daily'];
+		$report['availability_health'] = $availability['health'];
+
+		$slas = $this->buildSlas($report['selected_slaids'], $time_to);
+		$report['slas'] = $slas['slas'];
+		$report['sla_summary'] = $slas['summary'];
+
+		$report['cards'] = $this->buildCards($report, $filter);
+		$report['attention'] = $this->buildAttention($report, $filter);
+		$report['warnings'] = array_merge($report['warnings'], $this->getNotes());
+
+		return $report;
+	}
+
+	public function emptyReport(array $filter): array {
+		return [
+			'period' => ['from' => 0, 'to' => 0, 'days' => 0, 'label' => ''],
+			'source_used' => 'history',
+			'group_options' => [],
+			'sla_options' => [],
+			'selected_groupids' => [],
+			'selected_slaids' => [],
+			'groups' => [],
+			'fleet' => [
+				'avg' => null, 'hosts_total' => 0, 'with_data' => 0, 'below_target' => 0,
+				'na' => 0, 'downtime_seconds' => 0, 'worst_host' => null, 'worst_pct' => null
+			],
+			'daily' => ['dates' => [], 'series' => []],
+			'availability_health' => ['critical' => [], 'warning' => [], 'nodata' => []],
+			'slas' => [],
+			'sla_summary' => [
+				'slas_total' => 0, 'services_total' => 0, 'meeting' => 0, 'below' => 0, 'na' => 0,
+				'breach_months' => 0
+			],
+			'cards' => [],
+			'attention' => [],
+			'warnings' => [],
+			'error' => null
+		];
+	}
+
+	public function formatPeriodLabel(int $time_from, int $time_to): string {
+		if ($time_from <= 0 || $time_to <= 0) {
+			return '';
 		}
 
+		return gmdate('j M Y', $time_from).' – '.gmdate('j M Y', $time_to).' UTC';
+	}
+
+	// ----------------------------------------------------------- filter options
+
+	/**
+	 * Host groups offered in the filter: every group that contains at least one
+	 * real host. Listed as chips; the client filters them by text.
+	 */
+	private function getGroupOptions(): array {
 		$groups = API::HostGroup()->get([
 			'output' => ['groupid', 'name'],
-			'groupids' => $groupids,
+			'with_hosts' => true,
 			'sortfield' => 'name'
 		]);
 
-		return is_array($groups) ? $groups : [];
-	}
-
-	public function getSelectedSlaOptions(array $slaids): array {
-		if ($slaids === []) {
+		if (!is_array($groups)) {
 			return [];
 		}
 
-		$slas = API::Sla()->get([
-			'output' => ['slaid', 'name', 'status', 'slo'],
-			'slaids' => $slaids,
-			'sortfield' => 'name'
-		]);
+		if (count($groups) > self::MAX_GROUP_OPTIONS) {
+			$groups = array_slice($groups, 0, self::MAX_GROUP_OPTIONS);
+			$this->addNote(_s('The host group list is limited to the first %1$d groups.', self::MAX_GROUP_OPTIONS));
+		}
 
-		return is_array($slas) ? $slas : [];
+		return array_map(static function(array $group): array {
+			return ['groupid' => (string) $group['groupid'], 'name' => (string) $group['name']];
+		}, $groups);
 	}
 
-	public function fetchSlaHeatmap(array $slaids, int $time_to, int $periods = self::SLA_MONTHS): array {
-		$params = [
+	private function getSlaOptions(): array {
+		$slas = API::Sla()->get([
 			'output' => ['slaid', 'name', 'slo', 'status'],
 			'filter' => ['status' => ZBX_SLA_STATUS_ENABLED],
 			'sortfield' => 'name'
-		];
+		]);
 
-		if ($slaids !== []) {
-			$params['slaids'] = $slaids;
-		}
-
-		$slas = API::Sla()->get($params);
-
-		if (!is_array($slas) || $slas === []) {
+		if (!is_array($slas)) {
 			return [];
 		}
 
 		if (count($slas) > self::MAX_SLAS) {
 			$slas = array_slice($slas, 0, self::MAX_SLAS);
-			$this->addNote(_s('SLA heatmap limited to the first %1$d SLAs; refine the SLA filter to see the rest.', self::MAX_SLAS));
+			$this->addNote(_s('The SLA list is limited to the first %1$d SLAs.', self::MAX_SLAS));
 		}
 
-		$end_month = (int) gmdate('n', $time_to);
-		$end_year = (int) gmdate('Y', $time_to);
-		$end_index = ($end_year * 12) + ($end_month - 1);
-		$start_index = $end_index - ($periods - 1);
-		$start_year = intdiv($start_index, 12);
-		$start_month = ($start_index % 12) + 1;
-		$period_from = gmmktime(0, 0, 0, $start_month, 1, $start_year);
-
-		$result = [];
-
-		foreach ($slas as $sla) {
-			$slaid = (string) $sla['slaid'];
-			$slo_value = isset($sla['slo']) ? (float) $sla['slo'] : null;
-
-			$services = API::Service()->get([
-				'output' => ['serviceid', 'name'],
-				'slaids' => [$slaid],
-				'sortfield' => 'name'
-			]);
-
-			if (!is_array($services) || $services === []) {
-				continue;
-			}
-
-			$service_ids = [];
-			$service_names = [];
-
-			foreach ($services as $service) {
-				$serviceid = (string) $service['serviceid'];
-				$service_ids[] = $serviceid;
-				$service_names[$serviceid] = (string) $service['name'];
-			}
-
-			$sli_result = API::Sla()->getSli([
-				'slaid' => $slaid,
-				'serviceids' => $service_ids,
-				'periods' => $periods,
-				'period_from' => $period_from
-			]);
-
-			if (!is_array($sli_result) || empty($sli_result['periods'])) {
-				continue;
-			}
-
-			$month_labels = [];
-			foreach ($sli_result['periods'] as $period) {
-				$month_labels[] = gmdate('Y-m', (int) $period['period_from']);
-			}
-
-			$sli_matrix = isset($sli_result['sli']) && is_array($sli_result['sli']) ? $sli_result['sli'] : [];
-			$service_data = [];
-
-			foreach ($service_ids as $service_index => $serviceid) {
-				$monthly_sli = [];
-
-				for ($period_index = 0; $period_index < count($month_labels); $period_index++) {
-					$value = null;
-
-					if (isset($sli_matrix[$period_index][$service_index]['sli'])) {
-						$value = (float) $sli_matrix[$period_index][$service_index]['sli'];
-					}
-
-					$monthly_sli[] = ($value === null || $value < 0)
-						? 'N/A'
-						: $this->formatPct($value, 1);
-				}
-
-				$service_data[$serviceid] = [
-					'serviceid' => $serviceid,
-					'name' => $service_names[$serviceid] ?? ('Service '.$serviceid),
-					'slo' => $slo_value !== null ? $this->formatPct($slo_value, 1) : 'N/A',
-					'slo_value' => $slo_value,
-					'month_labels' => $month_labels,
-					'monthly_sli' => $monthly_sli
-				];
-			}
-
-			$result[$slaid] = [
-				'slaid' => $slaid,
-				'sla_name' => (string) $sla['name'],
-				'slo' => $slo_value,
-				'service_data' => $service_data
+		return array_map(static function(array $sla): array {
+			return [
+				'slaid' => (string) $sla['slaid'],
+				'name' => (string) $sla['name'],
+				'slo' => isset($sla['slo']) ? (float) $sla['slo'] : null
 			];
-		}
-
-		uasort($result, static function (array $left, array $right): int {
-			return strcmp((string) $left['sla_name'], (string) $right['sla_name']);
-		});
-
-		return $result;
+		}, $slas);
 	}
 
-	public function fetchAvailability(array $hostgroupids, int $time_from, int $time_to, bool $exclude_disabled = true): array {
-		$group_params = [
-			'output' => ['groupid', 'name'],
-			'sortfield' => 'name'
+	// ------------------------------------------------------------- availability
+
+	/**
+	 * Host availability: totals, per-day series, group roll-ups and fleet
+	 * figures, computed once for every consumer.
+	 */
+	private function buildAvailability(
+		array $groupids,
+		int $time_from,
+		int $time_to,
+		bool $exclude_disabled,
+		float $target,
+		int $top,
+		array $group_options
+	): array {
+		$empty = [
+			'groups' => [],
+			'fleet' => [
+				'avg' => null, 'hosts_total' => 0, 'with_data' => 0, 'below_target' => 0,
+				'na' => 0, 'downtime_seconds' => 0, 'worst_host' => null, 'worst_pct' => null
+			],
+			'daily' => ['dates' => [], 'series' => []],
+			'health' => ['critical' => [], 'warning' => [], 'nodata' => []]
 		];
 
-		if ($hostgroupids !== []) {
-			$group_params['groupids'] = $hostgroupids;
+		$group_params = [
+			'output' => ['groupid', 'name'],
+			'with_hosts' => true,
+			'sortfield' => 'name'
+		];
+		if ($groupids !== []) {
+			$group_params['groupids'] = $groupids;
 		}
 
 		$groups = API::HostGroup()->get($group_params);
-
 		if (!is_array($groups) || $groups === []) {
-			return [];
+			return $empty;
 		}
 
 		$group_map = [];
@@ -302,63 +337,85 @@ class ReportDataHelper {
 			$group_map[(string) $group['groupid']] = (string) $group['name'];
 		}
 
+		// Colour slots: each group's BASE slot follows its position in the full
+		// option list, so filtering rarely repaints survivors - but two groups
+		// whose base slots collide would sit side by side in the stacked chart
+		// wearing the same colour, which is worse. Collisions among the groups
+		// actually present are re-slotted to free colours (name order, so the
+		// resolution itself is deterministic). Slot 8 stays reserved for the
+		// chart's "Other" bucket.
+		$group_slots = ChartRenderer::SERIES_SLOTS - 1;
+		$base_slot = [];
+		$slot = 0;
+		foreach ($group_options as $option) {
+			$base_slot[(string) $option['name']] = $slot % $group_slots;
+			$slot++;
+		}
+
+		$slot_map = [];
+		$used = [];
+		$present = array_values($group_map);
+		sort($present, SORT_NATURAL | SORT_FLAG_CASE);
+		foreach ($present as $group_name) {
+			$candidate = $base_slot[$group_name] ?? 0;
+			if (count($used) < $group_slots) {
+				while (isset($used[$candidate])) {
+					$candidate = ($candidate + 1) % $group_slots;
+				}
+			}
+			$slot_map[$group_name] = $candidate;
+			$used[$candidate] = true;
+		}
+
 		$host_params = [
 			'output' => ['hostid', 'host', 'name', 'status'],
 			'groupids' => array_keys($group_map),
 			'selectHostGroups' => ['groupid']
 		];
-
 		if ($exclude_disabled) {
 			$host_params['monitored_hosts'] = true;
 		}
 
 		$hosts = API::Host()->get($host_params);
-
 		if (!is_array($hosts) || $hosts === []) {
-			return [];
+			return $empty;
 		}
 
-		$host_name_map = [];
-		$host_groups_map = [];
-		$hostids = [];
+		if (count($hosts) > self::MAX_HOSTS) {
+			$hosts = array_slice($hosts, 0, self::MAX_HOSTS);
+			$this->addNote(_s('Availability is limited to the first %1$d hosts; narrow the host group filter to see the rest.', self::MAX_HOSTS));
+		}
 
+		$host_rows = [];
+		$hostids = [];
 		foreach ($hosts as $host) {
 			$hostid = (string) $host['hostid'];
 			$hostids[] = $hostid;
-			$host_name_map[$hostid] = (string) (($host['name'] ?? '') !== '' ? $host['name'] : $host['host']);
-			$host_groups_map[$hostid] = [];
 
-			if (isset($host['hostgroups']) && is_array($host['hostgroups'])) {
-				foreach ($host['hostgroups'] as $group) {
-					$groupid = (string) $group['groupid'];
-
-					if (isset($group_map[$groupid])) {
-						$host_groups_map[$hostid][] = $group_map[$groupid];
-					}
-				}
-			}
-		}
-
-		if ($hostids === []) {
-			return [];
-		}
-
-		if (count($hostids) > self::MAX_HOSTS) {
-			$keep = array_fill_keys(array_slice($hostids, 0, self::MAX_HOSTS), true);
-			$hostids = array_slice($hostids, 0, self::MAX_HOSTS);
-
-			foreach ($host_groups_map as $hostid => $names) {
-				if (!isset($keep[$hostid])) {
-					unset($host_groups_map[$hostid], $host_name_map[$hostid]);
+			$names = [];
+			foreach ((array) ($host['hostgroups'] ?? []) as $group) {
+				$groupid = (string) $group['groupid'];
+				if (isset($group_map[$groupid])) {
+					$names[] = $group_map[$groupid];
 				}
 			}
 
-			$this->addNote(_s('Availability limited to the first %1$d hosts; narrow the host group filter to see the rest.', self::MAX_HOSTS));
+			$host_rows[$hostid] = [
+				'hostid' => $hostid,
+				'host' => (string) (($host['name'] ?? '') !== '' ? $host['name'] : $host['host']),
+				'enabled' => (int) ($host['status'] ?? 0) === 0,
+				'groups' => $names,
+				'item_key' => null,
+				'pct' => null,
+				'state' => 'noitem',
+				'uptime_seconds' => 0,
+				'downtime_seconds' => 0,
+				'spark' => [],
+				'daily_downtime_min' => []
+			];
 		}
 
-		// Resolve availability items via an OR-set of supported keys, picking the highest-priority
-		// key present per host (AVAILABILITY_ITEM_KEYS order). Host id sets are chunked to bound the
-		// per-call payload on large installs.
+		// Resolve one availability item per host (key priority order).
 		$priority = array_flip(self::AVAILABILITY_ITEM_KEYS);
 		$items_by_host = [];
 
@@ -377,7 +434,6 @@ class ReportDataHelper {
 				$hostid = (string) $item['hostid'];
 				$itemid = (string) $item['itemid'];
 				$rank = $priority[(string) $item['key_']] ?? PHP_INT_MAX;
-
 				$current = $items_by_host[$hostid] ?? null;
 
 				if ($current === null
@@ -386,6 +442,7 @@ class ReportDataHelper {
 					$items_by_host[$hostid] = [
 						'itemid' => $itemid,
 						'hostid' => $hostid,
+						'key_' => (string) $item['key_'],
 						'delay' => isset($item['delay']) ? (string) $item['delay'] : null,
 						'priority' => $rank
 					];
@@ -393,303 +450,253 @@ class ReportDataHelper {
 			}
 		}
 
-		$window_seconds = max(1, ($time_to - $time_from) + 1);
-		$availability_by_host = ($window_seconds > self::TRENDS_THRESHOLD_SECONDS)
-			? $this->calculateAvailabilityFromTrends(array_values($items_by_host), $time_from, $time_to)
-			: $this->calculateAvailabilityFromHistory(array_values($items_by_host), $time_from, $time_to);
+		foreach ($items_by_host as $hostid => $item) {
+			if (isset($host_rows[$hostid])) {
+				$host_rows[$hostid]['item_key'] = $item['key_'];
+			}
+		}
 
-		$result = [];
+		$measured = (($time_to - $time_from) > self::TRENDS_THRESHOLD_SECONDS)
+			? $this->availabilityFromTrends(array_values($items_by_host), $time_from, $time_to)
+			: $this->availabilityFromHistory(array_values($items_by_host), $time_from, $time_to);
 
+		// Merge measurements into the host rows.
+		foreach ($host_rows as $hostid => $row) {
+			$info = $measured[$hostid] ?? null;
+
+			if ($row['item_key'] === null) {
+				$host_rows[$hostid]['state'] = 'noitem';
+				continue;
+			}
+
+			if ($info === null || $info['pct'] === null) {
+				$host_rows[$hostid]['state'] = 'nodata';
+				continue;
+			}
+
+			$pct = (float) $info['pct'];
+			$host_rows[$hostid]['pct'] = $pct;
+			$host_rows[$hostid]['uptime_seconds'] = (int) $info['uptime_seconds'];
+			$host_rows[$hostid]['downtime_seconds'] = (int) $info['downtime_seconds'];
+			$host_rows[$hostid]['spark'] = $info['spark'];
+			$host_rows[$hostid]['daily_downtime_min'] = $info['daily_downtime_min'];
+			$host_rows[$hostid]['state'] = $this->availabilityState($pct, $target);
+		}
+
+		// ---- group roll-ups -------------------------------------------------
+		$group_rollups = [];
 		foreach ($group_map as $group_name) {
-			$result[$group_name] = [];
+			$group_rollups[$group_name] = [
+				'name' => $group_name,
+				'token' => ChartRenderer::seriesToken($slot_map[$group_name] ?? 0),
+				'hosts_total' => 0,
+				'with_data' => 0,
+				'avg' => null,
+				'bands' => ['ok' => 0, 'warn' => 0, 'bad' => 0, 'na' => 0],
+				'downtime_seconds' => 0,
+				'worst_host' => null,
+				'worst_pct' => null,
+				'rows' => [],
+				'rows_total' => 0
+			];
 		}
 
-		foreach ($hostids as $hostid) {
-			$host_name = $host_name_map[$hostid] ?? ('Host '.$hostid);
-			$group_names = $host_groups_map[$hostid] ?? [];
-			$info = $availability_by_host[$hostid] ?? null;
+		foreach ($host_rows as $row) {
+			foreach ($row['groups'] as $group_name) {
+				if (!isset($group_rollups[$group_name])) {
+					continue;
+				}
 
-			if ($info === null) {
-				$info = [
-					'availability' => 'Item not found',
-					'pct' => null,
-					'uptime_seconds' => 0,
-					'downtime_seconds' => 0
-				];
-			}
+				$rollup = &$group_rollups[$group_name];
+				$rollup['hosts_total']++;
+				$rollup['rows'][] = $row;
 
-			foreach ($group_names as $group_name) {
-				$result[$group_name][] = [
-					'hostid' => $hostid,
-					'host' => $host_name,
-					'availability' => $info['availability'],
-					'availability_pct' => $info['pct'],
-					'uptime_seconds' => $info['uptime_seconds'],
-					'downtime_seconds' => $info['downtime_seconds']
-				];
-			}
-		}
+				if ($row['pct'] === null) {
+					$rollup['bands']['na']++;
+				}
+				else {
+					$rollup['with_data']++;
+					$rollup['downtime_seconds'] += (int) $row['downtime_seconds'];
+					$band = $row['state'] === 'ok' ? 'ok' : ($row['state'] === 'warn' ? 'warn' : 'bad');
+					$rollup['bands'][$band]++;
 
-		foreach ($result as &$rows) {
-			usort($rows, static function (array $left, array $right): int {
-				return strcmp((string) $left['host'], (string) $right['host']);
-			});
-		}
-		unset($rows);
-
-		$result = array_filter($result, static function (array $rows): bool {
-			return $rows !== [];
-		});
-
-		ksort($result);
-
-		return $result;
-	}
-
-	public function getGroupAverage(array $rows): ?float {
-		$values = [];
-
-		foreach ($rows as $row) {
-			if ($row['availability_pct'] !== null) {
-				$values[] = (float) $row['availability_pct'];
+					if ($rollup['worst_pct'] === null || $row['pct'] < $rollup['worst_pct']) {
+						$rollup['worst_pct'] = $row['pct'];
+						$rollup['worst_host'] = $row['host'];
+					}
+				}
+				unset($rollup);
 			}
 		}
 
-		if ($values === []) {
-			return null;
-		}
-
-		return array_sum($values) / count($values);
-	}
-
-	public function getAvailabilityBandCounts(array $rows): array {
-		$counts = [
-			'green' => 0,
-			'yellow' => 0,
-			'red' => 0,
-			'na' => 0
-		];
-
-		foreach ($rows as $row) {
-			$pct = $row['availability_pct'];
-
-			if ($pct === null) {
-				$counts['na']++;
-			}
-			elseif ($pct >= 99.0) {
-				$counts['green']++;
-			}
-			elseif ($pct >= 90.0) {
-				$counts['yellow']++;
-			}
-			else {
-				$counts['red']++;
-			}
-		}
-
-		return $counts;
-	}
-
-	public function parsePct(?string $value): ?float {
-		if ($value === null) {
-			return null;
-		}
-
-		$value = trim($value);
-
-		if ($value === '' || strtoupper($value) === 'N/A') {
-			return null;
-		}
-
-		if (substr($value, -1) === '%') {
-			$value = substr($value, 0, -1);
-		}
-
-		return is_numeric($value) ? (float) $value : null;
-	}
-
-	public function formatPct(?float $value, int $decimals = 1): string {
-		if ($value === null) {
-			return 'N/A';
-		}
-
-		return number_format($value, $decimals, '.', '').'%';
-	}
-
-	public function formatDuration(int $seconds): string {
-		$seconds = max(0, $seconds);
-
-		$days = intdiv($seconds, 86400);
-		$seconds %= 86400;
-		$hours = intdiv($seconds, 3600);
-		$seconds %= 3600;
-		$minutes = intdiv($seconds, 60);
-		$seconds %= 60;
-
-		$parts = [];
-
-		if ($days > 0) {
-			$parts[] = $days.'d';
-		}
-
-		if ($hours > 0 || $days > 0) {
-			$parts[] = $hours.'h';
-		}
-
-		if ($minutes > 0 || $hours > 0 || $days > 0) {
-			$parts[] = $minutes.'m';
-		}
-
-		$parts[] = $seconds.'s';
-
-		return implode(' ', $parts);
-	}
-
-	public function availabilityCssClass(?float $pct): string {
-		if ($pct === null) {
-			return 'slareport-na-text';
-		}
-
-		if ($pct >= 99.0) {
-			return 'slareport-ok';
-		}
-
-		if ($pct >= 90.0) {
-			return 'slareport-warn';
-		}
-
-		return 'slareport-bad';
-	}
-
-	public function sliCssClass(?float $pct, ?float $slo): string {
-		if ($pct === null) {
-			return 'slareport-cell-na';
-		}
-
-		if ($slo !== null) {
-			if ($pct >= $slo) {
-				return 'slareport-cell-ok';
-			}
-
-			if (($slo - $pct) <= 1.0) {
-				return 'slareport-cell-warn';
-			}
-
-			return 'slareport-cell-bad';
-		}
-
-		if ($pct >= 99.0) {
-			return 'slareport-cell-ok';
-		}
-
-		if ($pct >= 90.0) {
-			return 'slareport-cell-warn';
-		}
-
-		return 'slareport-cell-bad';
-	}
-
-	public function flattenSlaRows(array $sla_heatmap): array {
-		$rows = [];
-
-		foreach ($sla_heatmap as $slaid => $sla) {
-			foreach ($sla['service_data'] as $serviceid => $service) {
-				$months = $service['month_labels'] ?? [];
-				$values = $service['monthly_sli'] ?? [];
-
-				for ($i = 0; $i < count($months); $i++) {
-					$rows[] = [
-						$slaid,
-						$sla['sla_name'] ?? '',
-						$serviceid,
-						$service['name'] ?? '',
-						$service['slo'] ?? 'N/A',
-						$months[$i] ?? '',
-						$values[$i] ?? 'N/A'
-					];
+		foreach ($group_rollups as $group_name => $rollup) {
+			$values = [];
+			foreach ($rollup['rows'] as $row) {
+				if ($row['pct'] !== null) {
+					$values[] = (float) $row['pct'];
 				}
 			}
+			$group_rollups[$group_name]['avg'] = $values !== [] ? array_sum($values) / count($values) : null;
+
+			// Worst first inside each group, hosts without data at the end.
+			usort($group_rollups[$group_name]['rows'], static function(array $a, array $b): int {
+				if (($a['pct'] === null) !== ($b['pct'] === null)) {
+					return $a['pct'] === null ? 1 : -1;
+				}
+				if ($a['pct'] === null) {
+					return strcasecmp($a['host'], $b['host']);
+				}
+
+				return $a['pct'] <=> $b['pct'] ?: strcasecmp($a['host'], $b['host']);
+			});
+
+			$group_rollups[$group_name]['rows_total'] = count($group_rollups[$group_name]['rows']);
+			$group_rollups[$group_name]['rows'] = array_slice($group_rollups[$group_name]['rows'], 0, $top);
 		}
 
-		return $rows;
+		// Drop empty groups, keep name order.
+		$group_rollups = array_filter($group_rollups, static fn(array $g): bool => $g['hosts_total'] > 0);
+		ksort($group_rollups, SORT_NATURAL | SORT_FLAG_CASE);
+
+		// ---- fleet ----------------------------------------------------------
+		$fleet = [
+			'avg' => null, 'hosts_total' => count($host_rows), 'with_data' => 0, 'below_target' => 0,
+			'na' => 0, 'downtime_seconds' => 0, 'worst_host' => null, 'worst_pct' => null
+		];
+		$values = [];
+		foreach ($host_rows as $row) {
+			if ($row['pct'] === null) {
+				$fleet['na']++;
+				continue;
+			}
+
+			$fleet['with_data']++;
+			$values[] = (float) $row['pct'];
+			$fleet['downtime_seconds'] += (int) $row['downtime_seconds'];
+			if ($row['pct'] < $target) {
+				$fleet['below_target']++;
+			}
+			if ($fleet['worst_pct'] === null || $row['pct'] < $fleet['worst_pct']) {
+				$fleet['worst_pct'] = $row['pct'];
+				$fleet['worst_host'] = $row['host'];
+			}
+		}
+		$fleet['avg'] = $values !== [] ? array_sum($values) / count($values) : null;
+
+		// ---- daily downtime, stacked by group -------------------------------
+		$daily = $this->buildDailyDowntime($host_rows, $group_rollups);
+
+		// ---- health lists (over ALL hosts, never a truncated table) ---------
+		$health = ['critical' => [], 'warning' => [], 'nodata' => []];
+		foreach ($host_rows as $row) {
+			if ($row['state'] === 'bad') {
+				$health['critical'][] = $row;
+			}
+			elseif ($row['state'] === 'warn') {
+				$health['warning'][] = $row;
+			}
+			elseif ($row['state'] === 'noitem' || $row['state'] === 'nodata') {
+				$health['nodata'][] = $row;
+			}
+		}
+		usort($health['critical'], static fn(array $a, array $b): int => ($a['pct'] ?? 0) <=> ($b['pct'] ?? 0));
+		usort($health['warning'], static fn(array $a, array $b): int => ($a['pct'] ?? 0) <=> ($b['pct'] ?? 0));
+
+		return [
+			'groups' => array_values($group_rollups),
+			'fleet' => $fleet,
+			'daily' => $daily,
+			'health' => $health
+		];
 	}
 
-	public function flattenAvailabilityRows(array $availability, int $time_from, int $time_to): array {
-		$rows = [];
+	/**
+	 * Downtime minutes per day, stacked by host group (top groups by downtime,
+	 * tail folded into "Other").
+	 *
+	 * @return array{dates:array,series:array}
+	 */
+	private function buildDailyDowntime(array $host_rows, array $group_rollups): array {
+		$per_group_day = [];
+		$dates_seen = [];
 
-		foreach ($availability as $group_name => $hosts) {
-			foreach ($hosts as $host) {
-				$rows[] = [
-					$group_name,
-					$host['host'] ?? '',
-					$host['availability'] ?? 'N/A',
-					$host['availability_pct'] !== null ? number_format((float) $host['availability_pct'], 4, '.', '') : '',
-					$host['uptime_seconds'] ?? 0,
-					$host['downtime_seconds'] ?? 0,
-					gmdate('Y-m-d H:i:s', $time_from),
-					gmdate('Y-m-d H:i:s', $time_to)
+		foreach ($host_rows as $row) {
+			if ($row['daily_downtime_min'] === [] || $row['groups'] === []) {
+				continue;
+			}
+
+			// A host in several groups is charged to its first group only, so
+			// the stacked total equals the real downtime rather than a multiple.
+			$group_name = $row['groups'][0];
+
+			foreach ($row['daily_downtime_min'] as $date => $minutes) {
+				$per_group_day[$group_name][$date] = ($per_group_day[$group_name][$date] ?? 0.0) + (float) $minutes;
+				$dates_seen[$date] = true;
+			}
+		}
+
+		if ($dates_seen === []) {
+			return ['dates' => [], 'series' => []];
+		}
+
+		$dates = array_keys($dates_seen);
+		sort($dates);
+
+		// Order groups by total downtime, fold the tail into "Other".
+		$totals = [];
+		foreach ($per_group_day as $group_name => $days) {
+			$totals[$group_name] = array_sum($days);
+		}
+		arsort($totals);
+
+		$series = [];
+		$other = [];
+		$index = 0;
+		foreach (array_keys($totals) as $group_name) {
+			$values = [];
+			foreach ($dates as $date) {
+				$values[] = (float) ($per_group_day[$group_name][$date] ?? 0.0);
+			}
+
+			if ($index < ChartRenderer::SERIES_SLOTS - 1 || count($totals) <= ChartRenderer::SERIES_SLOTS) {
+				$series[] = [
+					'label' => $group_name,
+					'token' => $group_rollups[$group_name]['token'] ?? ChartRenderer::seriesToken($index),
+					'values' => $values
 				];
 			}
-		}
-
-		return $rows;
-	}
-
-	private static function normalizeIdArray($value): array {
-		if (!is_array($value)) {
-			return [];
-		}
-
-		$result = [];
-
-		foreach ($value as $id) {
-			$id = trim((string) $id);
-
-			if ($id !== '' && ctype_digit($id)) {
-				$result[$id] = $id;
+			else {
+				foreach ($values as $i => $value) {
+					$other[$i] = ($other[$i] ?? 0.0) + $value;
+				}
 			}
+			$index++;
 		}
 
-		return array_values($result);
+		if ($other !== []) {
+			$series[] = [
+				'label' => _('Other groups'),
+				'token' => '--sr-s8',
+				'values' => array_values($other)
+			];
+		}
+
+		return ['dates' => $dates, 'series' => $series];
 	}
 
-	private static function parseDateBoundary(string $value, string $type): ?int {
-		$value = trim($value);
-
-		if ($value === '') {
-			return null;
-		}
-
-		if (preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $value, $matches) !== 1) {
-			return null;
-		}
-
-		$year = (int) $matches[1];
-		$month = (int) $matches[2];
-		$day = (int) $matches[3];
-
-		if (!checkdate($month, $day, $year)) {
-			return null;
-		}
-
-		return ($type === 'start')
-			? gmmktime(0, 0, 0, $month, $day, $year)
-			: gmmktime(23, 59, 59, $month, $day, $year);
-	}
+	// ------------------------------------------------------------ availability IO
 
 	/**
 	 * Raw-history availability for short windows (<= TRENDS_THRESHOLD_SECONDS).
 	 *
-	 * Performance: instead of one paginated History.get PER item (the old N+1 loop), all item ids
-	 * are fetched in ITEM-chunked, clock-keyset-paginated batches (FETCH_BATCH rows per page) and
-	 * bucketed by item id in PHP. Total rows are capped at MAX_HISTORY_ROWS; when the cap is hit a
-	 * note is surfaced and the partial result is used (availability is still computed from whatever
-	 * was read). Availability per item = ok-samples / expected-samples, where expected = observed +
-	 * inferred missing samples (so polling gaps count as downtime).
+	 * Item ids are fetched in chunked, clock-keyset-paginated batches and
+	 * bucketed per item in PHP. Availability per item = ok-samples /
+	 * expected-samples, where expected includes inferred missing samples so
+	 * polling gaps count as downtime.
 	 *
-	 * @param array<int, array{itemid:string,hostid:string,delay:?string}> $items
+	 * @param array<int,array{itemid:string,hostid:string,delay:?string}> $items
 	 */
-	private function calculateAvailabilityFromHistory(array $items, int $time_from, int $time_to): array {
+	private function availabilityFromHistory(array $items, int $time_from, int $time_to): array {
 		$result = [];
 		$window_seconds = max(1, ($time_to - $time_from) + 1);
 
@@ -747,8 +754,6 @@ class ReportDataHelper {
 
 				$last_clock = (int) $batch[count($batch) - 1]['clock'];
 
-				// A full page never spans a single second (max same-second rows <= chunk size <
-				// FETCH_BATCH), so advancing to last_clock+1 cannot skip unread rows.
 				if (count($batch) < self::FETCH_BATCH || $last_clock >= $time_to) {
 					break;
 				}
@@ -763,7 +768,7 @@ class ReportDataHelper {
 		}
 
 		if ($limit_reached) {
-			$this->addNote(_s('History scan stopped at %1$s rows; availability percentages may be approximate.', self::MAX_HISTORY_ROWS));
+			$this->addNote(_s('The history scan stopped at %1$s rows; availability percentages may be approximate.', self::MAX_HISTORY_ROWS));
 		}
 
 		foreach ($itemids as $itemid) {
@@ -781,11 +786,14 @@ class ReportDataHelper {
 			$pct = $expected > 0 ? (($ok / $expected) * 100.0) : null;
 			$uptime_seconds = $pct !== null ? (int) round(($pct / 100.0) * $window_seconds) : 0;
 
+			[$spark, $daily_downtime] = $this->dailyFromHistory($history, $interval, $time_from, $time_to);
+
 			$result[$host_by_item[$itemid]] = [
-				'availability' => $this->formatPct($pct, 1),
 				'pct' => $pct,
 				'uptime_seconds' => max(0, min($window_seconds, $uptime_seconds)),
-				'downtime_seconds' => max(0, $window_seconds - $uptime_seconds)
+				'downtime_seconds' => max(0, $window_seconds - $uptime_seconds),
+				'spark' => $spark,
+				'daily_downtime_min' => $daily_downtime
 			];
 		}
 
@@ -793,20 +801,60 @@ class ReportDataHelper {
 	}
 
 	/**
-	 * Trend-based availability for long windows (> TRENDS_THRESHOLD_SECONDS).
+	 * Per-day availability/downtime from raw history samples (chart data only;
+	 * the headline percentage uses the gap-aware total above).
 	 *
-	 * Approximation: each hourly trend row carries value_avg = fraction of "up" samples in that
-	 * hour (in [0,1] for agent.ping / icmpping). Summing value_avg over covered hours gives total
-	 * "up hours"; dividing by the number of COVERED hours (count of trend rows actually present,
-	 * not ceil(window/3600)) yields availability. This means hours with no trend data are excluded
-	 * from the denominator rather than silently counted as downtime — a host with sparse coverage
-	 * is rated on the data it has, and a host with zero coverage reports N/A. value_avg is clamped
-	 * to [0,1] so the zabbix[host,agent,available] item (values 0/1/2) cannot inflate uptime.
-	 * Trend.get is array_chunk'd to bound the per-call payload on large host sets.
-	 *
-	 * @param array<int, array{itemid:string,hostid:string,delay:?string}> $items
+	 * @return array{0:array<int,float>,1:array<string,float>}
 	 */
-	private function calculateAvailabilityFromTrends(array $items, int $time_from, int $time_to): array {
+	private function dailyFromHistory(array $history, int $interval, int $time_from, int $time_to): array {
+		if ($history === [] || $interval <= 0) {
+			return [[], []];
+		}
+
+		$ok_by_day = [];
+		$seen_by_day = [];
+		foreach ($history as $row) {
+			$date = gmdate('Y-m-d', (int) $row['clock']);
+			$seen_by_day[$date] = ($seen_by_day[$date] ?? 0) + 1;
+			if ((string) $row['value'] === '1') {
+				$ok_by_day[$date] = ($ok_by_day[$date] ?? 0) + 1;
+			}
+		}
+
+		$spark = [];
+		$daily_downtime = [];
+		foreach ($seen_by_day as $date => $seen) {
+			$day_start = max($time_from, (int) gmmktime(0, 0, 0, (int) substr($date, 5, 2), (int) substr($date, 8, 2), (int) substr($date, 0, 4)));
+			$day_end = min($time_to, $day_start + 86399);
+			$expected = max($seen, (int) floor(($day_end - $day_start + 1) / $interval));
+
+			$availability = $expected > 0 ? (($ok_by_day[$date] ?? 0) / $expected) : 1.0;
+			$availability = max(0.0, min(1.0, $availability));
+
+			$spark[] = $availability * 100.0;
+			$daily_downtime[$date] = (1.0 - $availability) * (($day_end - $day_start + 1) / 60.0);
+		}
+
+		return [$spark, $daily_downtime];
+	}
+
+	/**
+	 * Trend-based availability for long windows.
+	 *
+	 * Each hourly trend row's value_avg is the fraction of "up" samples that
+	 * hour (integer-rounded by Zabbix for unsigned items). Availability = sum of
+	 * value_avg over covered hours / covered hours; hours without trend data are
+	 * excluded from the denominator, and a host with zero coverage reports N/A.
+	 * value_avg is clamped to [0,1] so zabbix[host,agent,available] (0/1/2)
+	 * cannot inflate uptime.
+	 *
+	 * Chunks are sized so one API call returns at most ~TREND_ROWS_PER_CALL rows
+	 * and each chunk is folded into counters immediately, so memory stays flat
+	 * no matter how wide the window or how many hosts.
+	 *
+	 * @param array<int,array{itemid:string,hostid:string,delay:?string}> $items
+	 */
+	private function availabilityFromTrends(array $items, int $time_from, int $time_to): array {
 		$result = [];
 		$window_seconds = max(1, ($time_to - $time_from) + 1);
 
@@ -821,10 +869,15 @@ class ReportDataHelper {
 			$host_by_item[(string) $item['itemid']] = (string) $item['hostid'];
 		}
 
-		$up_hours_by_host = [];
-		$covered_hours_by_host = [];
+		$hours_in_window = max(1, (int) ceil($window_seconds / 3600));
+		$chunk_size = max(1, min(1000, (int) floor(self::TREND_ROWS_PER_CALL / $hours_in_window)));
 
-		foreach (array_chunk($itemids, self::TREND_ITEM_CHUNK) as $itemid_chunk) {
+		$up_hours = [];
+		$covered_hours = [];
+		$daily_up = [];
+		$daily_covered = [];
+
+		foreach (array_chunk($itemids, $chunk_size) as $itemid_chunk) {
 			$trends = API::Trend()->get([
 				'output' => ['itemid', 'clock', 'value_avg'],
 				'itemids' => $itemid_chunk,
@@ -838,54 +891,639 @@ class ReportDataHelper {
 
 			foreach ($trends as $trend) {
 				$itemid = (string) $trend['itemid'];
-
 				if (!isset($host_by_item[$itemid])) {
 					continue;
 				}
 
 				$hostid = $host_by_item[$itemid];
-				$value_avg = max(0.0, min(1.0, (float) $trend['value_avg']));
+				$value = max(0.0, min(1.0, (float) $trend['value_avg']));
+				$date = gmdate('Y-m-d', (int) $trend['clock']);
 
-				$up_hours_by_host[$hostid] = ($up_hours_by_host[$hostid] ?? 0.0) + $value_avg;
-				$covered_hours_by_host[$hostid] = ($covered_hours_by_host[$hostid] ?? 0) + 1;
+				$up_hours[$hostid] = ($up_hours[$hostid] ?? 0.0) + $value;
+				$covered_hours[$hostid] = ($covered_hours[$hostid] ?? 0) + 1;
+				$daily_up[$hostid][$date] = ($daily_up[$hostid][$date] ?? 0.0) + $value;
+				$daily_covered[$hostid][$date] = ($daily_covered[$hostid][$date] ?? 0) + 1;
 			}
+
+			unset($trends);
 		}
 
 		foreach ($items as $item) {
 			$hostid = (string) $item['hostid'];
-			$covered_hours = $covered_hours_by_host[$hostid] ?? 0;
+			$covered = $covered_hours[$hostid] ?? 0;
 
-			if ($covered_hours === 0) {
+			if ($covered === 0) {
 				$result[$hostid] = [
-					'availability' => 'No data',
 					'pct' => null,
 					'uptime_seconds' => 0,
-					'downtime_seconds' => 0
+					'downtime_seconds' => 0,
+					'spark' => [],
+					'daily_downtime_min' => []
 				];
-
 				continue;
 			}
 
-			$up_hours = $up_hours_by_host[$hostid] ?? 0.0;
-			$pct = max(0.0, min(100.0, ($up_hours / $covered_hours) * 100.0));
+			$pct = max(0.0, min(100.0, (($up_hours[$hostid] ?? 0.0) / $covered) * 100.0));
 			$uptime_seconds = (int) round(($pct / 100.0) * $window_seconds);
 
+			$spark = [];
+			$daily_downtime = [];
+			$days = $daily_covered[$hostid] ?? [];
+			ksort($days);
+			foreach ($days as $date => $day_covered) {
+				$availability = $day_covered > 0
+					? max(0.0, min(1.0, ($daily_up[$hostid][$date] ?? 0.0) / $day_covered))
+					: 1.0;
+				$spark[] = $availability * 100.0;
+				$daily_downtime[$date] = (1.0 - $availability) * $day_covered * 60.0;
+			}
+
 			$result[$hostid] = [
-				'availability' => $this->formatPct($pct, 1),
 				'pct' => $pct,
 				'uptime_seconds' => max(0, min($window_seconds, $uptime_seconds)),
-				'downtime_seconds' => max(0, $window_seconds - $uptime_seconds)
+				'downtime_seconds' => max(0, $window_seconds - $uptime_seconds),
+				'spark' => $spark,
+				'daily_downtime_min' => $daily_downtime
 			];
 		}
 
 		return $result;
 	}
 
+	// ---------------------------------------------------------------------- SLA
+
 	/**
-	 * Estimate how many polls SHOULD have produced a sample in [start, end] but did not, by walking
-	 * the observed clocks and counting whole step-sized gaps before the first, between samples, and
-	 * after the last. Used as the "downtime" portion of the availability denominator. Assumes a
-	 * roughly fixed polling interval ($step); irregular intervals only skew the missing estimate.
+	 * Rolling 12-month SLI per SLA/service, with an error budget for the most
+	 * recent period. Values stay floats; formatting happens at the view.
+	 */
+	private function buildSlas(array $slaids, int $time_to): array {
+		$summary = [
+			'slas_total' => 0, 'services_total' => 0, 'meeting' => 0, 'below' => 0, 'na' => 0,
+			'breach_months' => 0
+		];
+
+		$params = [
+			'output' => ['slaid', 'name', 'slo', 'status'],
+			'filter' => ['status' => ZBX_SLA_STATUS_ENABLED],
+			'sortfield' => 'name'
+		];
+		if ($slaids !== []) {
+			$params['slaids'] = $slaids;
+		}
+
+		$slas = API::Sla()->get($params);
+		if (!is_array($slas) || $slas === []) {
+			return ['slas' => [], 'summary' => $summary];
+		}
+
+		if (count($slas) > self::MAX_SLAS) {
+			$slas = array_slice($slas, 0, self::MAX_SLAS);
+			$this->addNote(_s('The SLA report is limited to the first %1$d SLAs; refine the SLA filter to see the rest.', self::MAX_SLAS));
+		}
+
+		$end_month = (int) gmdate('n', $time_to);
+		$end_year = (int) gmdate('Y', $time_to);
+		$end_index = ($end_year * 12) + ($end_month - 1);
+		$start_index = $end_index - (self::SLA_MONTHS - 1);
+		$period_from = gmmktime(0, 0, 0, ($start_index % 12) + 1, 1, intdiv($start_index, 12));
+
+		$now = time();
+		$result = [];
+
+		foreach ($slas as $sla) {
+			$slaid = (string) $sla['slaid'];
+			$slo = isset($sla['slo']) ? (float) $sla['slo'] : null;
+
+			$services = API::Service()->get([
+				'output' => ['serviceid', 'name'],
+				'slaids' => [$slaid],
+				'sortfield' => 'name'
+			]);
+
+			if (!is_array($services) || $services === []) {
+				continue;
+			}
+
+			$service_ids = array_map(static fn(array $s): string => (string) $s['serviceid'], $services);
+			$service_names = [];
+			foreach ($services as $service) {
+				$service_names[(string) $service['serviceid']] = (string) $service['name'];
+			}
+
+			$sli_result = API::Sla()->getSli([
+				'slaid' => $slaid,
+				'serviceids' => $service_ids,
+				'periods' => self::SLA_MONTHS,
+				'period_from' => $period_from
+			]);
+
+			if (!is_array($sli_result) || empty($sli_result['periods'])) {
+				continue;
+			}
+
+			$months = [];
+			$periods = [];
+			foreach ($sli_result['periods'] as $period) {
+				$months[] = gmdate('Y-m', (int) $period['period_from']);
+				$periods[] = [
+					'from' => (int) $period['period_from'],
+					'to' => (int) $period['period_to']
+				];
+			}
+
+			$sli_matrix = isset($sli_result['sli']) && is_array($sli_result['sli']) ? $sli_result['sli'] : [];
+
+			// The matrix columns follow the RESPONSE's serviceids (which the API
+			// sorts), not the request order. Mapping columns by the request
+			// order silently attributes one service's SLI to another.
+			$column_by_service = [];
+			foreach ((array) ($sli_result['serviceids'] ?? []) as $column => $response_serviceid) {
+				$column_by_service[(string) $response_serviceid] = (int) $column;
+			}
+
+			$service_rows = [];
+			$meeting = 0;
+			$below = 0;
+			$na = 0;
+			$all_values = [];
+
+			foreach ($service_ids as $serviceid) {
+				$service_index = $column_by_service[(string) $serviceid] ?? null;
+
+				$sli = [];
+				for ($period_index = 0; $period_index < count($months); $period_index++) {
+					$value = null;
+					if ($service_index !== null && isset($sli_matrix[$period_index][$service_index]['sli'])) {
+						$raw = (float) $sli_matrix[$period_index][$service_index]['sli'];
+						$value = $raw < 0 ? null : $raw;
+					}
+					$sli[] = $value;
+					if ($value !== null) {
+						$all_values[] = $value;
+					}
+				}
+
+				// Latest measured month and its state against the SLO.
+				$latest = null;
+				foreach (array_reverse($sli) as $value) {
+					if ($value !== null) {
+						$latest = $value;
+						break;
+					}
+				}
+
+				$breaches = 0;
+				if ($slo !== null) {
+					foreach ($sli as $value) {
+						if ($value !== null && $value < $slo) {
+							$breaches++;
+						}
+					}
+				}
+
+				if ($latest === null || $slo === null) {
+					$state = 'na';
+					$na++;
+				}
+				elseif ($latest >= $slo) {
+					$state = 'ok';
+					$meeting++;
+				}
+				else {
+					$state = ($slo - $latest) <= 0.5 ? 'warn' : 'bad';
+					$below++;
+				}
+
+				// Error budget for the most recent period: how much of the
+				// allowed downtime has been consumed so far.
+				$budget = null;
+				$last_period = $periods !== [] ? end($periods) : null;
+				$last_sli = $sli !== [] ? end($sli) : null;
+				if ($slo !== null && $slo < 100.0 && $last_period !== null && $last_sli !== null) {
+					$period_len = max(1, $last_period['to'] - $last_period['from']);
+					$elapsed = max(1, min($now, $last_period['to']) - $last_period['from']);
+					$allowed = $period_len * (1.0 - $slo / 100.0);
+					$consumed = $elapsed * (1.0 - $last_sli / 100.0);
+
+					$budget = [
+						'allowed_seconds' => (int) round($allowed),
+						'consumed_seconds' => (int) round($consumed),
+						'remaining_seconds' => (int) round($allowed - $consumed),
+						'used_pct' => $allowed > 0 ? ($consumed / $allowed) * 100.0 : null
+					];
+				}
+
+				$service_rows[] = [
+					'serviceid' => $serviceid,
+					'name' => $service_names[$serviceid] ?? ('Service '.$serviceid),
+					'sli' => $sli,
+					'latest' => $latest,
+					'state' => $state,
+					'breaches' => $breaches,
+					'budget' => $budget
+				];
+
+				$summary['services_total']++;
+				$summary['breach_months'] += $breaches;
+			}
+
+			$summary['meeting'] += $meeting;
+			$summary['below'] += $below;
+			$summary['na'] += $na;
+
+			// Problem services first.
+			$order = ['bad' => 0, 'warn' => 1, 'na' => 2, 'ok' => 3];
+			usort($service_rows, static function(array $a, array $b) use ($order): int {
+				return ($order[$a['state']] ?? 9) <=> ($order[$b['state']] ?? 9)
+					?: strcasecmp($a['name'], $b['name']);
+			});
+
+			$result[] = [
+				'slaid' => $slaid,
+				'name' => (string) $sla['name'],
+				'slo' => $slo,
+				'months' => $months,
+				'periods' => $periods,
+				'services' => $service_rows,
+				'meeting' => $meeting,
+				'below' => $below,
+				'na' => $na,
+				'avg' => $all_values !== [] ? array_sum($all_values) / count($all_values) : null
+			];
+		}
+
+		usort($result, static fn(array $a, array $b): int => strcasecmp($a['name'], $b['name']));
+
+		$summary['slas_total'] = count($result);
+
+		return ['slas' => $result, 'summary' => $summary];
+	}
+
+	// ------------------------------------------------------------------- rollups
+
+	private function buildCards(array $report, array $filter): array {
+		$fleet = $report['fleet'];
+		$sla = $report['sla_summary'];
+		$target = (float) $filter['target'];
+
+		$cards = [];
+
+		$cards[] = [
+			'key' => 'fleet',
+			'label' => _('Fleet availability'),
+			'value' => $fleet['avg'] === null ? '—' : $this->formatPct($fleet['avg'], 2),
+			'sub' => _s('Average across %1$d hosts with data', (int) $fleet['with_data']),
+			'tone' => $fleet['avg'] === null ? 'neutral'
+				: ($fleet['avg'] >= $target ? 'ok' : ($fleet['avg'] >= self::BAD_THRESHOLD ? 'warning' : 'critical'))
+		];
+
+		$meeting_target = max(0, (int) $fleet['with_data'] - (int) $fleet['below_target']);
+		$cards[] = [
+			'key' => 'target',
+			'label' => _s('Hosts meeting %1$s', $this->formatPct($target, $target == floor($target) ? 0 : 1)),
+			'value' => $fleet['with_data'] > 0
+				? $meeting_target.' / '.(int) $fleet['with_data']
+				: '—',
+			'sub' => (int) $fleet['below_target'] === 0
+				? _('Every measured host is on target')
+				: ((int) $fleet['below_target'] === 1
+					? _('1 host is below target')
+					: _s('%1$d hosts are below target', (int) $fleet['below_target'])),
+			'tone' => $fleet['with_data'] === 0 ? 'neutral'
+				: ((int) $fleet['below_target'] === 0 ? 'ok'
+					: ((int) $fleet['below_target'] <= 2 ? 'warning' : 'critical'))
+		];
+
+		$cards[] = [
+			'key' => 'downtime',
+			'label' => _('Total downtime'),
+			'value' => $fleet['with_data'] > 0 ? $this->formatDuration((int) $fleet['downtime_seconds']) : '—',
+			'sub' => $fleet['worst_host'] === null
+				? _('Summed across all measured hosts')
+				: _s('Worst: %1$s at %2$s', (string) $fleet['worst_host'], $this->formatPct($fleet['worst_pct'], 2)),
+			'tone' => 'neutral'
+		];
+
+		if ((int) $sla['services_total'] > 0) {
+			$cards[] = [
+				'key' => 'sla',
+				'label' => _('Services meeting their SLO'),
+				'value' => (int) $sla['meeting'].' / '.((int) $sla['meeting'] + (int) $sla['below']),
+				'sub' => (int) $sla['below'] === 0
+					? _s('Across %1$d SLAs', (int) $sla['slas_total'])
+					: ((int) $sla['below'] === 1
+						? _('1 service is below SLO')
+						: _s('%1$d services are below SLO', (int) $sla['below'])),
+				'tone' => (int) $sla['below'] === 0 ? 'ok' : 'critical'
+			];
+
+			$cards[] = [
+				'key' => 'breaches',
+				'label' => _('SLO breaches, last 12 months'),
+				'value' => (string) (int) $sla['breach_months'],
+				'sub' => _('Service-months below the SLO'),
+				'tone' => (int) $sla['breach_months'] === 0 ? 'ok' : 'warning'
+			];
+		}
+
+		if ((int) $fleet['na'] > 0) {
+			$cards[] = [
+				'key' => 'nodata',
+				'label' => _('Hosts without data'),
+				'value' => (string) (int) $fleet['na'],
+				'sub' => _('No availability item, or no samples in the period'),
+				'tone' => 'warning'
+			];
+		}
+
+		return $cards;
+	}
+
+	private function buildAttention(array $report, array $filter): array {
+		$items = [];
+		$target = (float) $filter['target'];
+
+		// Services below their SLO in the latest measured month.
+		foreach ($report['slas'] as $sla) {
+			foreach ($sla['services'] as $service) {
+				if ($service['state'] === 'bad' || $service['state'] === 'warn') {
+					$gap = $sla['slo'] !== null && $service['latest'] !== null
+						? $sla['slo'] - $service['latest']
+						: null;
+					$items[] = [
+						'severity' => $service['state'] === 'bad' ? 'critical' : 'warning',
+						'scope' => _('SLA'),
+						'title' => _s('%1$s is below its SLO', $service['name']),
+						'detail' => _s(
+							'%1$s against an SLO of %2$s (%3$s short). SLA: %4$s.',
+							$this->formatPct($service['latest'], 2),
+							$this->formatPct($sla['slo'], 2),
+							$gap !== null ? $this->formatPct($gap, 2) : '—',
+							$sla['name']
+						)
+					];
+				}
+
+				if ($service['budget'] !== null && $service['budget']['used_pct'] !== null
+						&& $service['budget']['used_pct'] >= 80.0 && $service['state'] === 'ok') {
+					$items[] = [
+						'severity' => 'warning',
+						'scope' => _('Error budget'),
+						'title' => _s('%1$s has used %2$s of its error budget', $service['name'],
+							$this->formatPct($service['budget']['used_pct'], 0)),
+						'detail' => _s(
+							'%1$s of allowed downtime remains this period.',
+							$this->formatDuration(max(0, (int) $service['budget']['remaining_seconds']))
+						)
+					];
+				}
+			}
+		}
+
+		// Hosts, worst first, from the untruncated health lists.
+		foreach ($report['availability_health']['critical'] as $row) {
+			$items[] = [
+				'severity' => 'critical',
+				'scope' => _('Host'),
+				'title' => _s('%1$s availability is %2$s', $row['host'], $this->formatPct($row['pct'], 2)),
+				'detail' => _s(
+					'%1$s of downtime in this period. Group: %2$s.',
+					$this->formatDuration((int) $row['downtime_seconds']),
+					implode(', ', $row['groups'])
+				)
+			];
+		}
+
+		foreach ($report['availability_health']['warning'] as $row) {
+			$items[] = [
+				'severity' => 'warning',
+				'scope' => _('Host'),
+				'title' => _s('%1$s is below the %2$s target', $row['host'], $this->formatPct($target, 1)),
+				'detail' => _s(
+					'%1$s availability, %2$s of downtime. Group: %3$s.',
+					$this->formatPct($row['pct'], 2),
+					$this->formatDuration((int) $row['downtime_seconds']),
+					implode(', ', $row['groups'])
+				)
+			];
+		}
+
+		// Hosts without data are NOT listed here: they have their own KPI card
+		// and appear as "No item"/"No data" rows on the availability tab. A
+		// fleet with many unmeasured hosts would otherwise drown the real
+		// problems and make the attention badge cry wolf.
+
+		$order = ['critical' => 0, 'warning' => 1, 'info' => 2];
+		usort($items, static fn(array $a, array $b): int => ($order[$a['severity']] ?? 9) <=> ($order[$b['severity']] ?? 9));
+
+		return $items;
+	}
+
+	// -------------------------------------------------------------------- states
+
+	public function availabilityState(?float $pct, float $target): string {
+		if ($pct === null) {
+			return 'nodata';
+		}
+		if ($pct >= $target) {
+			return 'ok';
+		}
+		if ($pct >= self::BAD_THRESHOLD) {
+			return 'warn';
+		}
+
+		return 'bad';
+	}
+
+	/**
+	 * SLI cell state against the SLO: ok at/above, warn within half a point
+	 * below, bad further below, na unmeasured.
+	 */
+	public function sliState(?float $pct, ?float $slo): string {
+		if ($pct === null) {
+			return 'na';
+		}
+
+		if ($slo !== null) {
+			if ($pct >= $slo) {
+				return 'ok';
+			}
+
+			return ($slo - $pct) <= 0.5 ? 'warn' : 'bad';
+		}
+
+		return $pct >= 99.0 ? 'ok' : ($pct >= self::BAD_THRESHOLD ? 'warn' : 'bad');
+	}
+
+	// ---------------------------------------------------------------- formatting
+
+	public function formatPct(?float $value, int $decimals = 2): string {
+		if ($value === null) {
+			return '—';
+		}
+
+		return number_format($value, $decimals, '.', ' ').'%';
+	}
+
+	public function formatDuration(int $seconds): string {
+		$seconds = max(0, $seconds);
+
+		if ($seconds < 60) {
+			return $seconds.'s';
+		}
+
+		$days = intdiv($seconds, 86400);
+		$seconds %= 86400;
+		$hours = intdiv($seconds, 3600);
+		$seconds %= 3600;
+		$minutes = intdiv($seconds, 60);
+
+		$parts = [];
+		if ($days > 0) {
+			$parts[] = $days.'d';
+		}
+		if ($hours > 0 || $days > 0) {
+			$parts[] = $hours.'h';
+		}
+		$parts[] = $minutes.'m';
+
+		return implode(' ', $parts);
+	}
+
+	public function formatInt($value): string {
+		if ($value === null) {
+			return '—';
+		}
+
+		return number_format((float) $value, 0, '.', ' ');
+	}
+
+	public function formatDateTime($timestamp): string {
+		if ($timestamp === null || (int) $timestamp <= 0) {
+			return '—';
+		}
+
+		return gmdate('Y-m-d H:i', (int) $timestamp).' UTC';
+	}
+
+	public function shortMonth(string $ym): string {
+		if (preg_match('/^(\d{4})-(\d{2})$/', $ym, $matches) === 1) {
+			return gmdate('M', gmmktime(0, 0, 0, (int) $matches[2], 1, (int) $matches[1]));
+		}
+
+		return $ym;
+	}
+
+	// ----------------------------------------------------------------------- CSV
+
+	public function flattenSlaRows(array $slas): array {
+		$rows = [];
+
+		foreach ($slas as $sla) {
+			foreach ($sla['services'] as $service) {
+				foreach ($sla['months'] as $i => $month) {
+					$value = $service['sli'][$i] ?? null;
+					$rows[] = [
+						$sla['slaid'],
+						$sla['name'],
+						$service['serviceid'],
+						$service['name'],
+						$sla['slo'] !== null ? number_format($sla['slo'], 4, '.', '') : '',
+						$month,
+						$value !== null ? number_format($value, 4, '.', '') : ''
+					];
+				}
+			}
+		}
+
+		return $rows;
+	}
+
+	public function flattenAvailabilityRows(array $groups, int $time_from, int $time_to): array {
+		$rows = [];
+
+		foreach ($groups as $group) {
+			foreach ($group['rows'] as $row) {
+				$rows[] = [
+					$group['name'],
+					$row['host'],
+					$row['pct'] !== null ? number_format((float) $row['pct'], 4, '.', '') : '',
+					$row['state'],
+					$row['uptime_seconds'],
+					$row['downtime_seconds'],
+					$row['item_key'] ?? '',
+					gmdate('Y-m-d H:i:s', $time_from),
+					gmdate('Y-m-d H:i:s', $time_to)
+				];
+			}
+		}
+
+		return $rows;
+	}
+
+	public function flattenDailyRows(array $daily): array {
+		$rows = [];
+
+		foreach ($daily['dates'] as $i => $date) {
+			$row = [$date];
+			$total = 0.0;
+			foreach ($daily['series'] as $series) {
+				$value = (float) ($series['values'][$i] ?? 0.0);
+				$row[] = number_format($value, 2, '.', '');
+				$total += $value;
+			}
+			$row[] = number_format($total, 2, '.', '');
+			$rows[] = $row;
+		}
+
+		return $rows;
+	}
+
+	// ------------------------------------------------------------------ internals
+
+	private static function normalizeIdArray($value): array {
+		if (!is_array($value)) {
+			return [];
+		}
+
+		$result = [];
+		foreach ($value as $id) {
+			if (!is_scalar($id)) {
+				continue;
+			}
+			$id = trim((string) $id);
+			if ($id !== '' && ctype_digit($id)) {
+				$result[$id] = $id;
+			}
+		}
+
+		return array_values($result);
+	}
+
+	private static function parseDateBoundary(string $value, string $type): ?int {
+		$value = trim($value);
+
+		if ($value === '' || preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $value, $matches) !== 1) {
+			return null;
+		}
+
+		$year = (int) $matches[1];
+		$month = (int) $matches[2];
+		$day = (int) $matches[3];
+
+		if (!checkdate($month, $day, $year)) {
+			return null;
+		}
+
+		return ($type === 'start')
+			? gmmktime(0, 0, 0, $month, $day, $year)
+			: gmmktime(23, 59, 59, $month, $day, $year);
+	}
+
+	/**
+	 * Estimate how many polls SHOULD have produced a sample but did not, by
+	 * walking the observed clocks and counting whole step-sized gaps. Used as
+	 * the downtime portion of the availability denominator.
 	 */
 	private function countMissingSamples(array $history, int $start, int $end, int $step): int {
 		if ($step <= 0) {
@@ -914,9 +1552,8 @@ class ReportDataHelper {
 	}
 
 	/**
-	 * Determine the polling interval (seconds) for an availability item. Prefers the configured item
-	 * delay; if that is unavailable or non-numeric (e.g. a macro/flexible interval) it falls back to
-	 * the median of observed clock deltas, and finally to 60s when nothing can be inferred.
+	 * Polling interval for an availability item: the configured delay when it is
+	 * numeric, else the median observed clock delta, else 60s.
 	 */
 	private function inferInterval(array $history, ?string $delay): int {
 		$parsed_delay = $this->parseDelayToSeconds($delay);
@@ -926,10 +1563,8 @@ class ReportDataHelper {
 		}
 
 		$deltas = [];
-
 		for ($i = 1; $i < count($history); $i++) {
 			$delta = (int) $history[$i]['clock'] - (int) $history[$i - 1]['clock'];
-
 			if ($delta > 0) {
 				$deltas[] = $delta;
 			}
@@ -955,7 +1590,6 @@ class ReportDataHelper {
 		}
 
 		$delay = trim($delay);
-
 		if ($delay === '') {
 			return null;
 		}
@@ -966,19 +1600,12 @@ class ReportDataHelper {
 
 		if (preg_match('/^(\d+)\s*([smhdw])$/i', $delay, $matches) === 1) {
 			$value = (int) $matches[1];
-			$unit = strtolower($matches[2]);
-
-			switch ($unit) {
-				case 's':
-					return $value;
-				case 'm':
-					return $value * 60;
-				case 'h':
-					return $value * 3600;
-				case 'd':
-					return $value * 86400;
-				case 'w':
-					return $value * 604800;
+			switch (strtolower($matches[2])) {
+				case 's': return $value;
+				case 'm': return $value * 60;
+				case 'h': return $value * 3600;
+				case 'd': return $value * 86400;
+				case 'w': return $value * 604800;
 			}
 		}
 

@@ -2,8 +2,8 @@
   "manifest_version": 2.0,
   "id": "sla_uptime_report",
   "name": "SLA & Uptime Report",
-  "description": "Rolling 12-month SLA heatmap and host availability report with HTML and CSV export.",
-  "version": "1.2.0",
+  "description": "SLA compliance and host availability reporting: rolling 12-month SLI heatmaps with error budgets, per-group uptime with daily downtime charts, and a presentation-ready export. Runs on single-server, multi-server (HA) and Docker Zabbix frontends.",
+  "version": "2.0.0",
   "namespace": "SlaUptimeReport",
   "author": "Keberneth",
   "url": "",
@@ -23,7 +23,7 @@
       "slareport.css"
     ],
     "js": [
-      "slareport.filter.js"
+      "slareport.js"
     ]
   }
 }

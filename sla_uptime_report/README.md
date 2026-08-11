@@ -1,140 +1,185 @@
 # SLA & Uptime Report
 
-A Zabbix 7.0 frontend module that adds an **SLA & Uptime Report** page under **Reports**. It
-combines two views on one screen:
+A Zabbix 7.0 frontend module that turns Zabbix's SLA engine and host availability items into a
+report you can put in front of both an operations team and a customer.
 
-1. **SLA overview** — a rolling 12-month SLI heatmap for the SLAs configured in
-   *Services → SLA*, colour-coded against each SLA's SLO.
-2. **Availability overview** — per-host-group uptime percentages and downtime, derived from each
-   host's availability item, with green/yellow/red banding.
+It answers three questions on one page:
 
-Both views can be exported as a self-contained HTML report or as CSV.
+1. **Are we meeting our commitments?** — every service across every SLA, judged against its own
+   SLO, with a rolling 12-month heatmap and this period's error budget.
+2. **How available were the hosts?** — per-group uptime with daily trend sparklines, measured
+   from each host's availability item.
+3. **Where was uptime lost?** — downtime minutes per day, stacked by host group, so each
+   incident is visible as a spike.
 
----
+Menu location: **Reports → SLA & Uptime Report**.
 
-## Features
-
-- Rolling **12-month SLA heatmap** (one row per service, one column per month) with a per-SLA
-  summary line (services meeting / below SLO, 12-month average).
-- **Host availability** per host group, with group averages, ≥99 % / 90–99 % / <90 % / N/A band
-  counts, and human-readable downtime.
-- **Period modes:** previous month, a specific month, a custom date range, or a rolling
-  "days back" window. Only the fields used by the selected mode are shown.
-- **Typeahead filters** for host groups and SLAs (native Zabbix multiselect autocomplete) — no
-  giant unbounded option lists.
-- **Exports:** download an HTML report, an SLA CSV, or an availability CSV.
-- **Dark-theme aware** (supports `dark-theme` and `hc-dark`).
-- **Multi-install / Docker compatible** — uses only the public Zabbix PHP API and frontend
-  framework; no server-side daemons, no external libraries, no filesystem writes.
+![Overview tab](docs/images/01-overview.jpg)
 
 ---
 
-## Requirements
+## The three tabs
 
-- Zabbix **7.0** frontend.
-- **Permissions:** any user with at least *Zabbix user* role (`USER_TYPE_ZABBIX_USER`) can open the
-  report. Data is still scoped by each user's host-group and service permissions.
-- **SLA services** configured under *Services → SLA* (enabled) for the SLA heatmap to show data.
-- **An availability item** on each host for the uptime view. Any one of these item keys is used
-  (first match per host wins):
-  - `agent.ping`
-  - `icmpping`
-  - `zabbix[host,agent,available]`
+All three are rendered from a single data build, so no tab can show a different version of the
+truth.
 
-  Hosts without any of these keys are reported as *Item not found*.
+### Overview
+
+Headline figures, the daily downtime chart, availability by host group, SLA compliance at a
+glance, and a prioritised "needs attention" list — services below SLO first, then hosts below
+the availability target, worst first.
+
+![Overview: groups, compliance and attention list](docs/images/02-overview-detail.jpg)
+
+### SLA compliance
+
+One card per SLA. Each service gets a 12-month SLI heatmap tinted against the SLO — green at or
+above, amber less than half a point below, red further below — with the value printed in every
+cell, a breach count, and an **error budget** for the current period: how much of the allowed
+downtime has been consumed, and by how much it was exceeded when it was.
+
+![SLA compliance tab](docs/images/03-sla-compliance.jpg)
+
+### Host availability
+
+Every host, grouped by host group and sorted **worst first**, with an availability pill, a
+daily-trend sparkline (incidents are visible as dips), uptime, downtime, and which item the
+measurement came from. Hosts without a usable item say so instead of disappearing.
+
+![Host availability tab](docs/images/04-host-availability.jpg)
 
 ---
 
-## Install / enable
+## Error budgets
 
-1. Copy this directory to `ui/modules/sla_uptime_report` in your Zabbix frontend
-   (for Docker, mount it into the web container at the same path).
-2. In the frontend go to **Administration → General → Modules**.
-3. Click **Scan directory**.
-4. Enable **SLA & Uptime Report**.
-5. Open **Reports → SLA & Uptime Report**.
+An SLO is easier to manage as a budget than as a percentage. For each service the module
+converts the SLO into allowed downtime for the current period and shows how much is spent:
+
+- **SLO 99.9% on a 31-day month** → 44 minutes of allowed downtime.
+- A service at 99.08% mid-month shows *"Budget exceeded by 1h 35m"* in red.
+- A healthy service shows *"0s of 44m used"*.
+
+The bar turns amber at 80% consumed and red at 100%, and a service that is still meeting its
+SLO but has eaten most of its budget appears in the attention list before it breaches.
 
 ---
 
-## Using the filter
+## How availability is measured
 
-| Period mode | Fields used |
+Each host is measured from one item, the first of these keys that exists:
+`agent.ping` → `icmpping` → `zabbix[host,agent,available]`.
+
+The calculation source follows the window length:
+
+- **≤ 7 days → raw history.** Availability = OK samples / expected samples, where the expected
+  count includes inferred missing samples — a polling gap counts as downtime rather than
+  hiding. The polling interval comes from the item's delay, falling back to the median
+  observed interval.
+- **> 7 days → hourly trends.** Each trend hour counts as up or down as a whole (Zabbix stores
+  integer averages for unsigned items), summed over covered hours; hours with no trend data
+  are excluded from the denominator rather than silently counted as downtime, and a host with
+  no coverage reports *No data* instead of a made-up number.
+
+The page always says which source it used, and what that means for precision.
+
+### SLI numbers
+
+SLI values come from the Zabbix SLA engine (`sla.getSli`) — the same numbers the native SLA
+report shows — so this module never disagrees with Zabbix about compliance. One subtlety the
+module handles: the SLI matrix columns follow the API **response's** service order, not the
+request's, and mapping them naively attributes one service's SLI to another.
+
+---
+
+## Filters
+
+| Filter | Notes |
 |---|---|
-| Previous month | (none — uses the previous calendar month) |
-| Specific month | *Specific month* (`YYYY-MM`) |
-| Custom range | *From date* / *To date* (`YYYY-MM-DD`, UTC) |
-| Days back | *Days back* (1–366) |
+| **Period** | Last N days, previous month, a specific month, or a custom range. All UTC. |
+| **Host groups** | Selectable pills; a search box filters the list when it is long. None = all. |
+| **SLAs** | Pills showing each SLA's SLO. None = all enabled SLAs. |
+| **Availability target** | Default 99.0%. Hosts below it are flagged; below 90% is critical. |
+| **Rows per group** | Table cap per host group. Health counts are never truncated. |
+| **Exclude disabled hosts** | On by default. |
 
-- **Host groups** — narrow the availability view; leave empty for all groups you can see.
-- **SLAs** — narrow the SLA heatmap; leave empty for all enabled SLAs.
-- **Exclude disabled hosts** — when on, only monitored hosts are counted.
-
-The reporting window is interpreted in UTC and shown in the info bar above the tables.
-
----
-
-## How availability is calculated
-
-The module picks the calculation source automatically based on the window length:
-
-- **≤ 7 days → raw history.** Availability per host = OK samples / expected samples, where the
-  expected count includes polling gaps (missing samples count as downtime). The polling interval is
-  taken from the item's configured delay, falling back to the median observed interval.
-- **> 7 days → hourly trends.** Each hourly trend's `value_avg` is treated as the fraction of "up"
-  samples that hour; the sum over **covered** hours is divided by the number of covered hours
-  (hours with no trend data are excluded from the denominator rather than silently counted as
-  downtime). `value_avg` is clamped to `[0,1]`, so the `zabbix[host,agent,available]` item
-  (values 0/1/2) cannot inflate uptime. Trend availability is therefore an approximation; for exact
-  figures use a window of 7 days or less.
-
-### Performance & limits
-
-To stay responsive on large installs the heavy path is bounded (see `ReportDataHelper` constants):
-
-| Bound | Default | Effect when hit |
-|---|---|---|
-| `MAX_RANGE_DAYS` | 768 | Oversized custom ranges are clamped to the most recent 768 days. |
-| `MAX_HOSTS` | 5000 | Availability is limited to the first 5000 hosts (note shown). |
-| `MAX_SLAS` | 200 | SLA heatmap limited to the first 200 SLAs (note shown). |
-| `MAX_HISTORY_ROWS` | 200000 | History scan stops; percentages become approximate (note shown). |
-| `FETCH_BATCH` | 2000 | History is read in clock-keyset pages of this size. |
-
-History is fetched in **one batched, item-chunked, paginated query** (not one query per host), and
-trend/item/history lookups are `array_chunk`'d, so the report scales to hundreds of hosts.
-Whenever a cap is reached the UI shows a note explaining the truncation.
+**Reset** returns everything to defaults. Tabs, filter and downloads all carry the full filter
+state, and the whole page works with JavaScript disabled.
 
 ---
 
 ## Exports
 
-All three exports honour the current filter.
+**Download report** produces a single self-contained HTML file — inline CSS, inline SVG, no
+external requests — with a cover verdict, the headline figures, the downtime chart, every SLA
+heatmap with error budgets, the attention list and the full host tables. It prints to A4
+landscape (use the browser's *Print → Save as PDF* for a PDF).
 
-- **HTML report** — a standalone, self-contained document (inline styles, no external assets).
-- **SLA CSV** — columns: `SLA ID, SLA name, Service ID, Service name, SLO, Month, SLI`.
-- **Availability CSV** — columns: `Host group, Host, Availability, Availability pct,
-  Uptime seconds, Downtime seconds, Window start UTC, Window end UTC`.
+![Export cover](docs/images/05-export-cover.jpg)
 
-CSV files are UTF-8 with a BOM for spreadsheet compatibility.
+![Export: heatmaps and attention list](docs/images/06-export-detail.jpg)
 
----
-
-## Troubleshooting
-
-- **"Item not found" for every host** — the host has none of the supported availability item keys;
-  add `agent.ping`, `icmpping`, or `zabbix[host,agent,available]`.
-- **Empty SLA heatmap** — no enabled SLAs, or the selected SLAs have no linked services.
-- **A truncation note appears** — a limit above was reached; narrow the host-group / SLA filter or
-  shorten the date range.
-- **An internal error message** — the underlying cause is written to the PHP/web-server error log
-  prefixed with `SLA Uptime Report:`; check that log for the exact failure.
+CSV exports: the SLA heatmap (one row per service-month), host availability, and daily
+downtime per group. All CSV cells are neutralised against spreadsheet formula injection.
 
 ---
 
-## Security notes
+## Requirements
 
-- Every action declares a strict input whitelist and runs a permission check.
-- All heavy actions are wrapped in `try/catch`: validation problems return a clear message, while
-  unexpected failures are logged server-side and surface only a generic message (no DB/API/path
-  internals leak to the browser).
-- The standalone HTML/CSV export is hand-built outside `CHtmlPage`; every interpolated value is
-  escaped via a mandatory `h()` helper (`htmlspecialchars`, `ENT_QUOTES`).
+- Zabbix **7.0** frontend (single-server, multi-server/HA or Docker).
+- Any user with at least the *Zabbix user* role can open the report; data is scoped by the
+  user's host group and service permissions.
+- **For the SLA side:** enabled SLAs under *Services → SLA* with services linked by service
+  tags.
+- **For the availability side:** an `agent.ping`, `icmpping` or `zabbix[host,agent,available]`
+  item on each host you want measured.
+
+---
+
+## Install / enable
+
+1. Copy this directory to `ui/modules/sla_uptime_report` in the Zabbix frontend (for Docker,
+   mount it into the web container at the same path).
+2. **Administration → General → Modules → Scan directory**.
+3. Enable **SLA & Uptime Report**.
+4. Open **Reports → SLA & Uptime Report**.
+
+---
+
+## Accuracy notes
+
+Places where the obvious implementation would have been wrong, and what the module does
+instead:
+
+- **`sla.getSli` reorders services** in its response; the module maps SLI columns by the
+  response's service ids, not the request order.
+- **A missed poll is downtime**, not missing data, on the history path — and the reverse on
+  the trends path, where an uncovered hour is excluded from the denominator instead of being
+  counted as downtime, because trend gaps usually mean retention, not outage.
+- **"No item" and "no data" are answers**, shown as such — never silently dropped, and never
+  averaged into the fleet number.
+- **Health counts, the attention list and the export cover every matching host**; the
+  per-group row limit truncates tables only.
+- **Chart colours follow the host group**, with collisions among the groups on screen resolved
+  to free slots so two adjacent series never share a colour.
+- **One unit per axis** — the downtime axis picks minutes, hours or days from its maximum and
+  every tick uses it.
+
+---
+
+## Performance & limits
+
+The report is built from a bounded number of batched API calls; there are no per-host queries.
+
+| Guard | Value |
+|---|---|
+| Hosts measured | 2 000 |
+| SLAs | 200 |
+| History rows per report | 400 000 (keyset-paginated in 2 000-row pages) |
+| Trend rows per API call | ~200 000 (chunk size adapts to the window length) |
+| Report window | 768 days |
+| Page time limit | 300 s |
+
+When a cap actually truncates something, the page says so rather than quietly showing a
+partial answer.
+
+Measured on a 33-host, 4-SLA environment: ~60 ms for a 30-day report, ~240 ms for a full year.
