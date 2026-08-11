@@ -4,9 +4,14 @@ namespace Modules\VeeamBackupReport\Actions;
 
 use CController;
 use CControllerResponseFatal;
+use Modules\VeeamBackupReport\Helpers\HtmlExportRenderer;
 use Modules\VeeamBackupReport\Helpers\ReportDataHelper;
 
 class ReportDownload extends CController {
+
+    private const FORMATS = [
+        'html', 'daily_csv', 'hosts_csv', 'repositories_csv', 'objects_csv', 'jobs_csv', 'types_csv'
+    ];
 
     public function init(): void {
         $this->disableCsrfValidation();
@@ -14,18 +19,21 @@ class ReportDownload extends CController {
 
     protected function checkInput(): bool {
         $fields = [
-            'format' => 'in html,daily_csv,hosts_csv,repositories_csv,objects_csv',
+            'format' => 'in '.implode(',', self::FORMATS),
             'filter_mode' => 'in prev_month,specific_month,custom_range,days_back',
             'filter_month' => 'string',
             'filter_date_from' => 'string',
             'filter_date_to' => 'string',
             'filter_days_back' => 'int32',
             'filter_hostids' => 'array_id',
+            'filter_types' => 'array',
             'filter_source' => 'in auto,history,trends',
             'filter_metric' => 'in size24h,size31d',
             'filter_top' => 'int32',
+            'filter_stale_hours' => 'int32',
             'filter_object_search' => 'string',
-            'filter_repo_search' => 'string'
+            'filter_repo_search' => 'string',
+            'filter_tab' => 'in overview,jobs,repositories,objects,growth'
         ];
 
         $ret = $this->validateInput($fields);
@@ -59,19 +67,23 @@ class ReportDownload extends CController {
 
     private function streamReport(): void {
         $helper = new ReportDataHelper();
+        $defaults = ReportDataHelper::getDefaultFilter();
 
         $filter = ReportDataHelper::normalizeFilter([
-            'mode' => $this->getInput('filter_mode', ReportDataHelper::getDefaultFilter()['mode']),
-            'month' => $this->getInput('filter_month', ReportDataHelper::getDefaultFilter()['month']),
+            'mode' => $this->getInput('filter_mode', $defaults['mode']),
+            'month' => $this->getInput('filter_month', $defaults['month']),
             'date_from' => $this->getInput('filter_date_from', ''),
             'date_to' => $this->getInput('filter_date_to', ''),
-            'days_back' => $this->getInput('filter_days_back', ReportDataHelper::getDefaultFilter()['days_back']),
+            'days_back' => $this->getInput('filter_days_back', $defaults['days_back']),
             'hostids' => $this->getInput('filter_hostids', []),
-            'source' => $this->getInput('filter_source', ReportDataHelper::getDefaultFilter()['source']),
-            'metric' => $this->getInput('filter_metric', ReportDataHelper::getDefaultFilter()['metric']),
-            'top' => $this->getInput('filter_top', ReportDataHelper::getDefaultFilter()['top']),
+            'types' => $this->getInput('filter_types', []),
+            'source' => $this->getInput('filter_source', $defaults['source']),
+            'metric' => $this->getInput('filter_metric', $defaults['metric']),
+            'top' => $this->getInput('filter_top', $defaults['top']),
+            'stale_hours' => $this->getInput('filter_stale_hours', $defaults['stale_hours']),
             'object_search' => $this->getInput('filter_object_search', ''),
-            'repo_search' => $this->getInput('filter_repo_search', '')
+            'repo_search' => $this->getInput('filter_repo_search', ''),
+            'tab' => $this->getInput('filter_tab', $defaults['tab'])
         ]);
 
         [$time_from, $time_to] = ReportDataHelper::resolveDateRange($filter);
@@ -87,17 +99,12 @@ class ReportDownload extends CController {
                     'veeam_backup_daily_'.$metric_slug.'_'.$period_slug.'.csv',
                     [
                         'Date',
-                        'Total 24h (bytes)',
-                        'Total 24h (human)',
-                        'Total 31d (bytes)',
-                        'Total 31d (human)',
-                        'Assigned 31d (bytes)',
-                        'Assigned 31d (human)',
-                        'Shared 31d (bytes)',
-                        'Shared 31d (human)',
-                        'Coverage pct',
-                        'Coverage human',
-                        'Hosts with data'
+                        'Total 24h (bytes)', 'Total 24h (human)',
+                        'Total 31d (bytes)', 'Total 31d (human)',
+                        'Assigned 31d (bytes)', 'Assigned 31d (human)',
+                        'Shared 31d (bytes)', 'Shared 31d (human)',
+                        'Coverage pct', 'Coverage human',
+                        'Veeam servers with data'
                     ],
                     $helper->flattenDailyRows($report['daily'])
                 );
@@ -105,35 +112,23 @@ class ReportDownload extends CController {
 
             case 'hosts_csv':
                 $this->outputCsv(
-                    'veeam_backup_hosts_'.$metric_slug.'_'.$period_slug.'.csv',
+                    'veeam_backup_servers_'.$metric_slug.'_'.$period_slug.'.csv',
                     [
-                        'Veeam host',
-                        'Metric start (bytes)',
-                        'Metric start (human)',
-                        'Metric end (bytes)',
-                        'Metric end (human)',
-                        'Metric change (bytes)',
-                        'Metric change (human)',
-                        'Metric average (bytes)',
-                        'Metric average (human)',
-                        'Metric peak (bytes)',
-                        'Metric peak (human)',
+                        'Veeam server',
+                        'Metric start (bytes)', 'Metric start (human)',
+                        'Metric end (bytes)', 'Metric end (human)',
+                        'Metric change (bytes)', 'Metric change (human)',
+                        'Metric average (bytes)', 'Metric average (human)',
+                        'Metric peak (bytes)', 'Metric peak (human)',
                         'Days',
-                        'Repository capacity GB',
-                        'Repository capacity human',
-                        'Repository used GB',
-                        'Repository used human',
-                        'Repository free GB',
-                        'Repository free human',
-                        'Repositories online',
-                        'Repositories offline',
-                        'Assigned 31d (bytes)',
-                        'Assigned 31d (human)',
-                        'Shared 31d (bytes)',
-                        'Shared 31d (human)',
-                        'Coverage pct',
-                        'Coverage human',
-                        'Last clock'
+                        'Repository capacity GB', 'Repository capacity human',
+                        'Repository used GB', 'Repository used human',
+                        'Repository free GB', 'Repository free human',
+                        'Repositories online', 'Repositories offline',
+                        'Assigned 31d (bytes)', 'Assigned 31d (human)',
+                        'Shared 31d (bytes)', 'Shared 31d (human)',
+                        'Coverage pct', 'Coverage human',
+                        'Last update'
                     ],
                     $helper->flattenSourceHostRows($report['source_hosts'])
                 );
@@ -143,31 +138,18 @@ class ReportDownload extends CController {
                 $this->outputCsv(
                     'veeam_backup_repositories_'.$metric_slug.'_'.$period_slug.'.csv',
                     [
-                        'Veeam host',
-                        'Repository',
-                        'Metric start (bytes)',
-                        'Metric start (human)',
-                        'Metric end (bytes)',
-                        'Metric end (human)',
-                        'Metric change (bytes)',
-                        'Metric change (human)',
-                        'Metric average (bytes)',
-                        'Metric average (human)',
-                        'Metric peak (bytes)',
-                        'Metric peak (human)',
-                        'Days',
-                        'Backup files 31d',
-                        'Capacity GB',
-                        'Capacity human',
-                        'Used GB',
-                        'Used human',
-                        'Free GB',
-                        'Free human',
-                        'Free pct',
-                        'Free pct human',
-                        'Online',
-                        'Out of date',
-                        'Last clock'
+                        'Veeam server', 'Repository', 'Repository type', 'Path',
+                        'Metric start (bytes)', 'Metric start (human)',
+                        'Metric end (bytes)', 'Metric end (human)',
+                        'Metric change (bytes)', 'Metric change (human)',
+                        'Metric average (bytes)', 'Metric average (human)',
+                        'Metric peak (bytes)', 'Metric peak (human)',
+                        'Days', 'Backup files 31d',
+                        'Capacity GB', 'Capacity human',
+                        'Used GB', 'Used human',
+                        'Free GB', 'Free human',
+                        'Free pct', 'Free pct human',
+                        'Online', 'Out of date', 'Last update'
                     ],
                     $helper->flattenRepositoryRows($report['repositories'])
                 );
@@ -177,28 +159,44 @@ class ReportDownload extends CController {
                 $this->outputCsv(
                     'veeam_backup_objects_'.$metric_slug.'_'.$period_slug.'.csv',
                     [
-                        'Veeam host',
-                        'Protected object',
-                        'Platform',
-                        'Metric start (bytes)',
-                        'Metric start (human)',
-                        'Metric end (bytes)',
-                        'Metric end (human)',
-                        'Metric change (bytes)',
-                        'Metric change (human)',
-                        'Metric average (bytes)',
-                        'Metric average (human)',
-                        'Metric peak (bytes)',
-                        'Metric peak (human)',
-                        'Days',
-                        'Restore points 31d',
-                        'Backup files 31d',
-                        'Last backup',
-                        'Repositories',
-                        'Attribution',
-                        'Last clock'
+                        'Veeam server', 'Protected object', 'Backup type', 'Platform',
+                        'Metric start (bytes)', 'Metric start (human)',
+                        'Metric end (bytes)', 'Metric end (human)',
+                        'Metric change (bytes)', 'Metric change (human)',
+                        'Metric average (bytes)', 'Metric average (human)',
+                        'Metric peak (bytes)', 'Metric peak (human)',
+                        'Days', 'Restore points 31d', 'Backup files 31d',
+                        'Last backup (raw)', 'Last backup', 'Freshness',
+                        'Repositories', 'Attribution', 'Last update'
                     ],
                     $helper->flattenObjectRows($report['objects'])
+                );
+                break;
+
+            case 'jobs_csv':
+                $this->outputCsv(
+                    'veeam_backup_jobs_'.$period_slug.'.csv',
+                    [
+                        'Veeam server', 'Job', 'Job type', 'Workload',
+                        'Last result', 'Status',
+                        'Last run (raw)', 'Last run',
+                        'Next run (raw)', 'Next run',
+                        'Objects', 'Freshness'
+                    ],
+                    $helper->flattenJobRows($report['jobs'])
+                );
+                break;
+
+            case 'types_csv':
+                $this->outputCsv(
+                    'veeam_backup_types_'.$metric_slug.'_'.$period_slug.'.csv',
+                    [
+                        'Backup type', 'Objects',
+                        'Total size (bytes)', 'Total size (human)',
+                        'Change (bytes)', 'Change (human)',
+                        'Share pct', 'Share human'
+                    ],
+                    $helper->flattenTypeRows($report['type_breakdown'])
                 );
                 break;
 
@@ -208,7 +206,7 @@ class ReportDownload extends CController {
                 header('Content-Type: text/html; charset=UTF-8');
                 header('Content-Disposition: attachment; filename="'.$filename.'"');
                 header('Cache-Control: no-cache, no-store, must-revalidate');
-                echo $helper->renderStandaloneHtml($filter, $report, $time_from, $time_to);
+                echo (new HtmlExportRenderer($helper))->render($filter, $report, $time_from, $time_to);
                 exit;
         }
     }
@@ -240,6 +238,10 @@ class ReportDownload extends CController {
      * with an apostrophe so spreadsheet apps treat it as literal text.
      */
     private function csvSafe($value): string {
+        if (is_bool($value)) {
+            return $value ? 'Yes' : 'No';
+        }
+
         $value = (string) $value;
 
         if ($value === '') {

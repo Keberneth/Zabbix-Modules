@@ -21,11 +21,14 @@ class ReportView extends CController {
             'filter_date_to' => 'string',
             'filter_days_back' => 'int32',
             'filter_hostids' => 'array_id',
+            'filter_types' => 'array',
             'filter_source' => 'in auto,history,trends',
             'filter_metric' => 'in size24h,size31d',
             'filter_top' => 'int32',
+            'filter_stale_hours' => 'int32',
             'filter_object_search' => 'string',
-            'filter_repo_search' => 'string'
+            'filter_repo_search' => 'string',
+            'filter_tab' => 'in overview,jobs,repositories,objects,growth'
         ];
 
         $ret = $this->validateInput($fields);
@@ -47,19 +50,7 @@ class ReportView extends CController {
         $helper = new ReportDataHelper();
 
         try {
-            $filter = ReportDataHelper::normalizeFilter([
-                'mode' => $this->getInput('filter_mode', ReportDataHelper::getDefaultFilter()['mode']),
-                'month' => $this->getInput('filter_month', ReportDataHelper::getDefaultFilter()['month']),
-                'date_from' => $this->getInput('filter_date_from', ''),
-                'date_to' => $this->getInput('filter_date_to', ''),
-                'days_back' => $this->getInput('filter_days_back', ReportDataHelper::getDefaultFilter()['days_back']),
-                'hostids' => $this->getInput('filter_hostids', []),
-                'source' => $this->getInput('filter_source', ReportDataHelper::getDefaultFilter()['source']),
-                'metric' => $this->getInput('filter_metric', ReportDataHelper::getDefaultFilter()['metric']),
-                'top' => $this->getInput('filter_top', ReportDataHelper::getDefaultFilter()['top']),
-                'object_search' => $this->getInput('filter_object_search', ''),
-                'repo_search' => $this->getInput('filter_repo_search', '')
-            ]);
+            $filter = ReportDataHelper::normalizeFilter($this->readFilterInput());
 
             [$time_from, $time_to] = ReportDataHelper::resolveDateRange($filter);
 
@@ -91,6 +82,30 @@ class ReportView extends CController {
     }
 
     /**
+     * Map the request fields onto the helper's filter shape.
+     */
+    private function readFilterInput(): array {
+        $defaults = ReportDataHelper::getDefaultFilter();
+
+        return [
+            'mode' => $this->getInput('filter_mode', $defaults['mode']),
+            'month' => $this->getInput('filter_month', $defaults['month']),
+            'date_from' => $this->getInput('filter_date_from', ''),
+            'date_to' => $this->getInput('filter_date_to', ''),
+            'days_back' => $this->getInput('filter_days_back', $defaults['days_back']),
+            'hostids' => $this->getInput('filter_hostids', []),
+            'types' => $this->getInput('filter_types', []),
+            'source' => $this->getInput('filter_source', $defaults['source']),
+            'metric' => $this->getInput('filter_metric', $defaults['metric']),
+            'top' => $this->getInput('filter_top', $defaults['top']),
+            'stale_hours' => $this->getInput('filter_stale_hours', $defaults['stale_hours']),
+            'object_search' => $this->getInput('filter_object_search', ''),
+            'repo_search' => $this->getInput('filter_repo_search', ''),
+            'tab' => $this->getInput('filter_tab', $defaults['tab'])
+        ];
+    }
+
+    /**
      * Build a degraded-but-renderable response so a failure surfaces a generic
      * warning on the page instead of leaking internals via a framework fatal.
      */
@@ -98,22 +113,15 @@ class ReportView extends CController {
         $filter = ReportDataHelper::getDefaultFilter();
         [$time_from, $time_to] = ReportDataHelper::resolveDateRange($filter);
 
-        $report = [
-            'host_options' => [],
-            'selected_hostids' => [],
-            'source_requested' => $filter['source'],
-            'source_used' => $filter['source'],
-            'summary' => [],
-            'daily' => [],
-            'source_hosts' => [],
-            'repositories' => [],
-            'objects' => [],
-            'objects_total' => 0,
-            'objects_filtered' => 0,
-            'objects_shown' => 0,
-            'warnings' => [$message],
-            'error' => $message
+        $report = $helper->emptyReport($filter);
+        $report['period'] = [
+            'from' => $time_from,
+            'to' => $time_to,
+            'days' => max(1, (int) ceil(($time_to - $time_from) / 86400)),
+            'label' => $helper->formatPeriodLabel($time_from, $time_to)
         ];
+        $report['warnings'] = [$message];
+        $report['error'] = $message;
 
         return new CControllerResponseData([
             'title' => _('Veeam Backup Report'),

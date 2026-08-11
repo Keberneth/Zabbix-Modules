@@ -1314,6 +1314,8 @@ zabbix_export:
                   value: '{#NAME}'
                 - tag: platform
                   value: '{#PLATFORM}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: 5aaf22458014442888c787567e706b79
               name: 'Protected object [{#NAME}] [{#PLATFORM}]: Backup files 31d'
               type: DEPENDENT
@@ -1333,6 +1335,8 @@ zabbix_export:
                   value: '{#NAME}'
                 - tag: platform
                   value: '{#PLATFORM}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: ebd0411c9900485fa0cbe721beac471c
               name: 'Protected object [{#NAME}] [{#PLATFORM}]: Last backup time'
               type: DEPENDENT
@@ -1354,6 +1358,8 @@ zabbix_export:
                   value: '{#NAME}'
                 - tag: platform
                   value: '{#PLATFORM}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: 59c8d0ae5f6e40ff88de6a30e6144c0f
               name: 'Protected object [{#NAME}] [{#PLATFORM}]: Get rolling report data'
               type: DEPENDENT
@@ -1377,6 +1383,8 @@ zabbix_export:
                   value: '{#NAME}'
                 - tag: platform
                   value: '{#PLATFORM}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: 83a020c0290a4d48b86071f6795140d4
               name: 'Protected object [{#NAME}] [{#PLATFORM}]: Repositories'
               type: DEPENDENT
@@ -1398,6 +1406,8 @@ zabbix_export:
                   value: '{#NAME}'
                 - tag: platform
                   value: '{#PLATFORM}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: 685d82c373914860979909bbedb21e3d
               name: 'Protected object [{#NAME}] [{#PLATFORM}]: Restore points 31d'
               type: DEPENDENT
@@ -1417,6 +1427,8 @@ zabbix_export:
                   value: '{#NAME}'
                 - tag: platform
                   value: '{#PLATFORM}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: e5ec6d5fc60b4f1fb39b6498d6c76662
               name: 'Protected object [{#NAME}] [{#PLATFORM}]: Backup size 24h'
               type: DEPENDENT
@@ -1437,6 +1449,8 @@ zabbix_export:
                   value: '{#NAME}'
                 - tag: platform
                   value: '{#PLATFORM}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: f50e0d9a317c47c8bca62e4525c5e582
               name: 'Protected object [{#NAME}] [{#PLATFORM}]: Backup size 31d'
               type: DEPENDENT
@@ -1457,6 +1471,8 @@ zabbix_export:
                   value: '{#NAME}'
                 - tag: platform
                   value: '{#PLATFORM}'
+                - tag: type
+                  value: '{#TYPE}'
           master_item:
             key: veeam.get.backup.report
           lld_macro_paths:
@@ -1525,6 +1541,8 @@ zabbix_export:
                   value: jobs
                 - tag: job
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
                 - tag: workload
                   value: '{#WORKLOAD}'
               trigger_prototypes:
@@ -1567,6 +1585,10 @@ zabbix_export:
                   value: jobs
                 - tag: job
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
+                - tag: workload
+                  value: '{#WORKLOAD}'
             - uuid: 7bafd1c723f14cb49aa140061fbdfad0
               name: 'Job [{#NAME}] [{#TYPE}]: Next run'
               type: DEPENDENT
@@ -1587,6 +1609,10 @@ zabbix_export:
                   value: jobs
                 - tag: job
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
+                - tag: workload
+                  value: '{#WORKLOAD}'
             - uuid: 91d52c1d5da641de84fe8ecdfd847641
               name: 'Job [{#NAME}] [{#TYPE}]: Objects count'
               type: DEPENDENT
@@ -1605,6 +1631,10 @@ zabbix_export:
                   value: jobs
                 - tag: job
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
+                - tag: workload
+                  value: '{#WORKLOAD}'
             - uuid: 2b3c72a03d6e493cb9e913cb1a8508ef
               name: 'Job [{#NAME}] [{#TYPE}]: Get data'
               type: DEPENDENT
@@ -1626,6 +1656,10 @@ zabbix_export:
                   value: raw
                 - tag: job
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
+                - tag: workload
+                  value: '{#WORKLOAD}'
             - uuid: 94ce52b3ae374184a3bc8becb806ad4f
               name: 'Job [{#NAME}] [{#TYPE}]: Status'
               type: DEPENDENT
@@ -1645,6 +1679,8 @@ zabbix_export:
                   value: jobs
                 - tag: job
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
                 - tag: workload
                   value: '{#WORKLOAD}'
           master_item:
@@ -1854,8 +1890,12 @@ zabbix_export:
                   value: raw
                 - tag: component
                   value: repositories
+                - tag: path
+                  value: '{#PATH}'
                 - tag: repository
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: c8f17321ce3a4be8860f2127716ae317
               name: 'Repository [{#NAME}] [{#TYPE}]: Backup files 31d'
               type: DEPENDENT
@@ -1871,8 +1911,12 @@ zabbix_export:
               tags:
                 - tag: component
                   value: backup-report
+                - tag: path
+                  value: '{#PATH}'
                 - tag: repository
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: be0139b4f7314b1ab9843399b52c398f
               name: 'Repository [{#NAME}] [{#TYPE}]: Backup size 24h'
               type: DEPENDENT
@@ -1889,8 +1933,12 @@ zabbix_export:
               tags:
                 - tag: component
                   value: backup-report
+                - tag: path
+                  value: '{#PATH}'
                 - tag: repository
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: 5d3364748d4645889c4a9534a670f7cb
               name: 'Repository [{#NAME}] [{#TYPE}]: Backup size 31d'
               type: DEPENDENT
@@ -1907,8 +1955,12 @@ zabbix_export:
               tags:
                 - tag: component
                   value: backup-report
+                - tag: path
+                  value: '{#PATH}'
                 - tag: repository
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: 4b636c9e6844461d862f6f6aaf90c35c
               name: 'Repository [{#NAME}] [{#TYPE}]: Capacity [{#PATH}]'
               type: DEPENDENT
@@ -1926,8 +1978,12 @@ zabbix_export:
               tags:
                 - tag: component
                   value: repositories
+                - tag: path
+                  value: '{#PATH}'
                 - tag: repository
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: 6c22bb5bfb6b4da1bd051a6d82195baa
               name: 'Repository [{#NAME}] [{#TYPE}]: Free space [{#PATH}]'
               type: DEPENDENT
@@ -1945,8 +2001,12 @@ zabbix_export:
               tags:
                 - tag: component
                   value: repositories
+                - tag: path
+                  value: '{#PATH}'
                 - tag: repository
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: fdc8f0d59c4541249baf2b17ae3d3338
               name: 'Repository [{#NAME}] [{#TYPE}]: Free percent [{#PATH}]'
               type: DEPENDENT
@@ -1974,8 +2034,12 @@ zabbix_export:
               tags:
                 - tag: component
                   value: repositories
+                - tag: path
+                  value: '{#PATH}'
                 - tag: repository
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
               trigger_prototypes:
                 - uuid: 01f93751a42645c2a217cfa54b552894
                   expression: 'min(/Veeam Backup and Replication by HTTP v13/veeam.repository.free.pct[{#ID}],15m)<{$VEEAM.REPO.FREE.PCT.MIN}'
@@ -2020,8 +2084,12 @@ zabbix_export:
               tags:
                 - tag: component
                   value: repositories
+                - tag: path
+                  value: '{#PATH}'
                 - tag: repository
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
               trigger_prototypes:
                 - uuid: 518c23cc47e34da58e461d7769986699
                   expression: 'last(/Veeam Backup and Replication by HTTP v13/veeam.repository.online[{#ID}])=0'
@@ -2052,8 +2120,12 @@ zabbix_export:
               tags:
                 - tag: component
                   value: repositories
+                - tag: path
+                  value: '{#PATH}'
                 - tag: repository
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
               trigger_prototypes:
                 - uuid: f1b6d70b6d5a47a1be593e9a20a9aeaa
                   expression: 'last(/Veeam Backup and Replication by HTTP v13/veeam.repository.outofdate[{#ID}])=1'
@@ -2083,8 +2155,12 @@ zabbix_export:
                   value: backup-report
                 - tag: component
                   value: raw
+                - tag: path
+                  value: '{#PATH}'
                 - tag: repository
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
             - uuid: 3c5252cbf5c241f881d7b4a40894973e
               name: 'Repository [{#NAME}] [{#TYPE}]: Used space [{#PATH}]'
               type: DEPENDENT
@@ -2102,8 +2178,12 @@ zabbix_export:
               tags:
                 - tag: component
                   value: repositories
+                - tag: path
+                  value: '{#PATH}'
                 - tag: repository
                   value: '{#NAME}'
+                - tag: type
+                  value: '{#TYPE}'
           master_item:
             key: veeam.get.metrics
           lld_macro_paths:

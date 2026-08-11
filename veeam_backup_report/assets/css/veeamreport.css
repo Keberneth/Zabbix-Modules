@@ -1,187 +1,825 @@
-/* Veeam Backup Report - Convention B theming (literal hex, [theme=...] dark overrides) */
-.veeamreport { max-width: 100%; color: #1f2b3a; }
-.veeamreport-page-title { margin: 0 0 4px 0; font-size: 22px; font-weight: 600; color: #2a3441; }
-.veeamreport-section { margin-top: 18px; }
-.veeamreport-section-title { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; color: #2a3441; }
-.veeamreport-section-subtitle { margin: 0 0 12px 0; font-size: 12px; color: #5c6b7a; }
+/* ==========================================================================
+   Veeam Backup Report
+   Literal-hex theming with [theme='dark-theme'] / [theme='hc-dark'] pairs,
+   matching the other report modules in this repo.
 
-.veeamreport-info-bar {
-    padding: 10px 14px;
-    margin: 10px 0 12px 0;
-    background: #f7f9fc;
-    border: 1px solid #dfe4ec;
-    border-radius: 4px;
-    color: #34485f;
-}
-.veeamreport-info-label { font-weight: 600; color: #0f6ad8; }
-.veeamreport-sep { margin: 0 8px; color: #94a3b8; }
+   Chart colours are exposed as --vr-* custom properties because the SVG
+   renderer emits style="fill:var(--vr-s1)" - one renderer, both themes.
+   The 8 categorical slots are the validated set (adjacent CVD dE 9.1 light /
+   8.4 dark, normal-vision 19.6 / 19.3). Three light slots sit below 3:1 on
+   white, so every chart also ships a legend and a table twin.
+   ========================================================================== */
 
-.veeamreport-alert {
-    padding: 12px 14px;
-    margin: 10px 0 12px 0;
-    border-radius: 4px;
-    border: 1px solid transparent;
+.veeamreport {
+    --vr-surface: #ffffff;
+    --vr-surface-2: #f5f7fa;
+    --vr-border: #dfe4ec;
+    --vr-border-strong: #c9d3e0;
+    --vr-ink: #1f2b3a;
+    --vr-ink-2: #45566a;
+    --vr-muted: #5c6b7a;
+    --vr-accent: #0f6ad8;
+    --vr-grid: #e8edf4;
+    --vr-axis: #c9d3e0;
+    --vr-track: #edf1f7;
+
+    /* Status - fixed, never themed. Paired with an icon and a label. */
+    --vr-ok: #0ca30c;
+    --vr-warning: #fab219;
+    --vr-serious: #ec835a;
+    --vr-critical: #d03b3b;
+    /* Legible text steps of the same roles. */
+    --vr-ok-ink: #067506;
+    --vr-warning-ink: #8a5a00;
+    --vr-critical-ink: #b02121;
+
+    /* Categorical slots (light). */
+    --vr-s1: #2a78d6;
+    --vr-s2: #eb6834;
+    --vr-s3: #1baf7a;
+    --vr-s4: #eda100;
+    --vr-s5: #e87ba4;
+    --vr-s6: #008300;
+    --vr-s7: #4a3aa7;
+    --vr-s8: #e34948;
+
+    max-width: 100%;
+    color: var(--vr-ink);
     font-size: 13px;
 }
-.veeamreport-alert--warning {
-    background: #fff7e6;
-    border-color: #f1d59c;
-    color: #7a5a12;
+
+[theme='dark-theme'] .veeamreport,
+[theme='hc-dark'] .veeamreport {
+    --vr-surface: #1f2733;
+    --vr-surface-2: #161e29;
+    --vr-border: #3b4a5b;
+    --vr-border-strong: #47566a;
+    --vr-ink: #eef3f7;
+    --vr-ink-2: #c6d1dd;
+    --vr-muted: #a9b6c4;
+    --vr-accent: #4d9bff;
+    --vr-grid: #2c3644;
+    --vr-axis: #47566a;
+    --vr-track: #263140;
+
+    --vr-ok-ink: #35c435;
+    --vr-warning-ink: #f5b454;
+    --vr-critical-ink: #ff8080;
+
+    --vr-s1: #3987e5;
+    --vr-s2: #d95926;
+    --vr-s3: #199e70;
+    --vr-s4: #c98500;
+    --vr-s5: #d55181;
+    --vr-s6: #008300;
+    --vr-s7: #9085e9;
+    --vr-s8: #e66767;
 }
 
-.veeamreport-filter-form {
-    padding: 14px 16px;
-    margin: 14px 0 16px 0;
-    background: #ffffff;
-    border: 1px solid #dfe4ec;
-    border-radius: 4px;
-    box-sizing: border-box;
-}
-.veeamreport-filter-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 12px;
-}
-.veeamreport-field {
+/* ---------------------------------------------------------------- header */
+
+.vr-head {
     display: flex;
-    flex-direction: column;
-    min-width: 140px;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
 }
-.veeamreport-field label {
-    display: block;
-    margin-bottom: 6px;
-    font-size: 12px;
-    font-weight: 600;
-    color: #2a3441;
-}
-.veeamreport-field input,
-.veeamreport-field select {
-    width: 100%;
-    box-sizing: border-box;
-    min-height: 34px;
-    background: #ffffff;
-    color: #1f2b3a;
-    border: 1px solid #b9c3d0;
-    border-radius: 4px;
-    padding: 6px 10px;
-    font: inherit;
-}
-.veeamreport-field input::placeholder { color: #5c6b7a; }
-.veeamreport-field input:focus,
-.veeamreport-field select:focus {
-    outline: 2px solid #2e7dd1;
-    outline-offset: -1px;
-    border-color: #2e7dd1;
-}
-.veeamreport-field--hidden { display: none; }
-.veeamreport-field--wide { grid-column: span 2; }
-.veeamreport-field-hint { margin-top: 4px; font-size: 11px; color: #5c6b7a; }
-.veeamreport-form-actions { margin-top: 12px; }
-.veeamreport-multiselect { min-height: 11em; padding: 4px; }
 
-.veeamreport-btn-primary {
-    min-height: 34px;
-    padding: 6px 16px;
-    border: 1px solid #0f6ad8;
-    border-radius: 4px;
-    background: #0f6ad8;
-    color: #ffffff;
-    cursor: pointer;
+.vr-head-title {
+    margin: 0 0 6px 0;
+    /* Rendered as a <p>: Zabbix owns the page's only <h1>. */
+    font-size: 22px;
+    font-weight: 600;
+    line-height: 1.2;
+    color: var(--vr-ink);
+}
+
+.vr-head-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
     font-size: 13px;
-    font-weight: 600;
+    color: var(--vr-muted);
 }
-.veeamreport-btn-primary:hover { background: #0d5ec0; border-color: #0d5ec0; }
 
-.veeamreport-downloads {
+.vr-head-period {
+    font-weight: 600;
+    color: var(--vr-ink);
+}
+
+.vr-chip-static {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px;
+    border: 1px solid var(--vr-border);
+    border-radius: 999px;
+    background: var(--vr-surface-2);
+    font-size: 12px;
+    color: var(--vr-ink-2);
+}
+
+.vr-actions {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    margin-bottom: 12px;
 }
-.veeamreport-summary-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 12px;
-    margin: 12px 0 18px 0;
-}
-.veeamreport-card {
-    padding: 16px;
-    border: 1px solid #dfe4ec;
-    background: #ffffff;
+
+/* ---------------------------------------------------------------- buttons */
+
+.vr-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 32px;
+    padding: 5px 14px;
+    border: 1px solid var(--vr-border-strong);
     border-radius: 4px;
+    background: var(--vr-surface);
+    color: var(--vr-ink);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.2;
+    text-decoration: none;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.vr-btn:hover {
+    border-color: var(--vr-accent);
+    color: var(--vr-accent);
+    text-decoration: none;
+}
+
+.vr-btn:focus-visible {
+    outline: 2px solid var(--vr-accent);
+    outline-offset: 1px;
+}
+
+.vr-btn--primary {
+    border-color: var(--vr-accent);
+    background: var(--vr-accent);
+    color: #ffffff;
+}
+
+.vr-btn--primary:hover {
+    background: #0d5ec0;
+    border-color: #0d5ec0;
+    color: #ffffff;
+}
+
+[theme='dark-theme'] .vr-btn--primary:hover,
+[theme='hc-dark'] .vr-btn--primary:hover {
+    background: #3d87e6;
+    border-color: #3d87e6;
+    color: #ffffff;
+}
+
+.vr-btn--ghost {
+    border-color: transparent;
+    background: transparent;
+    color: var(--vr-muted);
+    font-weight: 500;
+}
+
+.vr-btn--ghost:hover {
+    background: var(--vr-surface-2);
+    color: var(--vr-ink);
+}
+
+/* ---------------------------------------------------------------- filter */
+
+.vr-filter {
+    padding: 14px 16px;
+    margin-bottom: 16px;
+    background: var(--vr-surface);
+    border: 1px solid var(--vr-border);
+    border-radius: 6px;
     box-sizing: border-box;
 }
-.veeamreport-card-label {
+
+.vr-filter-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 14px;
+}
+
+.vr-filter-row + .vr-filter-row {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--vr-border);
+}
+
+.vr-field {
+    display: flex;
+    flex-direction: column;
+    min-width: 150px;
+}
+
+.vr-field--grow { flex: 1 1 220px; }
+.vr-field--full { flex: 1 1 100%; }
+.vr-field--hidden { display: none; }
+
+.vr-field > label,
+.vr-field-label {
+    display: block;
     margin-bottom: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--vr-muted);
+}
+
+.vr-field input[type="text"],
+.vr-field input[type="number"],
+.vr-field input[type="date"],
+.vr-field input[type="month"],
+.vr-field select {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 32px;
+    padding: 5px 10px;
+    background: var(--vr-surface);
+    color: var(--vr-ink);
+    border: 1px solid var(--vr-border-strong);
+    border-radius: 4px;
+    font: inherit;
+    font-size: 13px;
+}
+
+.vr-field input::placeholder { color: var(--vr-muted); }
+
+.vr-field input:focus,
+.vr-field select:focus {
+    outline: 2px solid var(--vr-accent);
+    outline-offset: -1px;
+    border-color: var(--vr-accent);
+}
+
+[theme='dark-theme'] .vr-field input[type="date"],
+[theme='hc-dark'] .vr-field input[type="date"],
+[theme='dark-theme'] .vr-field input[type="month"],
+[theme='hc-dark'] .vr-field input[type="month"] { color-scheme: dark; }
+
+.vr-hint {
+    margin-top: 5px;
+    font-size: 11px;
+    color: var(--vr-muted);
+}
+
+/* Selectable pills - hosts and workload types. The type list is built from
+   the data, so a workload nobody protects never appears here. */
+.vr-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-height: 132px;
+    overflow-y: auto;
+}
+
+.vr-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 12px;
+    border: 1px solid var(--vr-border-strong);
+    border-radius: 999px;
+    background: var(--vr-surface);
+    color: var(--vr-ink-2);
+    font-size: 12px;
+    line-height: 1.3;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.vr-chip:hover { border-color: var(--vr-accent); color: var(--vr-ink); }
+
+.vr-chip input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.vr-chip.is-on {
+    border-color: var(--vr-accent);
+    background: rgba(15, 106, 216, 0.09);
+    color: var(--vr-accent);
+    font-weight: 600;
+}
+
+[theme='dark-theme'] .vr-chip.is-on,
+[theme='hc-dark'] .vr-chip.is-on { background: rgba(77, 155, 255, 0.16); }
+
+.vr-chip:focus-within {
+    outline: 2px solid var(--vr-accent);
+    outline-offset: 1px;
+}
+
+.vr-chip-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+}
+
+.vr-chip-count {
+    color: var(--vr-muted);
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+}
+
+.vr-chip.is-on .vr-chip-count { color: inherit; opacity: 0.8; }
+
+.vr-filter-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--vr-border);
+}
+
+.vr-filter-actions .vr-spacer { flex: 1 1 auto; }
+
+/* Collapsed by JS on load, so the advanced filters stay reachable without it. */
+.vr-advanced.is-collapsed { display: none; }
+
+/* ---------------------------------------------------------------- alerts */
+
+.vr-alert {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 11px 14px;
+    margin-bottom: 10px;
+    border: 1px solid var(--vr-border);
+    border-left: 3px solid var(--vr-warning);
+    border-radius: 4px;
+    background: var(--vr-surface-2);
+    font-size: 12.5px;
+    color: var(--vr-ink-2);
+}
+
+.vr-alert-icon { flex: 0 0 auto; font-size: 14px; line-height: 1.3; }
+
+/* ---------------------------------------------------------------- tabs */
+
+.vr-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    border-bottom: 1px solid var(--vr-border);
+    margin-bottom: 18px;
+}
+
+.vr-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    box-sizing: border-box;
+    min-height: 40px;
+    padding: 6px 18px;
+    background: var(--vr-surface-2);
+    border: 1px solid var(--vr-border);
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    /* No opacity here: compositing the whole element dropped the label to
+       2.9:1 on the light theme. Recede with colour alone, which stays legible. */
+    color: var(--vr-ink-2);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.2;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.vr-tab:hover { color: var(--vr-ink); background: var(--vr-surface); }
+
+.vr-tab.is-active {
+    background: var(--vr-surface);
+    color: var(--vr-ink);
+    margin-bottom: -1px;
+}
+
+.vr-tab:focus-visible { outline: 2px solid var(--vr-accent); outline-offset: -2px; }
+
+.vr-tab-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 18px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--vr-critical);
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Visible to assistive tech only - the badge is a bare number otherwise. */
+.vr-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.vr-tabpanel { display: flex; flex-direction: column; gap: 18px; }
+.vr-tabpanel[hidden] { display: none; }
+
+/* ---------------------------------------------------------------- cards */
+
+.vr-kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 12px;
+}
+
+.vr-kpi {
+    position: relative;
+    padding: 16px 18px;
+    background: var(--vr-surface);
+    border: 1px solid var(--vr-border);
+    border-radius: 6px;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.vr-kpi::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: var(--vr-border-strong);
+}
+
+.vr-kpi--ok::before { background: var(--vr-ok); }
+.vr-kpi--warning::before { background: var(--vr-warning); }
+.vr-kpi--critical::before { background: var(--vr-critical); }
+.vr-kpi--neutral::before { background: var(--vr-accent); }
+
+.vr-kpi-label {
+    margin-bottom: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--vr-muted);
+}
+
+.vr-kpi-value {
+    font-size: 26px;
+    line-height: 1.15;
+    font-weight: 600;
+    color: var(--vr-ink);
+}
+
+.vr-kpi-sub { margin-top: 7px; font-size: 12px; color: var(--vr-muted); }
+
+/* ---------------------------------------------------------------- panels */
+
+.vr-panel {
+    padding: 18px;
+    background: var(--vr-surface);
+    border: 1px solid var(--vr-border);
+    border-radius: 6px;
+    box-sizing: border-box;
+}
+
+.vr-panel-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.vr-panel-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--vr-ink); }
+.vr-panel-note { font-size: 12px; color: var(--vr-muted); }
+
+.vr-panel-sub {
+    margin: 0 0 14px 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--vr-muted);
+    max-width: 88ch;
+}
+
+.vr-grid-2 {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 18px;
+    align-items: start;
+}
+
+.vr-split {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    gap: 20px;
+    align-items: center;
+}
+
+@media (max-width: 700px) {
+    .vr-split { grid-template-columns: 1fr; }
+}
+
+/* ---------------------------------------------------------------- charts */
+
+.vr-chart {
+    display: block;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+}
+
+.vr-chart-scroll { overflow-x: auto; }
+
+.vr-chart-empty {
+    margin: 0;
+    padding: 30px 12px;
+    text-align: center;
+    color: var(--vr-muted);
+    font-size: 12.5px;
+}
+
+.vr-grid { stroke: var(--vr-grid); stroke-width: 1; }
+.vr-baseline { stroke: var(--vr-axis); stroke-width: 1; }
+
+.vr-tick {
+    fill: var(--vr-muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+
+.vr-label { fill: var(--vr-ink-2); font-size: 12px; text-anchor: end; }
+
+.vr-value {
+    fill: var(--vr-ink);
     font-size: 12px;
     font-weight: 600;
-    color: #5c6b7a;
+    text-anchor: end;
+    font-variant-numeric: tabular-nums;
 }
-.veeamreport-card-value {
-    font-size: 24px;
-    line-height: 1.2;
-    font-weight: 700;
-    color: #1f2b3a;
+
+.vr-track { fill: var(--vr-track); }
+.vr-track-ring { stroke: var(--vr-track); }
+
+.vr-line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.vr-line--forecast { stroke-dasharray: 5 5; opacity: 0.75; }
+.vr-area { opacity: 0.1; }
+.vr-stack-area { opacity: 0.85; }
+
+.vr-end-dot { stroke: var(--vr-surface); stroke-width: 2; }
+
+.vr-threshold { stroke: var(--vr-critical); stroke-width: 1.5; opacity: 0.8; }
+.vr-threshold-label { fill: var(--vr-critical-ink); font-size: 11px; font-weight: 600; }
+
+.vr-donut-value { fill: var(--vr-ink); font-size: 26px; font-weight: 600; }
+.vr-donut-label { fill: var(--vr-muted); font-size: 11px; }
+
+.vr-mark { cursor: default; }
+.vr-mark:hover { opacity: 0.82; }
+
+.vr-sparkline { display: inline-block; vertical-align: middle; opacity: 0.9; }
+
+.vr-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    margin-top: 14px;
 }
-.veeamreport-card-sub {
-    margin-top: 6px;
+
+.vr-legend-item { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; }
+
+.vr-legend-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    flex: 0 0 auto;
+}
+
+.vr-legend-label { color: var(--vr-ink-2); }
+
+.vr-legend-value {
+    color: var(--vr-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Meter - fill carries severity, track is a lighter step of the same ramp. */
+.vr-meter {
+    display: block;
+    width: 100%;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--vr-track);
+    overflow: hidden;
+}
+
+.vr-meter-fill { display: block; height: 100%; border-radius: 999px; }
+
+/* Tooltip shared by every chart. */
+.vr-tooltip {
+    position: fixed;
+    z-index: 1200;
+    max-width: 320px;
+    padding: 6px 10px;
+    border-radius: 4px;
+    background: #1f2b3a;
+    color: #ffffff;
     font-size: 12px;
-    color: #5c6b7a;
+    line-height: 1.4;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.1s ease;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
 }
-.veeamreport-empty-note { margin: 4px 0 10px 0; color: #5c6b7a; }
-.veeamreport-wrap { white-space: normal; word-break: break-word; }
 
-/* Numeric cells in the native list-table: right-aligned, tabular figures. */
-.veeamreport-num { text-align: right; font-variant-numeric: tabular-nums; }
+.vr-tooltip.is-on { opacity: 1; }
 
-/* ---------- Dark themes (dark-theme + hc-dark) ---------- */
-[theme='dark-theme'] .veeamreport,
-[theme='hc-dark'] .veeamreport { color: #eef3f7; }
+/* ---------------------------------------------------------------- tables */
 
-[theme='dark-theme'] .veeamreport-page-title,
-[theme='hc-dark'] .veeamreport-page-title,
-[theme='dark-theme'] .veeamreport-section-title,
-[theme='hc-dark'] .veeamreport-section-title,
-[theme='dark-theme'] .veeamreport-card-value,
-[theme='hc-dark'] .veeamreport-card-value { color: #eef3f7; }
+.vr-table-wrap { overflow-x: auto; }
 
-[theme='dark-theme'] .veeamreport-section-subtitle,
-[theme='hc-dark'] .veeamreport-section-subtitle,
-[theme='dark-theme'] .veeamreport-field-hint,
-[theme='hc-dark'] .veeamreport-field-hint,
-[theme='dark-theme'] .veeamreport-card-label,
-[theme='hc-dark'] .veeamreport-card-label,
-[theme='dark-theme'] .veeamreport-card-sub,
-[theme='hc-dark'] .veeamreport-card-sub,
-[theme='dark-theme'] .veeamreport-empty-note,
-[theme='hc-dark'] .veeamreport-empty-note { color: #bec8d3; }
-
-[theme='dark-theme'] .veeamreport-info-bar,
-[theme='hc-dark'] .veeamreport-info-bar { background: #1a2230; border-color: #3b4a5b; color: #d7dfe7; }
-
-[theme='dark-theme'] .veeamreport-alert--warning,
-[theme='hc-dark'] .veeamreport-alert--warning { background: #1a2230; border-color: #3b4a5b; color: #d7dfe7; }
-
-[theme='dark-theme'] .veeamreport-filter-form,
-[theme='hc-dark'] .veeamreport-filter-form,
-[theme='dark-theme'] .veeamreport-card,
-[theme='hc-dark'] .veeamreport-card { background: #1f2733; border-color: #3b4a5b; }
-
-[theme='dark-theme'] .veeamreport-field label,
-[theme='hc-dark'] .veeamreport-field label { color: #eef3f7; }
-
-[theme='dark-theme'] .veeamreport-field input,
-[theme='hc-dark'] .veeamreport-field input,
-[theme='dark-theme'] .veeamreport-field select,
-[theme='hc-dark'] .veeamreport-field select {
-    background: #111821;
-    border-color: #5b6b7f;
-    color: #eef3f7;
+.vr-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
 }
-[theme='dark-theme'] .veeamreport-field input::placeholder,
-[theme='hc-dark'] .veeamreport-field input::placeholder { color: #9fb0c3; }
 
-[theme='dark-theme'] .veeamreport-field input[type="date"],
-[theme='hc-dark'] .veeamreport-field input[type="date"],
-[theme='dark-theme'] .veeamreport-field input[type="month"],
-[theme='hc-dark'] .veeamreport-field input[type="month"] { color-scheme: dark; }
+.vr-table th,
+.vr-table td {
+    padding: 9px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--vr-border);
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.vr-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--vr-surface-2);
+    color: var(--vr-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--vr-border-strong);
+}
+
+.vr-table tbody tr:hover { background: var(--vr-surface-2); }
+.vr-table tbody tr:last-child td { border-bottom: none; }
+
+.vr-num { text-align: right; font-variant-numeric: tabular-nums; }
+.vr-wrap { white-space: normal; word-break: break-word; min-width: 180px; }
+.vr-strong { font-weight: 600; color: var(--vr-ink); }
+.vr-dim { color: var(--vr-muted); }
+
+.vr-empty {
+    margin: 0;
+    padding: 26px 12px;
+    text-align: center;
+    color: var(--vr-muted);
+    font-size: 12.5px;
+}
+
+/* Status pill: colour never carries meaning alone - always icon + label. */
+.vr-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    font-size: 11.5px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.vr-status-glyph { font-size: 10px; line-height: 1; }
+
+.vr-status--ok {
+    background: rgba(12, 163, 12, 0.12);
+    border-color: rgba(12, 163, 12, 0.35);
+    color: var(--vr-ok-ink);
+}
+
+.vr-status--warning {
+    background: rgba(250, 178, 25, 0.16);
+    border-color: rgba(250, 178, 25, 0.45);
+    color: var(--vr-warning-ink);
+}
+
+.vr-status--critical {
+    background: rgba(208, 59, 59, 0.12);
+    border-color: rgba(208, 59, 59, 0.4);
+    color: var(--vr-critical-ink);
+}
+
+.vr-status--neutral {
+    background: var(--vr-surface-2);
+    border-color: var(--vr-border);
+    color: var(--vr-muted);
+}
+
+.vr-delta-up { color: var(--vr-warning-ink); font-variant-numeric: tabular-nums; }
+.vr-delta-down { color: var(--vr-ok-ink); font-variant-numeric: tabular-nums; }
+.vr-delta-flat { color: var(--vr-muted); font-variant-numeric: tabular-nums; }
+
+.vr-swatch {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    margin-right: 7px;
+    vertical-align: baseline;
+}
+
+/* ------------------------------------------------------------- attention */
+
+.vr-attention { display: flex; flex-direction: column; gap: 1px; }
+
+.vr-attention-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 11px 4px;
+    border-bottom: 1px solid var(--vr-border);
+}
+
+.vr-attention-item:last-child { border-bottom: none; }
+
+.vr-attention-bar {
+    flex: 0 0 auto;
+    width: 3px;
+    align-self: stretch;
+    border-radius: 2px;
+    background: var(--vr-border-strong);
+}
+
+.vr-attention-item--critical .vr-attention-bar { background: var(--vr-critical); }
+.vr-attention-item--warning .vr-attention-bar { background: var(--vr-warning); }
+.vr-attention-item--info .vr-attention-bar { background: var(--vr-accent); }
+
+.vr-attention-body { flex: 1 1 auto; min-width: 0; }
+.vr-attention-title { font-weight: 600; color: var(--vr-ink); }
+.vr-attention-detail { margin-top: 3px; font-size: 12px; color: var(--vr-muted); }
+
+.vr-attention-scope {
+    flex: 0 0 auto;
+    align-self: center;
+    font-size: 11px;
+    color: var(--vr-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.vr-all-clear {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 18px;
+    border-radius: 6px;
+    background: rgba(12, 163, 12, 0.08);
+    color: var(--vr-ok-ink);
+    font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- print */
+
+@media print {
+    .vr-filter,
+    .vr-actions,
+    .vr-tabs { display: none !important; }
+
+    .vr-tabpanel[hidden] { display: flex !important; }
+
+    .vr-panel,
+    .vr-kpi {
+        border-color: #d5dbe4;
+        break-inside: avoid;
+    }
+
+    .vr-table thead th { position: static; }
+}
