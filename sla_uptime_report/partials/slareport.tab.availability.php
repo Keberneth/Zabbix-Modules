@@ -24,7 +24,7 @@ $target = (float) $filter['target'];
 		<div class="sr-kpi-sub"><?= $esc(sprintf(_('Across %1$d hosts with data'), (int) $fleet['with_data'])) ?></div>
 	</div>
 	<div class="sr-kpi sr-kpi--<?= (int) $fleet['below_target'] > 0 ? 'warning' : 'ok' ?>">
-		<div class="sr-kpi-label"><?= $esc(sprintf(_('Below %1$s'), $helper->formatPct($target, 1))) ?></div>
+		<div class="sr-kpi-label"><?= $esc(sprintf(_('Below %1$s'), $helper->formatTargetPct($target))) ?></div>
 		<div class="sr-kpi-value"><?= $esc((string) (int) $fleet['below_target']) ?></div>
 		<div class="sr-kpi-sub"><?= $esc(_('Hosts under the availability target')) ?></div>
 	</div>

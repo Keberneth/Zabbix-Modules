@@ -172,11 +172,18 @@
     color: #ffffff;
 }
 
+/* The dark accent #4d9bff is light: white text on it is ~2.8:1. Dark ink
+   keeps the button's main label at ~7:1 in both dark themes. */
+[theme='dark-theme'] .vr-btn--primary,
+[theme='hc-dark'] .vr-btn--primary {
+    color: #0b1826;
+}
+
 [theme='dark-theme'] .vr-btn--primary:hover,
 [theme='hc-dark'] .vr-btn--primary:hover {
-    background: #3d87e6;
-    border-color: #3d87e6;
-    color: #ffffff;
+    background: #6cadff;
+    border-color: #6cadff;
+    color: #0b1826;
 }
 
 .vr-btn--ghost {

@@ -309,7 +309,7 @@ class ChartRenderer {
 
         // Hover targets across the full plot height, one per sample.
         foreach ($all as $i => $point) {
-            $tip = $this->text((string) $point['label']).' - '.$this->text($format($point['value'], 2));
+            $tip = $this->text((string) $point['label']).' - '.$this->text($format($point['value'], 2, $scale['max']));
             $band = $plot_w / max(1, count($all));
             $svg[] = sprintf(
                 '<g class="sr-mark" data-tip="%s"><title>%s</title><rect x="%s" y="%s" width="%s" height="%s" fill="transparent"/></g>',
@@ -482,7 +482,7 @@ class ChartRenderer {
                     '%s - %s: %s',
                     $this->text((string) $category),
                     $this->text((string) $s['label']),
-                    $this->text($format($value, 2))
+                    $this->text($format($value, 2, $scale['max']))
                 );
 
                 $svg[] = sprintf(
@@ -550,7 +550,7 @@ class ChartRenderer {
         }
 
         foreach ($categories as $i => $category) {
-            $tip = $this->text((string) $category).' - '.$this->text($format($totals[$i], 2));
+            $tip = $this->text((string) $category).' - '.$this->text($format($totals[$i], 2, $scale['max']));
             $bandw = $plot_w / max(1, count($categories));
             $svg[] = sprintf(
                 '<g class="sr-mark" data-tip="%s"><title>%s</title><rect x="%s" y="%s" width="%s" height="%s" fill="transparent"/></g>',

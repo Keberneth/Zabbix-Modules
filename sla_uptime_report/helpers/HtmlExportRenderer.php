@@ -70,7 +70,7 @@ class HtmlExportRenderer {
 			_('%1$d hosts · %2$d SLAs · availability target %3$s'),
 			(int) $fleet['hosts_total'],
 			(int) $sla_summary['slas_total'],
-			$helper->formatPct($target, 1)
+			$helper->formatTargetPct($target)
 		)) ?></p>
 	</div>
 	<div class="cover-verdict verdict--<?= $h($verdict['tone']) ?>">
@@ -147,7 +147,10 @@ class HtmlExportRenderer {
 						<th class="heat-head"><?= $h($helper->shortMonth($month)) ?></th>
 					<?php endforeach; ?>
 					<th class="num"><?= $h(_('Breaches')) ?></th>
-					<th><?= $h(_('Error budget this period')) ?></th>
+					<th><?= $h(sprintf(
+						_('Error budget (%1$s)'),
+						$sla['months'] !== [] ? $helper->shortMonth((string) end($sla['months'])) : _('this period')
+					)) ?></th>
 				</tr>
 			</thead>
 			<tbody>
@@ -188,7 +191,7 @@ class HtmlExportRenderer {
 		</table>
 	<?php endforeach; ?>
 	<p class="dim">
-		<?= $h(_('Cells are tinted against the SLO: green at or above, amber less than half a point below, red further below. A dash means the month was not measured.')) ?>
+		<?= $h(_('Cells are tinted against the SLO: green at or above, amber up to half a point below, red further below. A dash means the period was not measured.')) ?>
 	</p>
 </section>
 <?php endif; ?>
@@ -236,7 +239,7 @@ class HtmlExportRenderer {
 	<p class="lede">
 		<?= $h(sprintf(
 			_('Every host in the selection, grouped by host group and sorted worst first, against the %1$s availability target.'),
-			$helper->formatPct($target, 1)
+			$helper->formatTargetPct($target)
 		)) ?>
 	</p>
 
@@ -353,7 +356,7 @@ class HtmlExportRenderer {
 		return [
 			'tone' => 'ok',
 			'word' => _('On target'),
-			'line' => sprintf(_('Every SLO met, every measured host above %1$s'), $this->helper->formatPct($target, 1))
+			'line' => sprintf(_('Every SLO met, every measured host above %1$s'), $this->helper->formatTargetPct($target))
 		];
 	}
 

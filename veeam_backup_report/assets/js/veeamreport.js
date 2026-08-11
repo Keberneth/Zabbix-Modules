@@ -87,7 +87,8 @@
 
         // Left/right arrows move between tabs, as expected of a tablist.
         bar.addEventListener('keydown', function (event) {
-            if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') {
+            var keys = ['ArrowRight', 'ArrowLeft', 'Home', 'End'];
+            if (keys.indexOf(event.key) === -1) {
                 return;
             }
 
@@ -98,9 +99,11 @@
                 return;
             }
 
-            var next = event.key === 'ArrowRight'
-                ? (current + 1) % buttons.length
-                : (current - 1 + buttons.length) % buttons.length;
+            var next = event.key === 'Home' ? 0
+                : (event.key === 'End' ? buttons.length - 1
+                    : (event.key === 'ArrowRight'
+                        ? (current + 1) % buttons.length
+                        : (current - 1 + buttons.length) % buttons.length));
 
             event.preventDefault();
             activate(buttons[next].getAttribute('data-vr-tab'), true);

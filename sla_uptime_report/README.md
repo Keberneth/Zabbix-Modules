@@ -33,8 +33,8 @@ the availability target, worst first.
 
 ### SLA compliance
 
-One card per SLA. Each service gets a 12-month SLI heatmap tinted against the SLO — green at or
-above, amber less than half a point below, red further below — with the value printed in every
+One card per SLA. Each service gets a 12-month SLI heatmap tinted against the SLO — green at
+or above, amber up to half a point below, red further below — with the value printed in every
 cell, a breach count, and an **error budget** for the current period: how much of the allowed
 downtime has been consumed, and by how much it was exceeded when it was.
 
@@ -162,7 +162,15 @@ instead:
 - **Chart colours follow the host group**, with collisions among the groups on screen resolved
   to free slots so two adjacent series never share a colour.
 - **One unit per axis** — the downtime axis picks minutes, hours or days from its maximum and
-  every tick uses it.
+  every tick and tooltip uses it.
+- **`zabbix[host,agent,available]` reports 2 for "unavailable"** — each sample is decoded by
+  band, so an agent that is down counts as down instead of being clamped into uptime.
+- **A filter that stops resolving narrows to nothing and says so.** A selected group that lost
+  its hosts, or an SLA that was disabled, must never silently widen a customer export to
+  every host and SLA the account can read.
+- **Zero samples is "no data", never "0% available"** — a dead item, a scan cap and a
+  decommissioned host all look the same, and inventing a hard-down verdict would page someone
+  about a host that may be fine.
 
 ---
 
@@ -170,12 +178,16 @@ instead:
 
 The report is built from a bounded number of batched API calls; there are no per-host queries.
 
+History and trend scans are **streaming**: every page of rows is folded into per-host
+counters and discarded, so memory stays flat no matter how many hosts or how wide the window.
+
 | Guard | Value |
 |---|---|
 | Hosts measured | 2 000 |
 | SLAs | 200 |
-| History rows per report | 400 000 (keyset-paginated in 2 000-row pages) |
-| Trend rows per API call | ~200 000 (chunk size adapts to the window length) |
+| History samples scanned | 2 000 000 (streamed in 2 000-row pages; bounds time, not memory) |
+| Trend rows per API call | ~50 000 (chunk size adapts to the window length) |
+| Per-day sparklines | first 400 hosts (totals and charts cover every host) |
 | Report window | 768 days |
 | Page time limit | 300 s |
 

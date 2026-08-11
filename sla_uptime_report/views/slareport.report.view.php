@@ -92,7 +92,7 @@ ob_start();
 		</div>
 	<?php endforeach; ?>
 
-	<div class="sr-tabs" role="tablist" data-sr-tabs>
+	<div class="sr-tabs" role="tablist" aria-label="<?= $esc(_('Report sections')) ?>" data-sr-tabs>
 		<?php
 		$tabs = [
 			'overview' => _('Overview'),

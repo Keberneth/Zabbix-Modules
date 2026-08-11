@@ -66,7 +66,8 @@ $period_modes = [
 			<?php else: ?>
 				<?php if (count($report['group_options']) > 12): ?>
 					<input type="text" class="sr-chip-search" data-sr-chip-search="sr-group-chips"
-						   placeholder="<?= $esc(_('Type to filter groups…')) ?>" autocomplete="off">
+						   placeholder="<?= $esc(_('Type to filter groups…')) ?>"
+						   aria-label="<?= $esc(_('Filter the host group list')) ?>" autocomplete="off">
 				<?php endif; ?>
 				<div class="sr-chips" id="sr-group-chips">
 					<?php foreach ($report['group_options'] as $group): ?>
@@ -115,7 +116,7 @@ $period_modes = [
 	<div class="sr-filter-row sr-advanced" data-sr-advanced="<?= $advanced_open ? 'open' : 'closed' ?>">
 		<div class="sr-field">
 			<label for="sr_target"><?= $esc(_('Availability target (%)')) ?></label>
-			<input id="sr_target" type="number" min="50" max="99.999" step="0.1" name="filter_target"
+			<input id="sr_target" type="number" min="50" max="99.999" step="0.001" name="filter_target"
 				   value="<?= $esc($filter['target']) ?>">
 			<div class="sr-hint"><?= $esc(_('Hosts below this are flagged; below 90% is critical.')) ?></div>
 		</div>

@@ -17,16 +17,29 @@ class ReportDataHelper {
 	public const MAX_SLAS = 200;
 	public const MAX_GROUP_OPTIONS = 500;
 	public const FETCH_BATCH = 2000;
-	public const MAX_HISTORY_ROWS = 400000;
+
+	/**
+	 * Rows PROCESSED (not retained - the scan is streaming) before the history
+	 * scan stops and says so. Bounds wall-clock time, not memory.
+	 */
+	public const MAX_HISTORY_ROWS = 2000000;
 	public const HISTORY_ITEM_CHUNK = 500;
 	public const ITEM_HOST_CHUNK = 1000;
 	public const TRENDS_THRESHOLD_SECONDS = 7 * 86400;
 
 	/**
-	 * Trend fetches are chunked so one API call never returns more than roughly
-	 * this many rows (chunk size = cap / expected rows per item for the window).
+	 * Trend fetches are chunked so one API call returns at most roughly this
+	 * many rows. Each row costs ~470 bytes as a PHP array, so this transient is
+	 * ~23 MB - it must stay well under the web server's memory_limit.
 	 */
-	public const TREND_ROWS_PER_CALL = 200000;
+	public const TREND_ROWS_PER_CALL = 50000;
+
+	/**
+	 * Hosts that get a per-day sparkline. Per-host daily detail is the one
+	 * structure that scales as hosts x days, so it is bounded; totals and the
+	 * per-group daily chart are computed for every host regardless.
+	 */
+	public const MAX_SPARK_HOSTS = 400;
 
 	/**
 	 * Availability is detected from any one of these item keys (priority order:
@@ -79,14 +92,18 @@ class ReportDataHelper {
 		$filter['month'] = preg_match('/^\d{4}-\d{2}$/', trim((string) ($input['month'] ?? ''))) === 1
 			? trim((string) $input['month'])
 			: $defaults['month'];
-		$filter['date_from'] = trim((string) ($input['date_from'] ?? ''));
-		$filter['date_to'] = trim((string) ($input['date_to'] ?? ''));
+		$filter['date_from'] = substr(trim((string) ($input['date_from'] ?? '')), 0, 10);
+		$filter['date_to'] = substr(trim((string) ($input['date_to'] ?? '')), 0, 10);
 		$filter['days_back'] = max(1, min(366, (int) ($input['days_back'] ?? $defaults['days_back'])));
 		$filter['hostgroupids'] = self::normalizeIdArray($input['hostgroupids'] ?? []);
 		$filter['slaids'] = self::normalizeIdArray($input['slaids'] ?? []);
 		$filter['exclude_disabled'] = !empty($input['exclude_disabled']) ? 1 : 0;
 
-		$target = (float) ($input['target'] ?? $defaults['target']);
+		// Accept a comma decimal separator; anything else non-numeric falls
+		// back to the default rather than silently truncating ("99,5" must
+		// not become 99.0).
+		$target_raw = str_replace(',', '.', trim((string) ($input['target'] ?? $defaults['target'])));
+		$target = is_numeric($target_raw) ? (float) $target_raw : $defaults['target'];
 		$filter['target'] = ($target >= 50.0 && $target <= 99.999) ? round($target, 3) : $defaults['target'];
 
 		$filter['top'] = max(10, min(500, (int) ($input['top'] ?? $defaults['top'])));
@@ -172,6 +189,12 @@ class ReportDataHelper {
 
 		$report['group_options'] = $this->getGroupOptions();
 		$report['sla_options'] = $this->getSlaOptions();
+
+		// The intersections exist for the filter chips only. Scoping uses the
+		// SUBMITTED ids: a selected group or SLA that stopped resolving (lost
+		// its hosts, was disabled, fell past a truncation cap) must narrow the
+		// report to nothing and say so - silently widening to "everything the
+		// account can read" would leak other customers' data into an export.
 		$report['selected_groupids'] = array_values(array_intersect(
 			$filter['hostgroupids'],
 			array_map(static fn(array $g): string => (string) $g['groupid'], $report['group_options'])
@@ -181,21 +204,31 @@ class ReportDataHelper {
 			array_map(static fn(array $s): string => (string) $s['slaid'], $report['sla_options'])
 		));
 
+		if ($filter['hostgroupids'] !== [] && count($report['selected_groupids']) < count($filter['hostgroupids'])) {
+			$this->addNote(_('Some selected host groups no longer exist, have no hosts, or are not visible to you. The report covers only the ones that resolved.'));
+		}
+		if ($filter['slaids'] !== [] && count($report['selected_slaids']) < count($filter['slaids'])) {
+			$this->addNote(_('Some selected SLAs are disabled, deleted or not visible to you. The report covers only the ones that resolved.'));
+		}
+
 		$availability = $this->buildAvailability(
-			$report['selected_groupids'],
+			$filter['hostgroupids'] !== [] ? $report['selected_groupids'] : [],
 			$time_from,
 			$time_to,
 			(bool) $filter['exclude_disabled'],
 			(float) $filter['target'],
 			(int) $filter['top'],
-			$report['group_options']
+			$report['group_options'],
+			$filter['hostgroupids'] !== []
 		);
 		$report['groups'] = $availability['groups'];
 		$report['fleet'] = $availability['fleet'];
 		$report['daily'] = $availability['daily'];
 		$report['availability_health'] = $availability['health'];
 
-		$slas = $this->buildSlas($report['selected_slaids'], $time_to);
+		$slas = ($filter['slaids'] !== [] && $report['selected_slaids'] === [])
+			? ['slas' => [], 'summary' => $report['sla_summary']]
+			: $this->buildSlas($report['selected_slaids'], $time_to);
 		$report['slas'] = $slas['slas'];
 		$report['sla_summary'] = $slas['summary'];
 
@@ -306,7 +339,8 @@ class ReportDataHelper {
 		bool $exclude_disabled,
 		float $target,
 		int $top,
-		array $group_options
+		array $group_options,
+		bool $filtered_selection = false
 	): array {
 		$empty = [
 			'groups' => [],
@@ -317,6 +351,11 @@ class ReportDataHelper {
 			'daily' => ['dates' => [], 'series' => []],
 			'health' => ['critical' => [], 'warning' => [], 'nodata' => []]
 		];
+
+		// An explicit selection that resolved to nothing stays nothing.
+		if ($groupids === [] && $filtered_selection) {
+			return $empty;
+		}
 
 		$group_params = [
 			'output' => ['groupid', 'name'],
@@ -410,8 +449,7 @@ class ReportDataHelper {
 				'state' => 'noitem',
 				'uptime_seconds' => 0,
 				'downtime_seconds' => 0,
-				'spark' => [],
-				'daily_downtime_min' => []
+				'spark' => []
 			];
 		}
 
@@ -456,13 +494,23 @@ class ReportDataHelper {
 			}
 		}
 
+		// Each host's downtime is charged to its FIRST group in the daily
+		// chart, so the stacked total equals the real downtime, not a multiple.
+		$group_of_host = [];
+		foreach ($host_rows as $hostid => $row) {
+			if ($row['groups'] !== []) {
+				$group_of_host[$hostid] = $row['groups'][0];
+			}
+		}
+
 		$measured = (($time_to - $time_from) > self::TRENDS_THRESHOLD_SECONDS)
-			? $this->availabilityFromTrends(array_values($items_by_host), $time_from, $time_to)
-			: $this->availabilityFromHistory(array_values($items_by_host), $time_from, $time_to);
+			? $this->availabilityFromTrends(array_values($items_by_host), $time_from, $time_to, $group_of_host)
+			: $this->availabilityFromHistory(array_values($items_by_host), $time_from, $time_to, $group_of_host);
+		$group_daily = $measured['group_daily'];
 
 		// Merge measurements into the host rows.
 		foreach ($host_rows as $hostid => $row) {
-			$info = $measured[$hostid] ?? null;
+			$info = $measured['hosts'][$hostid] ?? null;
 
 			if ($row['item_key'] === null) {
 				$host_rows[$hostid]['state'] = 'noitem';
@@ -479,7 +527,6 @@ class ReportDataHelper {
 			$host_rows[$hostid]['uptime_seconds'] = (int) $info['uptime_seconds'];
 			$host_rows[$hostid]['downtime_seconds'] = (int) $info['downtime_seconds'];
 			$host_rows[$hostid]['spark'] = $info['spark'];
-			$host_rows[$hostid]['daily_downtime_min'] = $info['daily_downtime_min'];
 			$host_rows[$hostid]['state'] = $this->availabilityState($pct, $target);
 		}
 
@@ -551,6 +598,9 @@ class ReportDataHelper {
 			});
 
 			$group_rollups[$group_name]['rows_total'] = count($group_rollups[$group_name]['rows']);
+			// The untruncated list survives for the CSV export; slicing only
+			// affects what the HTML tables show. Copy-on-write keeps this cheap.
+			$group_rollups[$group_name]['rows_all'] = $group_rollups[$group_name]['rows'];
 			$group_rollups[$group_name]['rows'] = array_slice($group_rollups[$group_name]['rows'], 0, $top);
 		}
 
@@ -584,7 +634,7 @@ class ReportDataHelper {
 		$fleet['avg'] = $values !== [] ? array_sum($values) / count($values) : null;
 
 		// ---- daily downtime, stacked by group -------------------------------
-		$daily = $this->buildDailyDowntime($host_rows, $group_rollups);
+		$daily = $this->buildDailyFromGroups($group_daily, $group_rollups);
 
 		// ---- health lists (over ALL hosts, never a truncated table) ---------
 		$health = ['critical' => [], 'warning' => [], 'nodata' => []];
@@ -612,41 +662,28 @@ class ReportDataHelper {
 
 	/**
 	 * Downtime minutes per day, stacked by host group (top groups by downtime,
-	 * tail folded into "Other").
+	 * tail folded into "Other"). Consumes the per-group accumulators built
+	 * while streaming, so no per-host daily detail is retained.
 	 *
+	 * @param array<string,array<string,float>> $group_daily group => date => minutes
 	 * @return array{dates:array,series:array}
 	 */
-	private function buildDailyDowntime(array $host_rows, array $group_rollups): array {
-		$per_group_day = [];
+	private function buildDailyFromGroups(array $group_daily, array $group_rollups): array {
+		if ($group_daily === []) {
+			return ['dates' => [], 'series' => []];
+		}
+
 		$dates_seen = [];
-
-		foreach ($host_rows as $row) {
-			if ($row['daily_downtime_min'] === [] || $row['groups'] === []) {
-				continue;
-			}
-
-			// A host in several groups is charged to its first group only, so
-			// the stacked total equals the real downtime rather than a multiple.
-			$group_name = $row['groups'][0];
-
-			foreach ($row['daily_downtime_min'] as $date => $minutes) {
-				$per_group_day[$group_name][$date] = ($per_group_day[$group_name][$date] ?? 0.0) + (float) $minutes;
+		$totals = [];
+		foreach ($group_daily as $group_name => $days) {
+			$totals[$group_name] = array_sum($days);
+			foreach ($days as $date => $_minutes) {
 				$dates_seen[$date] = true;
 			}
 		}
 
-		if ($dates_seen === []) {
-			return ['dates' => [], 'series' => []];
-		}
-
 		$dates = array_keys($dates_seen);
 		sort($dates);
-
-		// Order groups by total downtime, fold the tail into "Other".
-		$totals = [];
-		foreach ($per_group_day as $group_name => $days) {
-			$totals[$group_name] = array_sum($days);
-		}
 		arsort($totals);
 
 		$series = [];
@@ -655,7 +692,7 @@ class ReportDataHelper {
 		foreach (array_keys($totals) as $group_name) {
 			$values = [];
 			foreach ($dates as $date) {
-				$values[] = (float) ($per_group_day[$group_name][$date] ?? 0.0);
+				$values[] = round((float) ($group_daily[$group_name][$date] ?? 0.0), 2);
 			}
 
 			if ($index < ChartRenderer::SERIES_SLOTS - 1 || count($totals) <= ChartRenderer::SERIES_SLOTS) {
@@ -685,19 +722,42 @@ class ReportDataHelper {
 	}
 
 	// ------------------------------------------------------------ availability IO
+	// ------------------------------------------------------------ availability IO
+
+	/**
+	 * Decode one availability sample into up (1) / down (0).
+	 *
+	 * agent.ping and icmpping are plain 0/1. zabbix[host,agent,available] is
+	 * 0 = unknown, 1 = available, 2 = NOT available - so "2" must count as
+	 * down, and clamping it to 1 would invert downtime into uptime. The band
+	 * test treats anything that averages near 1 as up and everything else
+	 * (0 = unknown/down, 2 = unavailable) as down.
+	 */
+	private function sampleUp(float $value): float {
+		return ($value >= 0.5 && $value < 1.5) ? 1.0 : 0.0;
+	}
 
 	/**
 	 * Raw-history availability for short windows (<= TRENDS_THRESHOLD_SECONDS).
 	 *
-	 * Item ids are fetched in chunked, clock-keyset-paginated batches and
-	 * bucketed per item in PHP. Availability per item = ok-samples /
-	 * expected-samples, where expected includes inferred missing samples so
-	 * polling gaps count as downtime.
+	 * STREAMING: each page of rows is folded into per-item counters and
+	 * discarded, so memory is O(items x days-in-window), never O(rows).
+	 * Availability per item = ok samples / expected samples, where expected =
+	 * max(observed, window / interval) - a polling gap counts as downtime.
+	 * An item with zero samples reports null (no data), never 0%.
+	 *
+	 * Keyset pagination detail: a full page may cut a run of same-clock rows
+	 * in half, so on a full page the rows carrying the final clock are NOT
+	 * processed and the cursor is set to that clock - they are re-read intact
+	 * on the next page. Progress is guaranteed because one chunk can produce
+	 * at most HISTORY_ITEM_CHUNK rows per second, which is below FETCH_BATCH.
 	 *
 	 * @param array<int,array{itemid:string,hostid:string,delay:?string}> $items
+	 * @param array<string,string> $group_of_host hostid => charged group name
 	 */
-	private function availabilityFromHistory(array $items, int $time_from, int $time_to): array {
-		$result = [];
+	private function availabilityFromHistory(array $items, int $time_from, int $time_to,
+			array $group_of_host): array {
+		$result = ['hosts' => [], 'group_daily' => []];
 		$window_seconds = max(1, ($time_to - $time_from) + 1);
 
 		if ($items === []) {
@@ -707,16 +767,23 @@ class ReportDataHelper {
 		$itemids = [];
 		$host_by_item = [];
 		$delay_by_item = [];
+		$state = [];
 
 		foreach ($items as $item) {
 			$itemid = (string) $item['itemid'];
 			$itemids[] = $itemid;
 			$host_by_item[$itemid] = (string) $item['hostid'];
 			$delay_by_item[$itemid] = $item['delay'] ?? null;
+			$state[$itemid] = [
+				'ok' => 0,
+				'seen' => 0,
+				'prev' => null,
+				'deltas' => [],
+				'days' => []
+			];
 		}
 
-		$rows_by_item = [];
-		$total_rows = 0;
+		$processed = 0;
 		$limit_reached = false;
 
 		foreach (array_chunk($itemids, self::HISTORY_ITEM_CHUNK) as $itemid_chunk) {
@@ -738,27 +805,50 @@ class ReportDataHelper {
 					break;
 				}
 
-				foreach ($batch as $row) {
-					$rows_by_item[(string) $row['itemid']][] = $row;
-					$total_rows++;
-
-					if ($total_rows >= self::MAX_HISTORY_ROWS) {
-						$limit_reached = true;
-						break;
-					}
-				}
-
-				if ($limit_reached) {
-					break;
-				}
-
+				$full_page = count($batch) >= self::FETCH_BATCH;
 				$last_clock = (int) $batch[count($batch) - 1]['clock'];
 
-				if (count($batch) < self::FETCH_BATCH || $last_clock >= $time_to) {
+				foreach ($batch as $row) {
+					$clock = (int) $row['clock'];
+
+					// A full page may split a same-second run; leave that
+					// second for the next page so no row is lost.
+					if ($full_page && $clock >= $last_clock) {
+						continue;
+					}
+
+					$itemid = (string) $row['itemid'];
+					$item_state = &$state[$itemid];
+
+					$item_state['seen']++;
+					if ($this->sampleUp((float) $row['value']) >= 1.0) {
+						$item_state['ok']++;
+						$date = gmdate('Y-m-d', $clock);
+						$item_state['days'][$date] = ($item_state['days'][$date] ?? 0) + 1;
+					}
+
+					if ($item_state['prev'] !== null && count($item_state['deltas']) < 512) {
+						$delta = $clock - $item_state['prev'];
+						if ($delta > 0) {
+							$item_state['deltas'][] = $delta;
+						}
+					}
+					$item_state['prev'] = $clock;
+					unset($item_state);
+
+					$processed++;
+				}
+
+				if ($processed >= self::MAX_HISTORY_ROWS) {
+					$limit_reached = true;
 					break;
 				}
 
-				$cursor = $last_clock + 1;
+				if (!$full_page || $last_clock >= $time_to) {
+					break;
+				}
+
+				$cursor = $last_clock;
 			}
 			while (true);
 
@@ -768,32 +858,58 @@ class ReportDataHelper {
 		}
 
 		if ($limit_reached) {
-			$this->addNote(_s('The history scan stopped at %1$s rows; availability percentages may be approximate.', self::MAX_HISTORY_ROWS));
+			$this->addNote(_s('The history scan stopped after %1$s samples. Hosts scanned before the stop are exact; the rest report "no data". Narrow the host group filter for a complete scan.', self::MAX_HISTORY_ROWS));
 		}
 
 		foreach ($itemids as $itemid) {
-			$history = $rows_by_item[$itemid] ?? [];
-			$interval = $this->inferInterval($history, $delay_by_item[$itemid] ?? null);
-			$expected = count($history) + $this->countMissingSamples($history, $time_from, $time_to, $interval);
+			$item_state = $state[$itemid];
+			$hostid = $host_by_item[$itemid];
 
-			$ok = 0;
-			foreach ($history as $row) {
-				if ((string) $row['value'] === '1') {
-					$ok++;
+			if ($item_state['seen'] === 0) {
+				// Zero samples is "no data", never "0% available" - the row
+				// cap, a dead item and a decommissioned host all look the
+				// same here, and inventing a hard-down verdict for them
+				// would page someone about a host that may be fine.
+				$result['hosts'][$hostid] = [
+					'pct' => null, 'uptime_seconds' => 0, 'downtime_seconds' => 0, 'spark' => []
+				];
+				continue;
+			}
+
+			$interval = $this->inferIntervalFromDeltas($item_state['deltas'], $delay_by_item[$itemid] ?? null);
+			$expected = max($item_state['seen'], (int) floor($window_seconds / max(1, $interval)));
+			$pct = $expected > 0 ? (($item_state['ok'] / $expected) * 100.0) : null;
+			$uptime_seconds = $pct !== null ? (int) round(($pct / 100.0) * $window_seconds) : 0;
+
+			// Daily series: every day inside the window is charged against its
+			// expected sample count, so a day with no samples at all shows as
+			// a full day of downtime - matching the headline number instead of
+			// silently vanishing from the chart.
+			$spark = [];
+			$group = $group_of_host[$hostid] ?? null;
+			for ($day_start = $time_from; $day_start <= $time_to; $day_start = $day_end + 1) {
+				$date = gmdate('Y-m-d', $day_start);
+				$day_end = min($time_to, (int) gmmktime(23, 59, 59,
+					(int) substr($date, 5, 2), (int) substr($date, 8, 2), (int) substr($date, 0, 4)));
+
+				$overlap = $day_end - $day_start + 1;
+				$day_expected = max(1, (int) floor($overlap / max(1, $interval)));
+				$day_ok = min($day_expected, (int) ($item_state['days'][$date] ?? 0));
+				$availability = $day_ok / $day_expected;
+
+				$spark[] = $availability * 100.0;
+				if ($group !== null) {
+					$result['group_daily'][$group][$date] =
+						($result['group_daily'][$group][$date] ?? 0.0)
+						+ (1.0 - $availability) * ($overlap / 60.0);
 				}
 			}
 
-			$pct = $expected > 0 ? (($ok / $expected) * 100.0) : null;
-			$uptime_seconds = $pct !== null ? (int) round(($pct / 100.0) * $window_seconds) : 0;
-
-			[$spark, $daily_downtime] = $this->dailyFromHistory($history, $interval, $time_from, $time_to);
-
-			$result[$host_by_item[$itemid]] = [
+			$result['hosts'][$hostid] = [
 				'pct' => $pct,
 				'uptime_seconds' => max(0, min($window_seconds, $uptime_seconds)),
 				'downtime_seconds' => max(0, $window_seconds - $uptime_seconds),
-				'spark' => $spark,
-				'daily_downtime_min' => $daily_downtime
+				'spark' => $spark
 			];
 		}
 
@@ -801,61 +917,26 @@ class ReportDataHelper {
 	}
 
 	/**
-	 * Per-day availability/downtime from raw history samples (chart data only;
-	 * the headline percentage uses the gap-aware total above).
-	 *
-	 * @return array{0:array<int,float>,1:array<string,float>}
-	 */
-	private function dailyFromHistory(array $history, int $interval, int $time_from, int $time_to): array {
-		if ($history === [] || $interval <= 0) {
-			return [[], []];
-		}
-
-		$ok_by_day = [];
-		$seen_by_day = [];
-		foreach ($history as $row) {
-			$date = gmdate('Y-m-d', (int) $row['clock']);
-			$seen_by_day[$date] = ($seen_by_day[$date] ?? 0) + 1;
-			if ((string) $row['value'] === '1') {
-				$ok_by_day[$date] = ($ok_by_day[$date] ?? 0) + 1;
-			}
-		}
-
-		$spark = [];
-		$daily_downtime = [];
-		foreach ($seen_by_day as $date => $seen) {
-			$day_start = max($time_from, (int) gmmktime(0, 0, 0, (int) substr($date, 5, 2), (int) substr($date, 8, 2), (int) substr($date, 0, 4)));
-			$day_end = min($time_to, $day_start + 86399);
-			$expected = max($seen, (int) floor(($day_end - $day_start + 1) / $interval));
-
-			$availability = $expected > 0 ? (($ok_by_day[$date] ?? 0) / $expected) : 1.0;
-			$availability = max(0.0, min(1.0, $availability));
-
-			$spark[] = $availability * 100.0;
-			$daily_downtime[$date] = (1.0 - $availability) * (($day_end - $day_start + 1) / 60.0);
-		}
-
-		return [$spark, $daily_downtime];
-	}
-
-	/**
 	 * Trend-based availability for long windows.
 	 *
-	 * Each hourly trend row's value_avg is the fraction of "up" samples that
-	 * hour (integer-rounded by Zabbix for unsigned items). Availability = sum of
-	 * value_avg over covered hours / covered hours; hours without trend data are
-	 * excluded from the denominator, and a host with zero coverage reports N/A.
-	 * value_avg is clamped to [0,1] so zabbix[host,agent,available] (0/1/2)
-	 * cannot inflate uptime.
+	 * Each hourly trend row is decoded with sampleUp() (so the 0/1/2 agent
+	 * item cannot invert downtime) and folded straight into per-host counters
+	 * and per-GROUP daily downtime; per-host daily detail exists only for the
+	 * first MAX_SPARK_HOSTS hosts' sparklines. Memory is O(hosts + groups x
+	 * days + spark hosts x days), never O(rows): chunk sizes keep every API
+	 * response under ~TREND_ROWS_PER_CALL rows and each response is discarded
+	 * after folding.
 	 *
-	 * Chunks are sized so one API call returns at most ~TREND_ROWS_PER_CALL rows
-	 * and each chunk is folded into counters immediately, so memory stays flat
-	 * no matter how wide the window or how many hosts.
+	 * Hours with no trend data are excluded from the denominator rather than
+	 * counted as downtime (trend gaps usually mean retention, not outage);
+	 * a host with zero coverage reports null.
 	 *
 	 * @param array<int,array{itemid:string,hostid:string,delay:?string}> $items
+	 * @param array<string,string> $group_of_host hostid => charged group name
 	 */
-	private function availabilityFromTrends(array $items, int $time_from, int $time_to): array {
-		$result = [];
+	private function availabilityFromTrends(array $items, int $time_from, int $time_to,
+			array $group_of_host): array {
+		$result = ['hosts' => [], 'group_daily' => []];
 		$window_seconds = max(1, ($time_to - $time_from) + 1);
 
 		if ($items === []) {
@@ -864,9 +945,17 @@ class ReportDataHelper {
 
 		$itemids = [];
 		$host_by_item = [];
+		$spark_hosts = [];
 		foreach ($items as $item) {
 			$itemids[] = (string) $item['itemid'];
 			$host_by_item[(string) $item['itemid']] = (string) $item['hostid'];
+			if (count($spark_hosts) < self::MAX_SPARK_HOSTS) {
+				$spark_hosts[(string) $item['hostid']] = true;
+			}
+		}
+
+		if (count($items) > self::MAX_SPARK_HOSTS) {
+			$this->addNote(_s('Daily trend sparklines are drawn for the first %1$d hosts; totals and charts cover every host.', self::MAX_SPARK_HOSTS));
 		}
 
 		$hours_in_window = max(1, (int) ceil($window_seconds / 3600));
@@ -874,8 +963,8 @@ class ReportDataHelper {
 
 		$up_hours = [];
 		$covered_hours = [];
-		$daily_up = [];
-		$daily_covered = [];
+		$spark_up = [];
+		$spark_covered = [];
 
 		foreach (array_chunk($itemids, $chunk_size) as $itemid_chunk) {
 			$trends = API::Trend()->get([
@@ -896,13 +985,22 @@ class ReportDataHelper {
 				}
 
 				$hostid = $host_by_item[$itemid];
-				$value = max(0.0, min(1.0, (float) $trend['value_avg']));
+				$value = $this->sampleUp((float) $trend['value_avg']);
 				$date = gmdate('Y-m-d', (int) $trend['clock']);
 
 				$up_hours[$hostid] = ($up_hours[$hostid] ?? 0.0) + $value;
 				$covered_hours[$hostid] = ($covered_hours[$hostid] ?? 0) + 1;
-				$daily_up[$hostid][$date] = ($daily_up[$hostid][$date] ?? 0.0) + $value;
-				$daily_covered[$hostid][$date] = ($daily_covered[$hostid][$date] ?? 0) + 1;
+
+				$group = $group_of_host[$hostid] ?? null;
+				if ($group !== null && $value < 1.0) {
+					$result['group_daily'][$group][$date] =
+						($result['group_daily'][$group][$date] ?? 0.0) + (1.0 - $value) * 60.0;
+				}
+
+				if (isset($spark_hosts[$hostid])) {
+					$spark_up[$hostid][$date] = ($spark_up[$hostid][$date] ?? 0.0) + $value;
+					$spark_covered[$hostid][$date] = ($spark_covered[$hostid][$date] ?? 0) + 1;
+				}
 			}
 
 			unset($trends);
@@ -913,12 +1011,8 @@ class ReportDataHelper {
 			$covered = $covered_hours[$hostid] ?? 0;
 
 			if ($covered === 0) {
-				$result[$hostid] = [
-					'pct' => null,
-					'uptime_seconds' => 0,
-					'downtime_seconds' => 0,
-					'spark' => [],
-					'daily_downtime_min' => []
+				$result['hosts'][$hostid] = [
+					'pct' => null, 'uptime_seconds' => 0, 'downtime_seconds' => 0, 'spark' => []
 				];
 				continue;
 			}
@@ -927,23 +1021,22 @@ class ReportDataHelper {
 			$uptime_seconds = (int) round(($pct / 100.0) * $window_seconds);
 
 			$spark = [];
-			$daily_downtime = [];
-			$days = $daily_covered[$hostid] ?? [];
-			ksort($days);
-			foreach ($days as $date => $day_covered) {
-				$availability = $day_covered > 0
-					? max(0.0, min(1.0, ($daily_up[$hostid][$date] ?? 0.0) / $day_covered))
-					: 1.0;
-				$spark[] = $availability * 100.0;
-				$daily_downtime[$date] = (1.0 - $availability) * $day_covered * 60.0;
+			if (isset($spark_covered[$hostid])) {
+				$days = $spark_covered[$hostid];
+				ksort($days);
+				foreach ($days as $date => $day_covered) {
+					$availability = $day_covered > 0
+						? max(0.0, min(1.0, ($spark_up[$hostid][$date] ?? 0.0) / $day_covered))
+						: 1.0;
+					$spark[] = $availability * 100.0;
+				}
 			}
 
-			$result[$hostid] = [
+			$result['hosts'][$hostid] = [
 				'pct' => $pct,
 				'uptime_seconds' => max(0, min($window_seconds, $uptime_seconds)),
 				'downtime_seconds' => max(0, $window_seconds - $uptime_seconds),
-				'spark' => $spark,
-				'daily_downtime_min' => $daily_downtime
+				'spark' => $spark
 			];
 		}
 
@@ -963,7 +1056,7 @@ class ReportDataHelper {
 		];
 
 		$params = [
-			'output' => ['slaid', 'name', 'slo', 'status'],
+			'output' => ['slaid', 'name', 'slo', 'status', 'period'],
 			'filter' => ['status' => ZBX_SLA_STATUS_ENABLED],
 			'sortfield' => 'name'
 		];
@@ -1021,12 +1114,30 @@ class ReportDataHelper {
 				continue;
 			}
 
+			// Label periods by what they actually are - getSli returns whatever
+			// the SLA's period type is (daily/weekly/monthly/quarterly/annual),
+			// and captioning a week as a month would misdate every breach.
+			$sla_period = (int) ($sla['period'] ?? 2);
 			$months = [];
 			$periods = [];
 			foreach ($sli_result['periods'] as $period) {
-				$months[] = gmdate('Y-m', (int) $period['period_from']);
+				$from_ts = (int) $period['period_from'];
+				switch ($sla_period) {
+					case 0: // daily
+					case 1: // weekly
+						$months[] = gmdate('M j', $from_ts);
+						break;
+					case 3: // quarterly
+						$months[] = 'Q'.((int) ceil((int) gmdate('n', $from_ts) / 3))." '".gmdate('y', $from_ts);
+						break;
+					case 4: // annually
+						$months[] = gmdate('Y', $from_ts);
+						break;
+					default: // monthly
+						$months[] = gmdate('Y-m', $from_ts);
+				}
 				$periods[] = [
-					'from' => (int) $period['period_from'],
+					'from' => $from_ts,
 					'to' => (int) $period['period_to']
 				];
 			}
@@ -1180,7 +1291,7 @@ class ReportDataHelper {
 		$meeting_target = max(0, (int) $fleet['with_data'] - (int) $fleet['below_target']);
 		$cards[] = [
 			'key' => 'target',
-			'label' => _s('Hosts meeting %1$s', $this->formatPct($target, $target == floor($target) ? 0 : 1)),
+			'label' => _s('Hosts meeting %1$s', $this->formatTargetPct($target)),
 			'value' => $fleet['with_data'] > 0
 				? $meeting_target.' / '.(int) $fleet['with_data']
 				: '—',
@@ -1205,16 +1316,19 @@ class ReportDataHelper {
 		];
 
 		if ((int) $sla['services_total'] > 0) {
+			$graded = (int) $sla['meeting'] + (int) $sla['below'];
 			$cards[] = [
 				'key' => 'sla',
 				'label' => _('Services meeting their SLO'),
-				'value' => (int) $sla['meeting'].' / '.((int) $sla['meeting'] + (int) $sla['below']),
-				'sub' => (int) $sla['below'] === 0
+				'value' => $graded > 0 ? (int) $sla['meeting'].' / '.$graded : '—',
+				'sub' => $graded === 0
+					? _('No measured SLA months in this period')
+					: ((int) $sla['below'] === 0
 					? _s('Across %1$d SLAs', (int) $sla['slas_total'])
 					: ((int) $sla['below'] === 1
 						? _('1 service is below SLO')
-						: _s('%1$d services are below SLO', (int) $sla['below'])),
-				'tone' => (int) $sla['below'] === 0 ? 'ok' : 'critical'
+						: _s('%1$d services are below SLO', (int) $sla['below']))),
+				'tone' => $graded === 0 ? 'neutral' : ((int) $sla['below'] === 0 ? 'ok' : 'critical')
 			];
 
 			$cards[] = [
@@ -1298,7 +1412,7 @@ class ReportDataHelper {
 			$items[] = [
 				'severity' => 'warning',
 				'scope' => _('Host'),
-				'title' => _s('%1$s is below the %2$s target', $row['host'], $this->formatPct($target, 1)),
+				'title' => _s('%1$s is below the %2$s target', $row['host'], $this->formatTargetPct($target)),
 				'detail' => _s(
 					'%1$s availability, %2$s of downtime. Group: %3$s.',
 					$this->formatPct($row['pct'], 2),
@@ -1357,6 +1471,16 @@ class ReportDataHelper {
 
 	// ---------------------------------------------------------------- formatting
 
+	/**
+	 * The availability target with exactly the precision the user set - a
+	 * 99.95% target must never round up to "100.0%".
+	 */
+	public function formatTargetPct(float $target): string {
+		$text = rtrim(rtrim(number_format($target, 3, '.', ''), '0'), '.');
+
+		return $text.'%';
+	}
+
 	public function formatPct(?float $value, int $decimals = 2): string {
 		if ($value === null) {
 			return '—';
@@ -1408,7 +1532,9 @@ class ReportDataHelper {
 
 	public function shortMonth(string $ym): string {
 		if (preg_match('/^(\d{4})-(\d{2})$/', $ym, $matches) === 1) {
-			return gmdate('M', gmmktime(0, 0, 0, (int) $matches[2], 1, (int) $matches[1]));
+			// The 12-period window nearly always crosses a year boundary, so
+			// every label carries its year: "Sep '25".
+			return gmdate("M 'y", gmmktime(0, 0, 0, (int) $matches[2], 1, (int) $matches[1]));
 		}
 
 		return $ym;
@@ -1443,7 +1569,7 @@ class ReportDataHelper {
 		$rows = [];
 
 		foreach ($groups as $group) {
-			foreach ($group['rows'] as $row) {
+			foreach (($group['rows_all'] ?? $group['rows']) as $row) {
 				$rows[] = [
 					$group['name'],
 					$row['host'],
@@ -1521,53 +1647,15 @@ class ReportDataHelper {
 	}
 
 	/**
-	 * Estimate how many polls SHOULD have produced a sample but did not, by
-	 * walking the observed clocks and counting whole step-sized gaps. Used as
-	 * the downtime portion of the availability denominator.
+	 * Polling interval for an availability item: the configured delay when it
+	 * is a positive number, else the median of the observed sample deltas
+	 * (collected while streaming), else 60s.
 	 */
-	private function countMissingSamples(array $history, int $start, int $end, int $step): int {
-		if ($step <= 0) {
-			return 0;
-		}
-
-		$observed = count($history);
-
-		if ($observed === 0) {
-			return max(0, (int) floor(max(0, $end - $start) / $step));
-		}
-
-		$missing = max(0, (int) floor((((int) $history[0]['clock']) - $start) / $step));
-
-		for ($i = 1; $i < $observed; $i++) {
-			$gap = (int) $history[$i]['clock'] - (int) $history[$i - 1]['clock'];
-
-			if ($gap > $step) {
-				$missing += max(0, (int) floor($gap / $step) - 1);
-			}
-		}
-
-		$missing += max(0, (int) floor(($end - (int) $history[$observed - 1]['clock']) / $step));
-
-		return $missing;
-	}
-
-	/**
-	 * Polling interval for an availability item: the configured delay when it is
-	 * numeric, else the median observed clock delta, else 60s.
-	 */
-	private function inferInterval(array $history, ?string $delay): int {
+	private function inferIntervalFromDeltas(array $deltas, ?string $delay): int {
 		$parsed_delay = $this->parseDelayToSeconds($delay);
 
 		if ($parsed_delay !== null && $parsed_delay > 0) {
 			return $parsed_delay;
-		}
-
-		$deltas = [];
-		for ($i = 1; $i < count($history); $i++) {
-			$delta = (int) $history[$i]['clock'] - (int) $history[$i - 1]['clock'];
-			if ($delta > 0) {
-				$deltas[] = $delta;
-			}
 		}
 
 		if ($deltas === []) {

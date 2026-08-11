@@ -30,25 +30,32 @@
 			</span>
 		</div>
 		<p class="sr-panel-sub">
+			<?php $service_count = count($sla['services']); ?>
 			<?php if ((int) $sla['below'] === 0 && (int) $sla['na'] === 0): ?>
 				<?= $esc(sprintf(
-					_('All %1$d services meet their SLO in the latest measured month. 12-month average %2$s.'),
-					count($sla['services']),
+					$service_count === 1
+						? _('The service meets its SLO in the latest measured period. 12-period average %2$s.')
+						: _('All %1$d services meet their SLO in the latest measured period. 12-period average %2$s.'),
+					$service_count,
 					$helper->formatPct($sla['avg'], 2)
 				)) ?>
 			<?php elseif ((int) $sla['below'] > 0): ?>
 				<?= $esc(sprintf(
-					(int) $sla['below'] === 1
-						? _('%1$d of %2$d services is below its SLO in the latest measured month. 12-month average %3$s.')
-						: _('%1$d of %2$d services are below their SLO in the latest measured month. 12-month average %3$s.'),
+					$service_count === 1
+						? _('The service is below its SLO in the latest measured period. 12-period average %3$s.')
+						: ((int) $sla['below'] === 1
+							? _('%1$d of %2$d services is below its SLO in the latest measured period. 12-period average %3$s.')
+							: _('%1$d of %2$d services are below their SLO in the latest measured period. 12-period average %3$s.')),
 					(int) $sla['below'],
-					count($sla['services']),
+					$service_count,
 					$helper->formatPct($sla['avg'], 2)
 				)) ?>
 			<?php else: ?>
 				<?= $esc(sprintf(
-					_('%1$d services, 12-month average %2$s.'),
-					count($sla['services']),
+					$service_count === 1
+						? _('1 service, 12-period average %2$s.')
+						: _('%1$d services, 12-period average %2$s.'),
+					$service_count,
 					$helper->formatPct($sla['avg'], 2)
 				)) ?>
 			<?php endif; ?>
@@ -64,7 +71,10 @@
 							<th class="sr-heat-head" title="<?= $esc($month) ?>"><?= $esc($helper->shortMonth($month)) ?></th>
 						<?php endforeach; ?>
 						<th class="sr-num"><?= $esc(_('Breaches')) ?></th>
-						<th style="min-width:180px"><?= $esc(_('Error budget this period')) ?></th>
+						<th style="min-width:180px"><?= $esc(sprintf(
+							_('Error budget (%1$s)'),
+							$sla['months'] !== [] ? $helper->shortMonth((string) end($sla['months'])) : _('this period')
+						)) ?></th>
 					</tr>
 				</thead>
 				<tbody>
@@ -114,7 +124,7 @@
 		</div>
 
 		<p class="sr-hint" style="margin-top:10px">
-			<?= $esc(_('Cells are tinted against the SLO: green at or above, amber less than half a point below, red further below. A dash means the month was not measured.')) ?>
+			<?= $esc(_('Cells are tinted against the SLO: green at or above, amber up to half a point below, red further below. A dash means the period was not measured.')) ?>
 		</p>
 	</div>
 <?php endforeach; ?>

@@ -1,0 +1,116 @@
+name: Modules
+
+# Repo-wide guard: every frontend module must parse on every supported PHP
+# version, and every standalone test suite must pass. This is the only CI
+# workflow - per-module workflows were folded in here.
+
+on:
+  push:
+    paths:
+      - 'AI/**'
+      - 'Branding/**'
+      - 'Capacity_Planning/**'
+      - 'Healthcheck/**'
+      - 'Incident_timeline_graph/**'
+      - 'NetBoxSync/**'
+      - 'NetworkMap/**'
+      - 'sla_uptime_report/**'
+      - 'Todays_Reminder/**'
+      - 'TriggerCorrelation/**'
+      - 'veeam_backup_report/**'
+      - '.github/workflows/modules.yml'
+  pull_request:
+    paths:
+      - 'AI/**'
+      - 'Branding/**'
+      - 'Capacity_Planning/**'
+      - 'Healthcheck/**'
+      - 'Incident_timeline_graph/**'
+      - 'NetBoxSync/**'
+      - 'NetworkMap/**'
+      - 'sla_uptime_report/**'
+      - 'Todays_Reminder/**'
+      - 'TriggerCorrelation/**'
+      - 'veeam_backup_report/**'
+      - '.github/workflows/modules.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modules-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  php:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Supported PHP versions only (https://www.php.net/supported-versions.php):
+        # 8.2/8.3 on security support, 8.4/8.5 active. Drop versions as they go EOL.
+        php: ['8.2', '8.3', '8.4', '8.5']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+
+      - name: Syntax check every module
+        run: |
+          fail=0
+          for module in AI Branding Capacity_Planning Healthcheck Incident_timeline_graph \
+              NetBoxSync NetworkMap sla_uptime_report Todays_Reminder TriggerCorrelation \
+              veeam_backup_report; do
+            bad=$(find "$module" -name '*.php' -print0 | xargs -0 -n1 php -l 2>&1 \
+              | grep -v 'No syntax errors' || true)
+            if [ -n "$bad" ]; then
+              echo "::error::Syntax errors in $module"
+              echo "$bad"
+              fail=1
+            else
+              echo "OK  $module"
+            fi
+          done
+          exit $fail
+
+      # Standalone suites (no Zabbix bootstrap needed).
+      - name: Veeam repository-grouping regressions
+        working-directory: veeam_backup_report
+        run: php tests/RepositoryGroupingTest.php
+
+      - name: AI security regressions
+        working-directory: AI
+        run: php tests/security_regression.php
+
+      - name: Capacity Planning calculation regressions
+        working-directory: Capacity_Planning
+        run: php tests/CapacityPlanningMathTest.php
+
+      - name: Capacity Planning cache regressions
+        working-directory: Capacity_Planning
+        run: php tests/CapacityPlanningCacheTest.php
+
+  ui:
+    name: Capacity Planning Chromium UI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Capacity_Planning
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: Capacity_Planning/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Resolve locked Chromium executable
+        run: node -e "console.log('PLAYWRIGHT_CHROMIUM_EXECUTABLE=' + require('playwright').chromium.executablePath())" >> "$GITHUB_ENV"
+      - name: Verify release identity
+        run: npm run test:build
+      - name: Browser regressions
+        run: npm run test:ui

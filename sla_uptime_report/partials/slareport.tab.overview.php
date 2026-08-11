@@ -61,7 +61,7 @@ $sla_summary = $report['sla_summary'];
 		<p class="sr-panel-sub">
 			<?= $esc(sprintf(
 				_('Average availability of each group over this period, against the %1$s target.'),
-				$helper->formatPct((float) $filter['target'], 1)
+				$helper->formatTargetPct((float) $filter['target'])
 			)) ?>
 		</p>
 
@@ -241,7 +241,9 @@ $sla_summary = $report['sla_summary'];
 				<div class="sr-attention-item sr-attention-item--<?= $esc($item['severity']) ?>">
 					<span class="sr-attention-bar" aria-hidden="true"></span>
 					<div class="sr-attention-body">
-						<div class="sr-attention-title"><?= $esc($item['title']) ?></div>
+						<div class="sr-attention-title"><span class="sr-sr-only"><?= $esc($item['severity'] === 'critical'
+							? _('Critical:')
+							: ($item['severity'] === 'warning' ? _('Warning:') : _('Info:'))) ?> </span><?= $esc($item['title']) ?></div>
 						<div class="sr-attention-detail"><?= $esc($item['detail']) ?></div>
 					</div>
 					<span class="sr-attention-scope"><?= $esc($item['scope']) ?></span>
