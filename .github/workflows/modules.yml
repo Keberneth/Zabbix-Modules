@@ -52,7 +52,7 @@ jobs:
         # 8.2/8.3 on security support, 8.4/8.5 active. Drop versions as they go EOL.
         php: ['8.2', '8.3', '8.4', '8.5']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
@@ -100,10 +100,12 @@ jobs:
       run:
         working-directory: Capacity_Planning
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          # Supported LTS only (same policy as the PHP matrix): Node 20 went
+          # EOL in April 2026.
+          node-version: '22'
           cache: npm
           cache-dependency-path: Capacity_Planning/package-lock.json
       - run: npm ci
