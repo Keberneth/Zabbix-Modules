@@ -313,10 +313,24 @@ ob_start();
                     <strong><?= $h(_('Encryption ready — plaintext migration pending')) ?></strong>
                     <?= $h(sprintf(_('%d inline secret value(s) are still stored as legacy plaintext. The key is ready, but the database is not fully protected until you click Save settings once or replace those values with env:/file: references.'), $plaintext_secret_count)) ?>
                 </div>
+            <?php elseif (!empty($secret_storage['plaintext_allowed'])): ?>
+                <div class="ai-danger-notice" role="alert">
+                    <p><strong><?= $h(_('Secret storage: unencrypted — compatibility mode active')) ?></strong></p>
+                    <p><?= $h(!empty($secret_storage['has_key'])
+                        ? sprintf(_('An encryption key is configured but no crypto backend is available in this PHP SAPI (backend: %s), and the warned compatibility option is in force, so nothing this module stores is encrypted at rest. Inline API keys, custom headers, tokens and the webhook shared secret are readable in the Zabbix database. Confirmed AI writes, sensitive reads and bulk previews do run, but their staged payloads — target IDs, parameters, macro and password values — are written unencrypted under the module state path. Install Sodium or OpenSSL for the serving PHP process to restore encryption at rest.'), (string) ($secret_storage['backend'] ?? 'none'))
+                        : _('No encryption key is configured and the warned compatibility option is in force, so nothing this module stores is encrypted at rest. Inline API keys, custom headers, tokens and the webhook shared secret are readable in the Zabbix database. Confirmed AI writes, sensitive reads and bulk previews do run, but their staged payloads — target IDs, parameters, macro and password values — are written unencrypted under the module state path, and provider, Zabbix and NetBox confirmation identity digests are unkeyed instead of keyed HMACs.')) ?></p>
+                    <?php if ($plaintext_secret_count > 0): ?>
+                        <p><strong><?= $h(sprintf(_('%d existing inline secret value(s) are currently plaintext.'), $plaintext_secret_count)) ?></strong></p>
+                    <?php endif; ?>
+                    <p><?= $h(!empty($secret_storage['environment_plaintext_allowed'])
+                        ? _('In force via the ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS server override.')
+                        : _('In force via the settings option below.')) ?></p>
+                    <p><?= $h(_('Use this only on an isolated development system. Recommended: set ZABBIX_AI_ENCRYPTION_KEY_FILE to a protected runtime credential file, then re-save this page to migrate legacy plaintext.')) ?></p>
+                </div>
             <?php else: ?>
                 <div class="ai-warning">
                     <strong><?= $h(_('Secret storage: encryption required')) ?></strong>
-                    <?= $h(_('Without the explicitly warned compatibility option below, stored inline API keys, custom headers, tokens and webhook secrets cannot be saved or later used. A freshly typed connection-test credential is request-local and is never persisted. Confirmed AI writes, sensitive reads, and bulk previews cannot be staged under any plaintext override.')) ?>
+                    <?= $h(_('Without the explicitly warned compatibility option below, stored inline API keys, custom headers, tokens and webhook secrets cannot be saved or later used, and confirmed AI writes, sensitive reads and bulk previews cannot be staged. A freshly typed connection-test credential is request-local and is never persisted.')) ?>
                     <?php if ($plaintext_secret_count > 0): ?>
                         <br><strong><?= $h(sprintf(_('%d existing inline secret value(s) are currently plaintext.'), $plaintext_secret_count)) ?></strong>
                     <?php endif; ?>
@@ -337,15 +351,15 @@ ob_start();
                     >
                     <?= $h(_('Allow inline secrets to be read and saved as plaintext when encryption is unavailable')) ?>
                 </label>
-                <p><?= $h(_('If enabled, provider keys/headers, Zabbix and NetBox tokens, and the webhook secret may be readable in the Zabbix database, database dumps, backups, and configuration exports. This does not enable pending writes, sensitive-read confirmations, or bulk previews; those still require encryption. Prefer env:/file: references.')) ?></p>
+                <p><?= $h(_('If enabled, provider keys/headers, Zabbix and NetBox tokens, and the webhook secret may be readable in the Zabbix database, database dumps, backups, and configuration exports. It also lets pending writes, sensitive-read confirmations and bulk previews run with no encryption key: their staged payloads are written unencrypted under the module state path, and confirmation identity digests become unkeyed hashes instead of keyed HMACs. Prefer env:/file: references.')) ?></p>
                 <p><?= $h(_('This is the settings-managed equivalent of ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS=1 for module-config credentials; it does not modify the PHP process environment.')) ?></p>
                 <?php if (!empty($secret_storage['plaintext_allowed'])): ?>
-                    <p><strong><?= $h(_('Compatibility mode is active. Inline module credentials may remain plaintext until you disable every override and save with encryption available.')) ?></strong></p>
+                    <p><strong><?= $h(_('Compatibility mode is active. Inline module credentials, and any pending write, sensitive-read or bulk-preview payload staged while no key is configured, remain unencrypted until you disable every override and save with encryption available.')) ?></strong></p>
                 <?php endif; ?>
                 <div id="ai-plaintext-risk-ack" style="<?= !empty($secret_storage['configured_plaintext_allowed']) ? 'display:none;' : '' ?>">
                     <label class="ai-checkbox ai-checkbox-danger">
                         <input id="ai-plaintext-risk-acknowledged" type="checkbox" name="secret_storage[plaintext_risk_acknowledged]" value="1">
-                        <?= $h(_('I understand that this exposes configured credentials in plaintext at rest.')) ?>
+                        <?= $h(_('I understand that this exposes configured credentials and staged confirmed-action payloads in plaintext at rest.')) ?>
                     </label>
                     <p class="ai-muted"><?= $h(_('This acknowledgment is one-time and is not stored. After a successful save, only the “Allow inline secrets…” option remains enabled.')) ?></p>
                 </div>
@@ -981,6 +995,20 @@ sudo -u $WEB_GROUP sh -c 'echo t &gt; /var/log/zabbix-ai/.t \
                     </label>
                     <label class="ai-checkbox"><input type="checkbox" name="zabbix_actions[require_super_admin_for_write]" value="1" <?= !empty($config['zabbix_actions']['require_super_admin_for_write']) ? 'checked' : '' ?>> <?= $h(_('Restrict write actions')) ?></label>
                 </div>
+            </div>
+            <?php $auto_reads = (string) ($config['zabbix_actions']['problem_drawer_auto_reads'] ?? 'off'); ?>
+            <div class="ai-danger-notice" id="ai-problem-drawer-auto-reads" role="alert">
+                <p><strong><?= $h(_('Problems-page AI drawer: privacy confirmations for reads')) ?></strong></p>
+                <label class="ai-label" for="ai-problem-drawer-auto-reads-select"><?= $h(_('Confirmation level')) ?></label>
+                <select id="ai-problem-drawer-auto-reads-select" class="ai-input" name="zabbix_actions[problem_drawer_auto_reads]">
+                    <option value="off" <?= $auto_reads === 'off' ? 'selected' : '' ?>><?= $h(_('Confirm every sensitive read (recommended, default)')) ?></option>
+                    <option value="triage" <?= $auto_reads === 'triage' ? 'selected' : '' ?>><?= $h(_('Auto-approve event-scoped triage reads')) ?></option>
+                    <option value="all" <?= $auto_reads === 'all' ? 'selected' : '' ?>><?= $h(_('Auto-approve every sensitive read')) ?></option>
+                </select>
+                <p><?= $h(_('Applies only to the AI drawer opened from a row on the Problems page, and only when the server resolves that event itself under the same Zabbix identity the reads will use. The full AI chat page always asks. Write actions always pause for confirmation and are not affected by this setting at any level.')) ?></p>
+                <p><?= $h(_('Auto-approve event-scoped triage reads: exempts related problems, event timeline, problems, problem graph, host info, host interfaces, items, triggers, trigger dependencies, unsupported items, active maintenance, alerts and actions for the event, escalation path, and service impact. Note that the two event-scoped alert/action reads in that set do disclose the notification recipients and media addresses used for the event. Fleet inventory, the media-type and action configuration, effective macro values, NetBox records, audit history, the service tree, bulk previews and report builders keep asking.')) ?></p>
+                <p><?= $h(_('Auto-approve every sensitive read: also exempts those remaining reads on this surface, including the six bulk previews that are otherwise an operator\'s last look before a bulk write. Redaction still masks hostnames, addresses, FQDNs, URLs and OS strings, but it does not mask macro values, notification destinations, usernames, item keys, trigger expressions or free text — those reach the AI provider without a per-call confirmation.')) ?></p>
+                <p><?= $h(_('At either level the results stay in ordinary chat history rather than being shown once and dropped, so continuing the conversation in the full AI chat page can re-send them. Auto-approved reads are recorded as zabbix.sensitive_read.auto_confirmed with the tool name and event ID — but only when module logging is enabled on the Logging tab, which is off by default. Turn logging on if you want that trail.')) ?></p>
             </div>
             <div id="ai-write-permissions" style="<?= (($config['zabbix_actions']['mode'] ?? 'read') === 'readwrite') ? '' : 'display:none;' ?>">
                 <h3><?= $h(_('Write permissions')) ?></h3>

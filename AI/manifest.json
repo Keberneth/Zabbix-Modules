@@ -203,6 +203,7 @@
         "hostgroups": false
       },
       "require_super_admin_for_write": true,
+      "problem_drawer_auto_reads": "off",
       "web_scenario_allowed_origins": ""
     }
   }

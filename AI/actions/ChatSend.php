@@ -43,6 +43,11 @@ class ChatSend extends CController {
 
             $requested_provider_id = trim((string) ($post['provider_id'] ?? ''));
             $provider_user_override = Util::truthy($post['provider_user_override'] ?? false);
+            // Which UI opened this turn. Only the Problems-page drawer claims
+            // 'problem_drawer'. This marker is browser-supplied and grants
+            // nothing on its own: it is always conjoined with the administrator
+            // setting and with a server-resolved problem context below.
+            $surface = trim((string) ($post['surface'] ?? ''));
 
             $history = Util::normalizeMessages(
                 Util::decodeJsonArray($post['history_json'] ?? '[]'),
@@ -134,13 +139,28 @@ class ChatSend extends CController {
             $actions_enabled = Util::truthy($actions_config['enabled'] ?? false)
                 && $zabbix_api !== null
                 && !Util::truthy($post['disable_actions'] ?? false);
+
+            // Read auto-approval level for this turn. It requires all three of:
+            // an administrator opt-in, the Problems-page drawer, and a problem
+            // context this server actually resolved through the same Zabbix
+            // identity the reads will use. A crafted POST cannot supply the
+            // third. Writes are never covered — see the gate below.
+            $auto_read_level = (string) ($actions_config['problem_drawer_auto_reads'] ?? 'off');
+            $auto_read_scope_ok = in_array($auto_read_level, ['triage', 'all'], true)
+                && $surface === 'problem_drawer'
+                && is_array($context['problem_context'] ?? null);
+
             $permissions = [];
             $native_tools = [];
 
             if ($actions_enabled) {
                 $permissions = $this->buildActionPermissions($actions_config);
                 $native_tools = ZabbixActionExecutor::getNativeToolDefinitions($permissions);
-                $actions_prompt = PromptBuilder::buildActionsSystemPrompt($config, $permissions);
+                $actions_prompt = PromptBuilder::buildActionsSystemPrompt(
+                    $config,
+                    $permissions,
+                    $auto_read_scope_ok ? $auto_read_level : 'off'
+                );
                 if ($actions_prompt !== '') {
                     $system_prompt .= "\n\n".$actions_prompt;
                 }
@@ -284,6 +304,15 @@ class ChatSend extends CController {
                     $write_category = ZabbixActionExecutor::getWriteCategory($tool_name);
                     $sensitive_read = ZabbixActionExecutor::requiresSensitiveReadConfirmation($tool_name);
 
+                    // Conjoined with $write_category === '' at the assignment
+                    // site so this can never be true for a write, whatever the
+                    // allowlist or the setting says.
+                    $auto_confirm_read = $write_category === ''
+                        && $sensitive_read
+                        && $auto_read_scope_ok
+                        && ($auto_read_level === 'all'
+                            || ZabbixActionExecutor::isProblemTriageAutoRead($tool_name));
+
                     if ($write_category !== '') {
                         $tool_params = ZabbixActionExecutor::normalizeWriteParamsForConfirmation(
                             $tool_name,
@@ -291,9 +320,10 @@ class ChatSend extends CController {
                         );
                     }
 
-                    if ($write_category !== '' || $sensitive_read) {
+                    if ($write_category !== '' || ($sensitive_read && !$auto_confirm_read)) {
                         // Writes and privacy-sensitive reads pause for a server-
-                        // generated, hash-bound operator confirmation.
+                        // generated, hash-bound operator confirmation. The write
+                        // disjunct is unconditional: no setting can bypass it.
                         $confirmation_api = $zabbix_api;
                         if ($write_category !== '') {
                         $permissions = $this->buildActionPermissions($actions_config);
@@ -508,6 +538,23 @@ class ChatSend extends CController {
                             'provider_name' => $active_provider['name'] ?? 'AI'
                         ]);
                         return;
+                    }
+
+                    // A privacy-sensitive read that ran without the operator's
+                    // per-call click is still fully accountable in the audit log.
+                    if ($auto_confirm_read) {
+                        AuditLogger::log($config, 'reads', [
+                            'event' => 'zabbix.sensitive_read.auto_confirmed',
+                            'source' => 'ai.chat.send',
+                            'status' => 'ok',
+                            'tool' => $tool_name,
+                            'meta' => [
+                                'surface' => 'problem_drawer',
+                                'auto_read_level' => $auto_read_level,
+                                'eventid' => (string) ($context['eventid'] ?? ''),
+                                'chat_session_id' => $chat_session_id
+                            ]
+                        ]);
                     }
 
                     // Read tool: execute it for real.

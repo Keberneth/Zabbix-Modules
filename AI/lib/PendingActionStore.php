@@ -7,6 +7,7 @@ use RuntimeException;
 class PendingActionStore {
 
     private const PAYLOAD_HASH_VERSION = 'zabbix-ai-confirmation-v2';
+    private const PLAINTEXT_DIGEST_VERSION = 'zabbix-ai-pending-plaintext-v1';
 
     public static function create(array $config, string $server_session_id, array $action, int $ttl_seconds = 1800): string {
         $server_session_id = trim($server_session_id);
@@ -22,10 +23,7 @@ class PendingActionStore {
             throw new RuntimeException('Could not encode the pending action payload.');
         }
 
-        // Pending actions can contain passwords, macro values, sensitive-read
-        // source bindings and write parameters. Unlike long-lived config secrets, they must never fall
-        // back to plaintext storage when the encryption key is missing.
-        $action_encrypted = Crypto::encryptRequired($action_json, 'pending action payload');
+        $allow_plaintext = Config::allowsPlaintextSecrets($config);
 
         $id = Util::generateId('action');
         $data = [
@@ -33,8 +31,38 @@ class PendingActionStore {
             'server_session_hash' => hash('sha256', $server_session_id),
             'created_at' => time(),
             'expires_at' => time() + max(300, $ttl_seconds),
-            'action_encrypted' => $action_encrypted
+            'storage' => 'encrypted'
         ];
+
+        // Pending actions can contain passwords, macro values, sensitive-read
+        // source bindings and write parameters. They fall back to unencrypted
+        // storage ONLY under the explicitly armed development compatibility
+        // policy, and only while no key exists; an available key always wins.
+        // The record self-declares its storage mode under a distinct field so a
+        // protected deployment can hard-reject an injected plaintext payload.
+        if (!Crypto::isAvailable() && $allow_plaintext) {
+            $data['storage'] = 'plaintext';
+            $data['action_plaintext'] = $action_json;
+            // Without a deployment key there is no encryption to authenticate
+            // the payload, so bind it to the operator's server session instead.
+            // Only the session's SHA-256 is written to the record, so an actor
+            // who can read or rewrite the state directory still cannot compute
+            // a matching digest for substituted parameters or target IDs.
+            $data['action_digest'] = self::plaintextDigest($action_json, $server_session_id);
+
+            AuditLogger::log($config, 'writes', [
+                'event' => 'pending_action.staged_unencrypted',
+                'source' => 'pending_action_store',
+                'status' => 'warning',
+                'meta' => [
+                    'action_id' => $id,
+                    'reason' => 'plaintext compatibility mode is armed and encryption is unavailable'
+                ]
+            ]);
+        }
+        else {
+            $data['action_encrypted'] = Crypto::encryptRequired($action_json, 'pending action payload');
+        }
 
         Filesystem::writeJsonAtomic(self::path($config, $id), $data);
         self::cleanup($config);
@@ -85,7 +113,11 @@ class PendingActionStore {
             throw new RuntimeException('Pending action expired. Please ask the AI to generate it again.');
         }
 
-        $data['action'] = self::decryptAction($data);
+        $data['action'] = self::decryptAction(
+            $data,
+            Config::allowsPlaintextSecrets($config),
+            $server_session_id
+        );
 
         return $data;
     }
@@ -114,6 +146,12 @@ class PendingActionStore {
         }
         elseif ($level === 'sensitive_read') {
             $lines[] = '> **Privacy check:** This read may retrieve fleet problem/maintenance data, event comments, broad inventory, contact, NetBox, macro or audit data. Unless the result is returned only as a local artifact, it will be sent to the configured AI provider for formatting. Confirm only if that is what you requested.';
+            $lines[] = '';
+        }
+
+        if (!Crypto::isAvailable() && Config::allowsPlaintextSecrets($config)) {
+            $lines[] = '> **Unencrypted staging:** plaintext compatibility mode is active. This pending '
+                .'action is stored unencrypted under the module state path until it is executed or expires.';
             $lines[] = '';
         }
 
@@ -188,9 +226,20 @@ class PendingActionStore {
             return;
         }
 
+        // Once a key exists, unencrypted records staged earlier under the
+        // compatibility policy can never be honoured again (decryptAction()
+        // refuses them), so drop them rather than leaving readable action
+        // parameters on disk for the rest of their TTL. The reverse is
+        // deliberately not done: an encrypted record is kept even while the key
+        // is unreadable, so a transient key-availability problem cannot destroy
+        // valid pending previews.
+        $encryption_available = Crypto::isAvailable();
+
         foreach (Filesystem::safeGlob($dir.'/pending_*.json') as $file) {
             $data = Filesystem::readJson($file);
-            if ($data === [] || (int) ($data['expires_at'] ?? 0) < time()) {
+            $orphaned_plaintext = $encryption_available
+                && (string) ($data['storage'] ?? 'encrypted') === 'plaintext';
+            if ($data === [] || $orphaned_plaintext || (int) ($data['expires_at'] ?? 0) < time()) {
                 @unlink($file);
             }
         }
@@ -246,7 +295,7 @@ class PendingActionStore {
                 throw new RuntimeException('Pending action expired. Please ask the AI to generate it again.');
             }
 
-            $action = self::decryptAction($data);
+            $action = self::decryptAction($data, Config::allowsPlaintextSecrets($config), $server_session_id);
 
             if ($expected_payload_hash !== '') {
                 $tool_name = trim((string) ($action['tool'] ?? ''));
@@ -290,15 +339,53 @@ class PendingActionStore {
         }
     }
 
-    private static function decryptAction(array $data): array {
-        $encrypted = (string) ($data['action_encrypted'] ?? '');
-        if ($encrypted === '' || !Crypto::isEncrypted($encrypted)) {
-            throw new RuntimeException(
-                'Pending action is not encrypted. Generate a new preview after configuring '
-                .'ZABBIX_AI_ENCRYPTION_KEY_FILE or ZABBIX_AI_ENCRYPTION_KEY.'
-            );
+    /** Session-bound tamper-evidence for records that could not be encrypted. */
+    private static function plaintextDigest(string $action_json, string $server_session_id): string {
+        return hash_hmac('sha256', $action_json, self::PLAINTEXT_DIGEST_VERSION."\0".$server_session_id);
+    }
+
+    private static function decryptAction(array $data, bool $allow_plaintext, string $server_session_id): array {
+        $mode = (string) ($data['storage'] ?? 'encrypted');
+
+        if ($mode === 'plaintext') {
+            // Downgrade resistance: an unencrypted payload is honoured only
+            // when this deployment has explicitly armed plaintext compatibility
+            // AND has no key at all. Anything else is treated as tampering.
+            if (!$allow_plaintext || Crypto::isAvailable()) {
+                throw new RuntimeException(
+                    'Refusing an unencrypted pending action. Generate a new preview after configuring '
+                    .'ZABBIX_AI_ENCRYPTION_KEY_FILE or ZABBIX_AI_ENCRYPTION_KEY.'
+                );
+            }
+            if (array_key_exists('action_encrypted', $data)) {
+                throw new RuntimeException('Pending action declares conflicting storage modes.');
+            }
+            $plain = (string) ($data['action_plaintext'] ?? '');
+            if ($plain === '') {
+                throw new RuntimeException('Pending action payload is missing.');
+            }
+            // An unencrypted record is the one case where nothing about the
+            // payload is authenticated by the storage layer itself, so the
+            // session-bound digest is mandatory here, including on the unbound
+            // consume() path used by bulk-preview application.
+            $digest = (string) ($data['action_digest'] ?? '');
+            if ($digest === ''
+                    || !hash_equals(self::plaintextDigest($plain, $server_session_id), $digest)) {
+                throw new RuntimeException(
+                    'The pending action was modified after it was staged. Review a fresh preview.'
+                );
+            }
         }
-        $plain = Crypto::decryptRequired($encrypted, 'pending action payload');
+        else {
+            $encrypted = (string) ($data['action_encrypted'] ?? '');
+            if ($encrypted === '' || !Crypto::isEncrypted($encrypted)) {
+                throw new RuntimeException(
+                    'Pending action is not encrypted. Generate a new preview after configuring '
+                    .'ZABBIX_AI_ENCRYPTION_KEY_FILE or ZABBIX_AI_ENCRYPTION_KEY.'
+                );
+            }
+            $plain = Crypto::decryptRequired($encrypted, 'pending action payload');
+        }
 
         $action = json_decode($plain, true);
         if (!is_array($action)) {

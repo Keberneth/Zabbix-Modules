@@ -8,7 +8,9 @@ preference:
 2. **Encrypted inline secret:** the secret is stored as authenticated ciphertext
    (`enc:v1:...`) in the Zabbix module configuration.
 3. **Plaintext compatibility mode:** an explicitly warned, development-only
-   fallback. Do not use this in production.
+   fallback. It also governs whether pending confirmations, sensitive reads and
+   bulk previews can run without an encryption key, and how their identity
+   digests are derived. Do not use this in production.
 
 No external vault service is required. A local encrypted source such as an
 [Ansible Vault](https://docs.ansible.com/projects/ansible/latest/vault_guide/vault.html)
@@ -31,8 +33,14 @@ The module stores or references these credentials:
 - NetBox tokens
 - the standalone webhook shared secret
 
-Pending writes, sensitive reads, and bulk previews are always encrypted in the
-local state directory. They never use plaintext compatibility mode.
+Pending writes, sensitive reads, and bulk previews are encrypted in the local
+state directory whenever an encryption key is configured. Under plaintext
+compatibility mode they are stored unencrypted, so the state directory then
+holds readable action parameters. Confidentiality is lost; tamper detection is
+not, because each unencrypted record carries an HMAC keyed with the operator's
+server session ID, of which only a SHA-256 is written to the record. A modified
+record is refused with "The pending action was modified after it was staged."
+That mode is for isolated development systems only.
 
 ## Recommended: keep credentials out of the database
 
@@ -234,9 +242,10 @@ saved. The module derives a 256-bit key and uses Sodium `secretbox` when
 available, otherwise AES-256-GCM through OpenSSL. Database dumps, backups, and
 module exports contain `enc:v1:...` ciphertext instead of the credential.
 
-The encryption key is also mandatory for pending confirmations. Therefore,
-configure it even when every long-lived credential uses a reference if you want
-Read & Write actions, sensitive reads, or bulk previews.
+The encryption key is what keeps pending confirmations confidential at rest.
+Configure it for any non-development deployment even when every long-lived
+credential uses a reference, so Read & Write actions, sensitive reads and bulk
+previews are staged as ciphertext.
 
 ### Recommended master-key source: a protected runtime file
 
@@ -332,9 +341,14 @@ The server-side environment override remains supported:
 ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS=1
 ```
 
-The Settings checkbox cannot disable an environment-managed override. Neither
-form of override enables pending confirmed actions; those always require the
-encryption key and a Sodium/OpenSSL backend.
+The Settings checkbox cannot disable an environment-managed override. Either
+form of override also lets pending confirmed actions, sensitive reads and bulk
+previews run with no encryption key. The cost is that their staged payloads are
+written unencrypted under the module state path, and provider/Zabbix/NetBox
+confirmation identity digests fall back from a keyed HMAC to an unkeyed,
+purpose-domain-separated SHA-256 (prefixed `u1:` so it can never be confused
+with a keyed value). A Sodium or OpenSSL backend is required only for
+encrypted-at-rest operation.
 
 ## Verification
 
@@ -370,14 +384,24 @@ enabled.
 
 ## Troubleshooting
 
-**The banner still says encryption is required.**
+**The banner reports encryption is required, or unencrypted compatibility mode.**
 
+- If compatibility mode is intentionally enabled, the page reports unencrypted
+  compatibility storage rather than "encryption required", and chat,
+  host/problem context, tool calls, confirmations, pending writes, sensitive
+  reads and bulk previews all function without a key.
 - Confirm the variable is visible to the PHP-FPM pool, not only your shell.
 - Confirm `ZABBIX_AI_ENCRYPTION_KEY_FILE` is absolute and its file is readable
   by the PHP worker.
 - On POSIX, confirm the key file and its containing directory are not group/world
   writable.
 - Confirm Sodium or OpenSSL is available.
+
+**"Cannot bind provider authentication identity without ZABBIX_AI_ENCRYPTION_KEY…"**
+
+- This must no longer appear while compatibility mode is active. If it does, the
+  Settings checkbox did not persist (check the save confirmation) or the
+  environment override is not visible to the PHP-FPM pool.
 
 **A `file:NAME` reference is refused.**
 

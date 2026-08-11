@@ -100,6 +100,36 @@ class ZabbixActionExecutor {
         'generate_evidence_bundle'
     ];
 
+    /**
+     * The event- and host-scoped subset of SENSITIVE_READ_TOOLS that an
+     * administrator may exempt from the confirmation click for the Problems-page
+     * AI drawer (see zabbix_actions.problem_drawer_auto_reads = 'triage').
+     *
+     * Membership is deliberately an allowlist, not a denylist: a read added to
+     * SENSITIVE_READ_TOOLS later keeps asking until someone opts it in here.
+     * Everything omitted returns data the Redactor cannot mask — effective macro
+     * values, notification contacts, audit history, usernames, NetBox records —
+     * or enumerates the whole fleet rather than the problem in front of the
+     * operator.
+     */
+    private const PROBLEM_TRIAGE_AUTO_READS = [
+        'get_related_problems',
+        'get_event_timeline',
+        'get_problems',
+        'generate_problem_graph',
+        'get_host_info',
+        'get_host_interfaces',
+        'get_items',
+        'get_triggers',
+        'get_trigger_dependencies',
+        'get_unsupported_items',
+        'list_active_maintenance',
+        'get_alerts_for_event',
+        'get_actions_for_event',
+        'get_escalation_path',
+        'get_service_impact'
+    ];
+
     /** Every write must be reviewed into the explicit target-binding switch. */
     private const WRITE_BINDING_POLICY_TOOLS = [
         'create_maintenance', 'create_hostgroup_maintenance',
@@ -2613,6 +2643,24 @@ class ZabbixActionExecutor {
         $tool = self::allTools()[$tool_name] ?? null;
 
         return is_array($tool) && !empty($tool['sensitive_read']);
+    }
+
+    /**
+     * True for the event-scoped triage reads an administrator may auto-approve
+     * in the Problems-page drawer. A tool must still be a registered, read-only,
+     * sensitive read: pasting a write tool name into the allowlist has no
+     * effect, and neither does an unknown or misspelt name.
+     */
+    public static function isProblemTriageAutoRead(string $tool_name): bool {
+        if (!in_array($tool_name, self::PROBLEM_TRIAGE_AUTO_READS, true)) {
+            return false;
+        }
+
+        $tool = self::allTools()[$tool_name] ?? null;
+
+        return is_array($tool)
+            && ($tool['rw'] ?? '') === 'read'
+            && !empty($tool['sensitive_read']);
     }
 
     /**

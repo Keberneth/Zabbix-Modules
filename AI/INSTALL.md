@@ -87,9 +87,11 @@ The `httpd_can_network_connect` boolean is required for the module to make outbo
 
 ## 4. Required PHP modules
 
-The module uses cURL, JSON, and mbstring. Secure inline storage and every
-confirmed write, sensitive read, and bulk preview also require **either Sodium
-or OpenSSL in the PHP SAPI that actually serves Zabbix**. Verify the serving
+The module uses cURL, JSON, and mbstring. Encrypted-at-rest storage of inline
+secrets and of confirmed writes, sensitive reads and bulk previews also requires
+**either Sodium or OpenSSL in the PHP SAPI that actually serves Zabbix**. A
+development instance running in plaintext compatibility mode needs neither
+backend. Verify the serving
 PHP-FPM/mod_php installation:
 
 ```bash
@@ -132,14 +134,44 @@ specific runtime files PHP may read.
 `file:` accepts a logical name only—never an arbitrary path. Missing references
 fail closed and do not fall back to old database credentials.
 
-Read & Write actions, sensitive reads, and bulk previews additionally require a
-master key. Prefer materializing that key into a protected runtime file and set
+Read & Write actions, sensitive reads, and bulk previews are staged server-side
+and should be protected by a master key. Configure one for any non-development
+deployment. Prefer materializing that key into a protected runtime file and set
 only its path for PHP-FPM:
 
 ```ini
 env[ZABBIX_AI_SECRET_DIR] = "/run/zabbix-ai-provider-secrets"
 env[ZABBIX_AI_ENCRYPTION_KEY_FILE] = "/run/zabbix-ai-master/db_encryption_key"
 ```
+
+### Problems-page AI drawer: confirmation level for reads
+
+By default every privacy-sensitive read pauses for a **Confirm** click on every
+surface, so clicking **AI** on a problem row shows a preview before it analyses
+anything. If that is too much friction for your operators, a Super Admin can
+change **AI settings → Zabbix actions → Problems-page AI drawer: privacy
+confirmations for reads**:
+
+| Level | Effect |
+|---|---|
+| `off` (default) | Every sensitive read is confirmed, everywhere. |
+| `triage` | 15 event- and host-scoped triage reads run immediately in the drawer: related problems, event timeline, problems, problem graph, host info, host interfaces, items, triggers, trigger dependencies, unsupported items, active maintenance, alerts and actions for the event, escalation path, service impact. Note that `get_alerts_for_event` / `get_actions_for_event` do disclose the notification recipients and media addresses for that event. Fleet inventory, the media-type and action configuration, effective macro values, NetBox records, audit history, the service tree, bulk previews and report builders keep asking. |
+| `all` | Every sensitive read runs immediately in the drawer, including the six `preview_*` bulk previews that are otherwise the operator's last look before a bulk write. |
+
+The relaxation applies **only** to the drawer opened from a problem row, and only
+when the server itself resolves that event through the same Zabbix identity the
+reads will use. The full AI chat page always asks. **No write action can be
+auto-approved at any level** — the write branch of the confirmation gate is
+independent of this setting. Auto-approved reads are recorded as
+`zabbix.sensitive_read.auto_confirmed` with the tool name and event ID, but only
+if module logging is enabled (it is off by default); enable it on the Logging
+tab if you want that trail.
+
+Note that redaction masks hostnames, addresses, FQDNs, URLs and OS strings, but
+not macro values, notification destinations, usernames, item keys, trigger
+expressions or free text. At `all`, those reach the AI provider without a
+per-call confirmation.
+
 
 Reload the serving pool after changing this block:
 
@@ -175,8 +207,10 @@ paths. Apache mod_php and Docker/Compose variants are documented in
 For isolated development only, a Super Admin can enable the warned **Allow
 plaintext secrets** compatibility option in AI Settings (or use the legacy
 `ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS=1` server override). This can expose
-credentials in the database, dumps, backups, and exports. It never enables
-encrypted pending confirmations.
+credentials in the database, dumps, backups, and exports. It lets the whole
+module run with no encryption key — chat, host/problem context, tool calls,
+confirmation previews, pending writes, sensitive reads and bulk previews — with
+those confirmations stored unencrypted under the state path.
 
 See [ENCRYPTION.md](ENCRYPTION.md) for the complete local-vault/reference setup,
 Ansible-style example, database encryption, multi-node rules, rotation, and

@@ -124,9 +124,10 @@ class ChatExecute extends CController {
                 $expected_write_identity = is_array($confirmation_state['zabbix_write_identity'] ?? null)
                     ? $confirmation_state['zabbix_write_identity']
                     : null;
+                $actual_write_identity = $zabbix_api->confirmationIdentityFingerprint();
                 if ($expected_write_identity === null || !hash_equals(
                     PendingActionStore::stateHash($expected_write_identity),
-                    PendingActionStore::stateHash($zabbix_api->confirmationIdentityFingerprint())
+                    PendingActionStore::stateHash($actual_write_identity)
                 )) {
                     throw new \RuntimeException('The Zabbix write identity, destination, or transport policy changed after confirmation. Review a fresh preview.');
                 }
@@ -137,9 +138,10 @@ class ChatExecute extends CController {
                 $expected_read_identity = is_array($confirmation_state['zabbix_read_identity'] ?? null)
                     ? $confirmation_state['zabbix_read_identity']
                     : null;
+                $actual_read_identity = $zabbix_api->confirmationIdentityFingerprint();
                 if ($expected_read_identity === null || !hash_equals(
                     PendingActionStore::stateHash($expected_read_identity),
-                    PendingActionStore::stateHash($zabbix_api->confirmationIdentityFingerprint())
+                    PendingActionStore::stateHash($actual_read_identity)
                 )) {
                     throw new \RuntimeException('The Zabbix read identity, destination, or transport policy changed after confirmation. Review a fresh preview.');
                 }
@@ -148,9 +150,12 @@ class ChatExecute extends CController {
                     $expected_netbox = is_array($confirmation_state['netbox_source'] ?? null)
                         ? $confirmation_state['netbox_source']
                         : null;
+                    $actual_netbox = $netbox_client instanceof NetBoxClient
+                        ? $netbox_client->confirmationIdentityFingerprint()
+                        : [];
                     if ($expected_netbox === null || !($netbox_client instanceof NetBoxClient) || !hash_equals(
                         PendingActionStore::stateHash($expected_netbox),
-                        PendingActionStore::stateHash($netbox_client->confirmationIdentityFingerprint())
+                        PendingActionStore::stateHash($actual_netbox)
                     )) {
                         throw new \RuntimeException('The NetBox destination or credential changed after this sensitive-read confirmation. Review a fresh preview.');
                     }
@@ -187,12 +192,13 @@ class ChatExecute extends CController {
                 if ($bound_provider !== null) {
                     $bound_provider = Config::resolveProviderSecrets($bound_provider);
                 }
+                $actual_provider_egress = $bound_provider !== null
+                    ? Config::providerEgressFingerprint($bound_provider)
+                    : [];
                 if ($expected_provider === null || $bound_provider === null
                     || !hash_equals(
                         PendingActionStore::stateHash($expected_provider),
-                        PendingActionStore::stateHash(
-                            Config::providerEgressFingerprint($bound_provider)
-                        )
+                        PendingActionStore::stateHash($actual_provider_egress)
                     )) {
                     throw new \RuntimeException('The AI provider destination or credential changed after confirmation. Review a fresh preview.');
                 }

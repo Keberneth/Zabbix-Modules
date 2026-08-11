@@ -412,6 +412,10 @@
         params.set('chat_session_id', chat.sessionId);
         params.set('provider_id', defaultProviderId);
         params.set('provider_user_override', '0');
+        // Scopes the optional read auto-approval to this drawer. It grants
+        // nothing on its own: the server also requires the administrator
+        // setting and a problem context it resolved itself.
+        params.set('surface', 'problem_drawer');
         params.set(CSRF_FIELD, csrf);
 
         fetch(zbxUrl('ai.chat.send'), {

@@ -10,12 +10,20 @@ class NetBoxClient {
     private string $token;
     private bool $verify_peer;
     private int $timeout;
+    private bool $allow_unkeyed_identity;
 
-    public function __construct(string $url, string $token, bool $verify_peer = true, int $timeout = 10) {
+    public function __construct(
+        string $url,
+        string $token,
+        bool $verify_peer = true,
+        int $timeout = 10,
+        bool $allow_unkeyed_identity = false
+    ) {
         $this->url = rtrim(trim($url), '/');
         $this->token = trim($token);
         $this->verify_peer = $verify_peer;
         $this->timeout = $timeout;
+        $this->allow_unkeyed_identity = $allow_unkeyed_identity;
     }
 
     public static function fromConfig(array $config): ?self {
@@ -26,10 +34,11 @@ class NetBoxClient {
         }
 
         $url = trim((string) ($config['netbox']['url'] ?? ''));
+        $allow_plaintext = Config::allowsPlaintextSecrets($config);
         $token = Config::resolveSecret(
             $config['netbox']['token'] ?? '',
             $config['netbox']['token_env'] ?? '',
-            Config::allowsPlaintextSecrets($config)
+            $allow_plaintext
         );
 
         if ($url === '' || $token === '') {
@@ -40,7 +49,8 @@ class NetBoxClient {
             $url,
             $token,
             (bool) ($config['netbox']['verify_peer'] ?? true),
-            (int) ($config['netbox']['timeout'] ?? 10)
+            (int) ($config['netbox']['timeout'] ?? 10),
+            $allow_plaintext
         );
     }
 
@@ -52,7 +62,11 @@ class NetBoxClient {
             'url' => Util::sanitizeUrlForDisplay($this->url),
             'verify_peer' => $this->verify_peer,
             'timeout' => $this->timeout,
-            'token_hmac' => Crypto::keyedFingerprint($this->token, 'NetBox token identity')
+            'token_hmac' => Crypto::keyedFingerprint(
+                $this->token,
+                'NetBox token identity',
+                $this->allow_unkeyed_identity
+            )
         ];
     }
 

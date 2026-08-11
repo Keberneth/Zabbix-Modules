@@ -11,7 +11,7 @@ A self-contained Zabbix frontend module that adds:
 - **Problem update posting** back to the originating event through the Zabbix API
 - **Item history / trend analysis** on demand for deeper AI-driven diagnostics
 - **Local outbound redaction / inbound restore** for hostnames, IPs, domains, URLs, OS hints and custom replacements
-- **Encrypted server-side confirmations** for writes and privacy-sensitive reads, so executable parameters and external source identities are not trusted from the browser
+- **Server-side confirmations** for writes and privacy-sensitive reads — encrypted at rest when an encryption key is configured — so executable parameters and external source identities are not trusted from the browser
 - **Per-provider temperature and max token controls** for fine-grained model tuning
 - **Local JSONL audit logging** with retention and archive support
 - **Optional NetBox enrichment** for VM/device/service context
@@ -83,9 +83,9 @@ When enabled, you can type natural language commands in the chat and the AI will
 1. The selected provider receives the enabled Zabbix operations through its native tool/function schema
 2. When you ask for Zabbix data or an action, the model requests exactly one provider-native tool call
 3. Routine **read** actions execute immediately
-4. Privacy-sensitive reads show the exact provider, Zabbix identity and applicable NetBox source before **Confirm / Cancel**; confirmed output is shown once and not retained in provider-forwardable chat history
+4. Privacy-sensitive reads show the exact provider, Zabbix identity and applicable NetBox source before **Confirm / Cancel**; confirmed output is shown once and not retained in provider-forwardable chat history. An administrator can lower that gate **for the Problems-page AI drawer only** (Settings → Zabbix actions → *Problems-page AI drawer: privacy confirmations for reads*, `off` by default) so triage starts on the first click. Writes are never affected.
 5. **Write** actions show a deterministic server-generated preview with the exact Zabbix execution identity/destination and **Confirm / Cancel**; high-impact operations require a second click
-6. Only the encrypted, hash-bound pending action can execute after confirmation
+6. Only the server-stored, hash-bound pending action can execute after confirmation (encrypted at rest when an encryption key is configured)
 7. Native tool metadata is not rendered as chat text; JSON-looking assistant prose is ordinary text and can never execute
 
 #### Available tools
@@ -153,7 +153,7 @@ Quick summary:
 2. Set ownership and permissions
 3. Configure SELinux if applicable
 4. **Create writable directories** for redaction state and logging (see `INSTALL.md` section 6)
-5. Configure vault/secret references. Basic chat can run with `env:NAME`/`file:NAME` credentials alone; set `ZABBIX_AI_ENCRYPTION_KEY_FILE` (or the legacy direct key) on every PHP frontend node when storing inline secrets in the database or using confirmed writes, sensitive reads, or bulk previews
+5. Configure vault/secret references. Basic chat can run with `env:NAME`/`file:NAME` credentials alone; set `ZABBIX_AI_ENCRYPTION_KEY_FILE` (or the legacy direct key) on every PHP frontend node for any production deployment, so inline secrets and staged confirmations are encrypted at rest. For isolated development, the warned **Allow inline secrets…** option in AI Settings (or `ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS=1`) runs the module with no key — see `ENCRYPTION.md`
 6. In Zabbix frontend: Administration > General > Modules > Scan directory > Enable AI
 7. Open Monitoring > AI > Settings and configure at least one provider
 8. **Enable logging** in Settings > Logging if you want audit logs (disabled by default; payload bodies are also off by default)
@@ -213,7 +213,7 @@ In AI Settings > Zabbix Actions:
 - **Require Super Admin for write:** Enabled by default. When checked, only Super Admin users can execute write actions
 - **Web scenario allowed origins:** Required before the AI can create an HTTP web scenario. Scheme and port are enforced; loopback, link-local and metadata destinations remain blocked.
 
-Tool execution uses each provider's native structured-tool protocol. JSON-looking assistant prose is never executable. Every write is rendered into a deterministic server-side preview, bound by SHA-256 to the exact parameters, Zabbix execution identity/destination and server-resolved target identities, encrypted at rest, revalidated against Zabbix before execution, and consumed atomically. Bulk, destructive, and SLA scope-widening writes require a second explicit confirmation. Fleet problem/maintenance, event-comment, broad inventory, contact, macro, NetBox, and audit reads require a privacy confirmation. A key supplied through `ZABBIX_AI_ENCRYPTION_KEY_FILE` or the legacy direct variable is therefore mandatory for confirmed actions and bulk previews.
+Tool execution uses each provider's native structured-tool protocol. JSON-looking assistant prose is never executable. Every write is rendered into a deterministic server-side preview, bound by SHA-256 to the exact parameters, Zabbix execution identity/destination and server-resolved target identities, encrypted at rest when an encryption key is configured, revalidated against Zabbix before execution, and consumed atomically. Bulk, destructive, and SLA scope-widening writes require a second explicit confirmation. Fleet problem/maintenance, event-comment, broad inventory, contact, macro, NetBox, and audit reads require a privacy confirmation. A key supplied through `ZABBIX_AI_ENCRYPTION_KEY_FILE` or the legacy direct variable is what makes that preview encrypted at rest and the identity binding keyed; without it, confirmed actions and bulk previews run only under the warned development compatibility mode, with unencrypted staging.
 
 For AI-created web scenarios, also enforce outbound network policy on the Zabbix servers/proxies which execute the check. The application allowlist and restricted-address checks are defense in depth; an egress firewall/proxy remains the final protection against DNS rebinding or later DNS changes.
 
@@ -283,11 +283,11 @@ The module accepts either:
 
 ## Security notes
 
-- Prefer **`env:NAME` or confined `file:NAME` vault/secret references** over storing credentials in module config. Inline values are encrypted with the deployment key; the warned plaintext setting is for isolated development only.
+- Prefer **`env:NAME` or confined `file:NAME` vault/secret references** over storing credentials in module config. Inline values are encrypted with the deployment key; the warned plaintext setting is for isolated development only. That setting now also covers keyless confirmations, pending writes, sensitive reads and bulk previews.
 - Enable TLS verification unless you have a specific internal reason not to.
 - The webhook endpoint does **not** require a logged-in Zabbix UI session, so use a shared secret if you expose it beyond localhost/internal networks.
-- Write actions are protected by multiple layers: settings mode, per-category permissions, user role checks, encrypted server-side pending action storage, deterministic target/value previews, and mandatory user confirmation. Generic AI-authored trigger-expression creation or editing is intentionally unavailable; use Zabbix directly for arbitrary expressions.
-- Privacy-sensitive reads use the same encrypted pending store and bind the provider plus source identity before retrieving data.
+- Write actions are protected by multiple layers: settings mode, per-category permissions, user role checks, server-side pending action storage (encrypted when a key is configured), deterministic target/value previews, and mandatory user confirmation. Generic AI-authored trigger-expression creation or editing is intentionally unavailable; use Zabbix directly for arbitrary expressions.
+- Privacy-sensitive reads use the same pending store (encrypted at rest when a key is configured) and bind the provider plus source identity before retrieving data.
 - When Security / redaction is enabled, outbound AI requests can replace hostnames, IPs, FQDNs, URLs, OS hints, and any custom rules you define. Replies are restored locally before operators see them. Enabled administrator reference-link URLs are an intentional exception: they are placed in the system prompt verbatim, so never put credentials or secret query parameters in them.
 - The configuration/history assistant sends its displayed form and API context only after an explicit pre-send consent prompt. Depending on the page, this can include preprocessing JavaScript, interface addresses, item/history values, trigger definitions, macro values and recent problem metadata. Secret/vault macros are masked. Untrusted-data fencing prevents instruction confusion but is not data minimization; configure redaction for the selected chat channel as needed.
 - Problem page AI buttons are only injected for users with module access (user type check in `getAssets()`).
@@ -299,7 +299,7 @@ The module accepts either:
 - No chat persistence by design
 - No external FastAPI service required
 - The module does **not** create any new Zabbix DB tables
-- Local redaction state and encrypted pending confirmations (writes, sensitive reads and bulk previews) are stored as files under the configured state path (default `/tmp/zabbix-ai-module/state`)
+- Local redaction state and pending confirmations (writes, sensitive reads and bulk previews) are stored as files under the configured state path (default `/tmp/zabbix-ai-module/state`); they are encrypted when a key is configured and readable plaintext under compatibility mode, so protect that path accordingly
 - Local logs are stored as JSONL files under the configured log path (default `/tmp/zabbix-ai-module/logs`) with optional archive path (default `/tmp/zabbix-ai-module/archive`)
 - **Logging is disabled by default.** Enable it in Settings > Logging after setting up writable directories.
 - **Writable directories must exist and be accessible by the web server process.** On systems with `PrivateTmp=yes` (common on RHEL/systemd), the default `/tmp` paths may not work. See `INSTALL.md` section 6 for setup instructions.

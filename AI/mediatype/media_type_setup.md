@@ -18,7 +18,7 @@ enabled and configure the value the module should expect. Prefer one of:
 - `env:AI_WEBHOOK_SECRET` in **Shared-secret vault / secret reference**;
 - `file:webhook_shared_secret`, materialized beneath `ZABBIX_AI_SECRET_DIR`; or
 - an inline shared secret, encrypted in the database with the module encryption
-  key.
+  key (stored plaintext under compatibility mode).
 
 The first two forms are PHP-side references. The module resolves them at
 request time; they are not values for the Zabbix media-type parameter.

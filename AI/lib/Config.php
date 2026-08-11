@@ -160,6 +160,12 @@ class Config {
                     'sla' => false
                 ],
                 'require_super_admin_for_write' => true,
+                // Privacy confirmations for reads opened from the Problems-page
+                // AI drawer. 'off' (shipped) confirms every sensitive read;
+                // 'triage' auto-approves only the event-scoped triage subset;
+                // 'all' auto-approves every sensitive read on that surface.
+                // Writes are never affected by this setting.
+                'problem_drawer_auto_reads' => 'off',
                 'web_scenario_allowed_origins' => '',
                 'bulk_max_hosts' => 25,
                 'bulk_max_items' => 100
@@ -598,6 +604,11 @@ class Config {
         ];
 
         $za = $post['zabbix_actions'] ?? [];
+        // Unknown/absent values fall back to the safe 'off' level.
+        $auto_read_level = (string) ($za['problem_drawer_auto_reads'] ?? 'off');
+        if (!in_array($auto_read_level, ['off', 'triage', 'all'], true)) {
+            $auto_read_level = 'off';
+        }
         $new_config['zabbix_actions'] = [
             'enabled' => Util::truthy($za['enabled'] ?? false),
             'mode' => in_array(($za['mode'] ?? 'read'), ['read', 'readwrite'], true)
@@ -620,6 +631,7 @@ class Config {
                 'sla' => Util::truthy($za['write_permissions']['sla'] ?? false)
             ],
             'require_super_admin_for_write' => Util::truthy($za['require_super_admin_for_write'] ?? true),
+            'problem_drawer_auto_reads' => $auto_read_level,
             'web_scenario_allowed_origins' => Util::cleanMultiline(
                 $za['web_scenario_allowed_origins'] ?? '',
                 10000
@@ -633,10 +645,13 @@ class Config {
         ) && (string) ($current_config['zabbix_actions']['mode'] ?? 'read') === 'readwrite';
         $new_write_mode_enabled = $new_config['zabbix_actions']['enabled']
             && $new_config['zabbix_actions']['mode'] === 'readwrite';
-        if ($new_write_mode_enabled && !$current_write_mode_enabled && !Crypto::isAvailable()) {
+        if ($new_write_mode_enabled && !$current_write_mode_enabled && !Crypto::isAvailable()
+                && !self::allowsPlaintextSecrets($new_config)) {
             throw new RuntimeException(
                 'Read & Write mode requires ZABBIX_AI_ENCRYPTION_KEY or ZABBIX_AI_ENCRYPTION_KEY_FILE '
-                .'and an OpenSSL or Sodium backend for encrypted confirmations.'
+                .'and an OpenSSL or Sodium backend for encrypted confirmations. For isolated development '
+                .'only, enable the warned plaintext compatibility option in the same save to stage '
+                .'confirmations unencrypted instead.'
             );
         }
 
@@ -834,7 +849,8 @@ class Config {
             // the browser/audit preview.
             'auth_headers_hmac' => Crypto::keyedFingerprint(
                 $api_key."\0".$headers_json,
-                'provider authentication identity'
+                'provider authentication identity',
+                Util::truthy($provider['_allow_plaintext_secrets'] ?? false)
             ),
             'custom_headers_configured' => trim($headers_json) !== ''
         ];

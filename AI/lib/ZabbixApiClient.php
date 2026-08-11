@@ -21,14 +21,16 @@ class ZabbixApiClient {
     private string $transport;
     private ?string $frontend_url_cache = null;
     private array $confirmed_target_bindings = [];
+    private bool $allow_unkeyed_identity;
 
-    public function __construct(string $url, string $token, bool $verify_peer = true, int $timeout = 15, string $auth_mode = 'bearer', string $transport = 'http') {
+    public function __construct(string $url, string $token, bool $verify_peer = true, int $timeout = 15, string $auth_mode = 'bearer', string $transport = 'http', bool $allow_unkeyed_identity = false) {
         $this->url = trim($url);
         $this->token = trim($token);
         $this->verify_peer = $verify_peer;
         $this->timeout = $timeout;
         $this->auth_mode = $auth_mode !== '' ? $auth_mode : 'bearer';
         $this->transport = $transport === 'frontend' ? 'frontend' : 'http';
+        $this->allow_unkeyed_identity = $allow_unkeyed_identity;
 
         if ($this->transport === 'http' && $this->token !== '' && !self::isValidServiceTokenUrl($this->url)) {
             throw new RuntimeException('The Zabbix API service-token URL must be an absolute HTTPS URL without embedded credentials.');
@@ -37,10 +39,11 @@ class ZabbixApiClient {
 
     public static function fromConfig(array $config): ?self {
         $config = Config::mergeWithDefaults($config);
+        $allow_plaintext = Config::allowsPlaintextSecrets($config);
         $token = Config::resolveSecret(
             $config['zabbix_api']['token'] ?? '',
             $config['zabbix_api']['token_env'] ?? '',
-            Config::allowsPlaintextSecrets($config)
+            $allow_plaintext
         );
         $url = trim((string) ($config['zabbix_api']['url'] ?? ''));
 
@@ -65,7 +68,9 @@ class ZabbixApiClient {
             $token,
             (bool) ($config['zabbix_api']['verify_peer'] ?? true),
             (int) ($config['zabbix_api']['timeout'] ?? 15),
-            (string) ($config['zabbix_api']['auth_mode'] ?? 'bearer')
+            (string) ($config['zabbix_api']['auth_mode'] ?? 'bearer'),
+            'http',
+            $allow_plaintext
         );
     }
 
@@ -229,7 +234,8 @@ class ZabbixApiClient {
             'auth_mode' => $this->auth_mode,
             'token_hmac' => Crypto::keyedFingerprint(
                 $this->token,
-                'Zabbix service-token identity'
+                'Zabbix service-token identity',
+                $this->allow_unkeyed_identity
             )
         ];
     }

@@ -1558,4 +1558,443 @@ check(
     'Credential-bearing Zabbix API destination is still derived from request headers.'
 );
 
+// ---------------------------------------------------------------------------
+// Keyless plaintext compatibility mode.
+//
+// Everything above exercises the checkbox only through Config::encryptSecrets /
+// resolveSecret / sanitizeForView. These cases cover the other half: with the
+// settings checkbox armed and NO encryption key at all, the confirmation path
+// (identity digests, pending staging, write-mode enablement) must work
+// end-to-end, while every downgrade route stays closed.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Problem-drawer read auto-approval (opt-in; 'off' by default).
+//
+// The setting may only ever shrink the sensitive-READ confirmation set on the
+// Problems-page drawer. Writes must remain gated at every level.
+// ---------------------------------------------------------------------------
+$auto_triage_reads = [
+    'get_related_problems', 'get_event_timeline', 'get_problems',
+    'generate_problem_graph', 'get_host_info', 'get_host_interfaces',
+    'get_items', 'get_triggers', 'get_trigger_dependencies',
+    'get_unsupported_items', 'list_active_maintenance',
+    'get_alerts_for_event', 'get_actions_for_event', 'get_escalation_path',
+    'get_service_impact'
+];
+
+foreach ($auto_triage_reads as $auto_tool) {
+    check(
+        ZabbixActionExecutor::isProblemTriageAutoRead($auto_tool),
+        'Auto-approvable triage read is not recognised: '.$auto_tool
+    );
+    check(
+        ZabbixActionExecutor::requiresSensitiveReadConfirmation($auto_tool),
+        'Auto-approvable triage read left the sensitive-read set: '.$auto_tool
+    );
+    check(
+        ZabbixActionExecutor::getWriteCategory($auto_tool) === '',
+        'Auto-approvable triage list contains a write tool: '.$auto_tool
+    );
+}
+
+// No write tool may ever be auto-approvable, whatever the allowlist contains.
+foreach (ZabbixActionExecutor::allTools() as $tool_name => $tool_definition) {
+    if (($tool_definition['rw'] ?? 'read') !== 'write') {
+        continue;
+    }
+    check(
+        !ZabbixActionExecutor::isProblemTriageAutoRead($tool_name),
+        'Write tool is auto-approvable without confirmation: '.$tool_name
+    );
+}
+
+// Data classes the Redactor cannot mask stay out of the triage subset.
+foreach ([
+    'get_effective_macros', 'get_user_media_for_problem', 'get_mediatypes_status',
+    'get_action_config', 'get_audit_log', 'get_auditlog_for_object',
+    'get_recent_changes', 'list_netbox_devices', 'get_netbox_info',
+    'list_zabbix_hosts', 'get_proxy_assigned_hosts', 'get_proxy_status',
+    'get_noisy_triggers', 'get_web_scenarios', 'get_sla_overview',
+    'analyze_sla_scope', 'get_services', 'preview_disable_triggers',
+    'preview_disable_items_by_error', 'preview_enable_items',
+    'preview_bulk_add_host_tag', 'preview_link_template',
+    'preview_unlink_template', 'generate_report', 'generate_evidence_bundle'
+] as $never_auto_tool) {
+    check(
+        ZabbixActionExecutor::requiresSensitiveReadConfirmation($never_auto_tool),
+        'High-risk read left the sensitive-read set: '.$never_auto_tool
+    );
+    check(
+        !ZabbixActionExecutor::isProblemTriageAutoRead($never_auto_tool),
+        'High-risk read entered the auto-approvable triage subset: '.$never_auto_tool
+    );
+}
+
+check(
+    !ZabbixActionExecutor::isProblemTriageAutoRead('get_related_problem')
+        && !ZabbixActionExecutor::isProblemTriageAutoRead(''),
+    'An unknown or empty tool name was treated as auto-approvable.'
+);
+
+// Shipped default is off, unknown values fall back to off, and both opt-in
+// levels round-trip.
+check(
+    Config::defaults()['zabbix_actions']['problem_drawer_auto_reads'] === 'off',
+    'Problem-drawer read auto-approval is not disabled by default.'
+);
+foreach ([
+    [[], 'off'],
+    [['problem_drawer_auto_reads' => 'nonsense'], 'off'],
+    [['problem_drawer_auto_reads' => '1'], 'off'],
+    [['problem_drawer_auto_reads' => 'triage'], 'triage'],
+    [['problem_drawer_auto_reads' => 'all'], 'all'],
+    [['problem_drawer_auto_reads' => 'off'], 'off']
+] as [$auto_post, $auto_expected]) {
+    $auto_built = Config::buildFromPost(
+        ['zabbix_actions' => array_merge(['enabled' => '1', 'mode' => 'read'], $auto_post)],
+        Config::defaults()
+    );
+    check(
+        $auto_built['zabbix_actions']['problem_drawer_auto_reads'] === $auto_expected,
+        'Problem-drawer auto-read level did not normalize to '.$auto_expected
+    );
+}
+
+// The gate must keep the write disjunct unconditional, must conjoin the read
+// relaxation with the write-category guard, and must require both the drawer
+// surface and a server-resolved problem context.
+$chat_send_source = (string) file_get_contents(__DIR__.'/../actions/ChatSend.php');
+foreach ([
+    "if (\$write_category !== '' || (\$sensitive_read && !\$auto_confirm_read)) {",
+    "\$auto_confirm_read = \$write_category === ''",
+    "\$surface === 'problem_drawer'",
+    "is_array(\$context['problem_context'] ?? null)",
+    "'zabbix.sensitive_read.auto_confirmed'"
+] as $chat_send_guard) {
+    check(
+        strpos($chat_send_source, $chat_send_guard) !== false,
+        'Problem-drawer read auto-approval guard is missing: '.$chat_send_guard
+    );
+}
+
+// Only the problem drawer may claim the surface that unlocks the relaxation.
+check(
+    strpos((string) file_get_contents(__DIR__.'/../assets/js/ai.problem.inline.js'), "params.set('surface', 'problem_drawer')") !== false,
+    'The problem drawer no longer identifies its surface to the server.'
+);
+check(
+    strpos((string) file_get_contents(__DIR__.'/../assets/js/ai.chat.js'), 'problem_drawer') === false,
+    'The full AI chat page claims the problem-drawer surface.'
+);
+check(
+    strpos((string) file_get_contents(__DIR__.'/../views/ai.settings.php'), 'zabbix_actions[problem_drawer_auto_reads]') !== false,
+    'Settings page is missing the problem-drawer read confirmation control.'
+);
+
+function expectThrowMatching(callable $fn, string $needle, string $message): void {
+    try {
+        $fn();
+    }
+    catch (Throwable $e) {
+        if (strpos($e->getMessage(), $needle) === false) {
+            throw new RuntimeException($message.' (unexpected error: '.$e->getMessage().')');
+        }
+
+        return;
+    }
+
+    throw new RuntimeException($message);
+}
+
+putenv('ZABBIX_AI_ENCRYPTION_KEY');
+putenv('ZABBIX_AI_ENCRYPTION_KEY_FILE');
+putenv('ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS');
+Crypto::resetRuntimeKeyCache();
+
+check(!Crypto::isAvailable(), 'Keyless compatibility cases require encryption to be unavailable.');
+
+$compat_state_dir = sys_get_temp_dir().'/zabbix-ai-compat-'.getmypid();
+$compat_config = Config::defaults();
+$compat_config['secret_storage']['allow_plaintext_secrets'] = true;
+$compat_config['security']['state_path'] = $compat_state_dir;
+$compat_config['providers'] = [[
+    'id' => 'compat_provider',
+    'name' => 'Compat provider',
+    'type' => 'openai_compatible',
+    'enabled' => true,
+    'endpoint' => 'https://api.openai.com/v1/chat/completions',
+    'model' => 'gpt-4o',
+    'api_key' => 'sk-compat-plaintext-key',
+    'headers_json' => '',
+    'verify_peer' => true
+]];
+
+// Fail-closed is preserved for callers that have not armed the policy.
+expectThrowMatching(
+    static function(): void {
+        Crypto::keyedFingerprint('value-a', 'test binding');
+    },
+    'without ZABBIX_AI_ENCRYPTION_KEY',
+    'Keyless keyedFingerprint() must still fail closed without an explicit compatibility opt-in.'
+);
+
+$unkeyed_a = Crypto::keyedFingerprint('value-a', 'test binding', true);
+check($unkeyed_a !== '', 'Compatibility mode must still produce a binding digest without a key.');
+check(strncmp($unkeyed_a, 'u1:', 3) === 0, 'Unkeyed binding digest must carry the "u1:" algorithm tag.');
+check(
+    $unkeyed_a !== Crypto::keyedFingerprint('value-b', 'test binding', true),
+    'Unkeyed binding digest must change when the bound value changes.'
+);
+check(
+    $unkeyed_a !== Crypto::keyedFingerprint('value-a', 'other binding', true),
+    'Unkeyed binding digest must be domain-separated by purpose.'
+);
+check(
+    strpos($unkeyed_a, 'value-a') === false,
+    'Unkeyed binding digest must not disclose the bound value.'
+);
+check(
+    $unkeyed_a === Crypto::keyedFingerprint('value-a', 'test binding', true),
+    'Unkeyed binding digest must be deterministic so preview and execution can be compared.'
+);
+
+// The server-side environment override alone arms the same behaviour.
+putenv('ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS=1');
+check(
+    Crypto::keyedFingerprint('value-a', 'test binding') === $unkeyed_a,
+    'ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS must arm the unkeyed binding digest on its own.'
+);
+putenv('ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS');
+
+// The reported failure: a keyless provider egress fingerprint.
+$compat_provider = Config::getProvider($compat_config, 'compat_provider', 'chat');
+check($compat_provider !== null, 'Compatibility provider must resolve.');
+$compat_egress = Config::providerEgressFingerprint($compat_provider);
+check(
+    ($compat_egress['auth_headers_hmac'] ?? '') !== ''
+        && strncmp($compat_egress['auth_headers_hmac'], 'u1:', 3) === 0,
+    'providerEgressFingerprint() must bind the provider identity keyless under compatibility mode.'
+);
+check(
+    strpos(json_encode($compat_egress), 'sk-compat-plaintext-key') === false,
+    'providerEgressFingerprint() must never disclose the provider API key.'
+);
+$rotated_config = $compat_config;
+$rotated_config['providers'][0]['api_key'] = 'sk-compat-rotated-key';
+check(
+    Config::providerEgressFingerprint(
+        Config::getProvider($rotated_config, 'compat_provider', 'chat')
+    )['auth_headers_hmac'] !== $compat_egress['auth_headers_hmac'],
+    'A rotated provider credential must still change the egress fingerprint keyless.'
+);
+
+// The runtime marker is not forgeable by omission: a hand-built provider array
+// carries no policy, so it still fails closed. Empty credentials keep the
+// throw attributable to the fingerprint rather than to resolveSecret().
+expectThrowMatching(
+    static function(): void {
+        Config::providerEgressFingerprint([
+            'id' => 'raw_provider',
+            'type' => 'openai_compatible',
+            'endpoint' => 'https://api.openai.com/v1/chat/completions',
+            'api_key' => '',
+            'headers_json' => ''
+        ]);
+    },
+    'without ZABBIX_AI_ENCRYPTION_KEY',
+    'A provider array without the runtime policy marker must not reach the unkeyed digest.'
+);
+
+// Zabbix and NetBox confirmation identities.
+$compat_netbox = new NetBoxClient('https://netbox.example', 'netbox-compat-token', true, 10, true);
+$compat_netbox_identity = $compat_netbox->confirmationIdentityFingerprint();
+check(
+    ($compat_netbox_identity['token_hmac'] ?? '') !== ''
+        && strpos(json_encode($compat_netbox_identity), 'netbox-compat-token') === false,
+    'NetBox confirmation identity must bind keyless under compatibility mode without disclosing the token.'
+);
+expectThrowMatching(
+    static function(): void {
+        (new NetBoxClient('https://netbox.example', 'netbox-compat-token'))
+            ->confirmationIdentityFingerprint();
+    },
+    'without ZABBIX_AI_ENCRYPTION_KEY',
+    'A NetBox client built without the compatibility flag must still fail closed.'
+);
+
+$compat_zabbix = new ZabbixApiClient(
+    'https://zabbix.example/api_jsonrpc.php', 'zbx-compat-token', true, 15, 'bearer', 'http', true
+);
+$compat_zabbix_identity = $compat_zabbix->confirmationIdentityFingerprint();
+check(
+    ($compat_zabbix_identity['token_hmac'] ?? '') !== ''
+        && strpos(json_encode($compat_zabbix_identity), 'zbx-compat-token') === false,
+    'Zabbix service-token identity must bind keyless under compatibility mode without disclosing the token.'
+);
+check(
+    $compat_zabbix_identity['token_hmac'] !== $compat_netbox_identity['token_hmac'],
+    'Zabbix and NetBox identity digests must be domain-separated from each other.'
+);
+expectThrowMatching(
+    static function(): void {
+        (new ZabbixApiClient('https://zabbix.example/api_jsonrpc.php', 'zbx-compat-token'))
+            ->confirmationIdentityFingerprint();
+    },
+    'without ZABBIX_AI_ENCRYPTION_KEY',
+    'A Zabbix client built without the compatibility flag must still fail closed.'
+);
+
+// Full keyless confirmation round trip for a write.
+$compat_session = 'compat-server-session';
+$compat_params = ['host' => 'compat-host', 'duration_hours' => 1.0, 'description' => 'compat window'];
+$compat_confirmation = PendingActionStore::buildConfirmation(
+    $compat_config, $compat_session, 'create_maintenance', $compat_params,
+    ['provider_egress' => $compat_egress]
+);
+check(
+    strpos((string) $compat_confirmation['preview'], 'Unencrypted staging') !== false,
+    'A keyless confirmation preview must warn the operator that staging is unencrypted.'
+);
+
+$compat_action_id = PendingActionStore::create($compat_config, $compat_session, [
+    'tool' => 'create_maintenance',
+    'params' => $compat_params,
+    'payload_hash' => (string) $compat_confirmation['payload_hash'],
+    'confirmation_preview' => (string) $compat_confirmation['preview'],
+    'confirmation_level' => (string) $compat_confirmation['level'],
+    'confirmation_state' => is_array($compat_confirmation['confirmation_state'] ?? null)
+        ? $compat_confirmation['confirmation_state']
+        : []
+]);
+$compat_records = glob($compat_state_dir.'/pending/pending_*.json');
+check(count($compat_records) === 1, 'Exactly one keyless pending record must be written.');
+$compat_record = json_decode((string) file_get_contents($compat_records[0]), true);
+check(
+    ($compat_record['storage'] ?? '') === 'plaintext' && !isset($compat_record['action_encrypted']),
+    'A keyless pending record must self-declare plaintext storage and carry no ciphertext field.'
+);
+
+$compat_consumed = PendingActionStore::consumeBound(
+    $compat_config, $compat_session, $compat_action_id, (string) $compat_confirmation['payload_hash']
+);
+check(
+    ($compat_consumed['tool'] ?? '') === 'create_maintenance'
+        && is_float($compat_consumed['params']['duration_hours']),
+    'A keyless confirmed action must consume intact, preserving numeric precision.'
+);
+expectThrow(
+    static function() use ($compat_config, $compat_session, $compat_action_id, $compat_confirmation): void {
+        PendingActionStore::consumeBound(
+            $compat_config, $compat_session, $compat_action_id, (string) $compat_confirmation['payload_hash']
+        );
+    },
+    'A keyless pending action must still be single-use.'
+);
+
+// Tamper evidence: an unencrypted record is authenticated by a session-keyed
+// digest, so rewriting the payload on disk is refused. This covers the unbound
+// consume() path used by bulk-preview application, which performs no
+// browser-echoed payload-hash check of its own.
+$tamper_id = PendingActionStore::create($compat_config, $compat_session, [
+    'kind' => 'bulk_preview', 'operation' => 'disable_items', 'ids' => ['1001']
+]);
+foreach (glob($compat_state_dir.'/pending/pending_*.json') as $pending_file) {
+    $candidate = json_decode((string) file_get_contents($pending_file), true);
+    if (!is_array($candidate) || ($candidate['id'] ?? '') !== $tamper_id) {
+        continue;
+    }
+    check(
+        ($candidate['action_digest'] ?? '') !== '',
+        'An unencrypted pending record must carry a session-bound integrity digest.'
+    );
+    $forged = json_decode((string) $candidate['action_plaintext'], true);
+    $forged['ids'] = ['1001', '2002', '3003'];
+    $candidate['action_plaintext'] = json_encode($forged);
+    file_put_contents($pending_file, json_encode($candidate));
+}
+expectThrowMatching(
+    static function() use ($compat_config, $compat_session, $tamper_id): void {
+        PendingActionStore::consume($compat_config, $compat_session, $tamper_id);
+    },
+    'modified after it was staged',
+    'A rewritten unencrypted pending payload must be refused on the unbound consume() path.'
+);
+
+// Downgrade resistance: a deployment that has not armed the policy, and a
+// deployment that has a key, both refuse a plaintext-staged record.
+$compat_downgrade_id = PendingActionStore::create(
+    $compat_config, $compat_session, ['tool' => 'create_maintenance', 'params' => $compat_params]
+);
+$strict_config = Config::defaults();
+$strict_config['security']['state_path'] = $compat_state_dir;
+expectThrowMatching(
+    static function() use ($strict_config, $compat_session, $compat_downgrade_id): void {
+        PendingActionStore::consume($strict_config, $compat_session, $compat_downgrade_id);
+    },
+    'Refusing an unencrypted pending action',
+    'A deployment without the compatibility policy must refuse a plaintext-staged pending action.'
+);
+
+// Read & Write enablement is reachable keyless only with the policy armed.
+$compat_write_config = Config::buildFromPost([
+    'secret_storage' => ['allow_plaintext_secrets' => '1', 'plaintext_risk_acknowledged' => '1'],
+    'zabbix_actions' => ['enabled' => '1', 'mode' => 'readwrite']
+], Config::defaults());
+check(
+    ($compat_write_config['zabbix_actions']['mode'] ?? '') === 'readwrite',
+    'Read & Write mode must be enablable keyless when compatibility is armed in the same save.'
+);
+expectThrow(
+    static function(): void {
+        Config::buildFromPost(
+            ['zabbix_actions' => ['enabled' => '1', 'mode' => 'readwrite']],
+            Config::defaults()
+        );
+    },
+    'Read & Write mode must still be refused keyless without the compatibility policy.'
+);
+
+// An available key always wins over the checkbox.
+putenv('ZABBIX_AI_ENCRYPTION_KEY=compat-precedence-master-key');
+Crypto::resetRuntimeKeyCache();
+
+$keyed_egress = Config::providerEgressFingerprint(
+    Config::getProvider($compat_config, 'compat_provider', 'chat')
+);
+check(
+    preg_match('/^[a-f0-9]{64}$/D', $keyed_egress['auth_headers_hmac']) === 1
+        && $keyed_egress['auth_headers_hmac'] !== $compat_egress['auth_headers_hmac'],
+    'With a key present the digest must stay a bare keyed HMAC and never collide with the unkeyed form.'
+);
+expectThrowMatching(
+    static function() use ($compat_config, $compat_session, $compat_downgrade_id): void {
+        PendingActionStore::consume($compat_config, $compat_session, $compat_downgrade_id);
+    },
+    'Refusing an unencrypted pending action',
+    'Once a key is available, a plaintext-staged pending action must be refused even with the checkbox on.'
+);
+
+$keyed_action_id = PendingActionStore::create(
+    $compat_config, $compat_session, ['tool' => 'create_maintenance', 'params' => $compat_params]
+);
+$keyed_record = [];
+foreach (glob($compat_state_dir.'/pending/pending_*.json') as $pending_file) {
+    $candidate = json_decode((string) file_get_contents($pending_file), true);
+    if (is_array($candidate) && ($candidate['id'] ?? '') === $keyed_action_id) {
+        $keyed_record = $candidate;
+    }
+}
+check(
+    ($keyed_record['storage'] ?? '') === 'encrypted'
+        && Crypto::isEncrypted((string) ($keyed_record['action_encrypted'] ?? '')),
+    'With a key present, new pending records must be encrypted again despite the compatibility checkbox.'
+);
+
+foreach (glob($compat_state_dir.'/pending/*') as $pending_file) {
+    @unlink($pending_file);
+}
+@rmdir($compat_state_dir.'/pending');
+@rmdir($compat_state_dir);
+
 echo "security_regression: ok\n";

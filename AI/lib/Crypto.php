@@ -16,7 +16,10 @@ namespace Modules\AI\Lib;
  *     without it is treated as plain text and returned as-is, so previously
  *     stored plaintext secrets can be migrated once the encryption key is
  *     configured and settings are saved. Without a key they are refused unless
- *     the explicit development-only plaintext escape hatch is enabled.
+ *     the explicit development-only plaintext escape hatch is enabled. That same
+ *     escape hatch also degrades confirmation-identity digests from a keyed HMAC
+ *     to an unkeyed, purpose-domain-separated "u1:" digest, so the confirmation
+ *     path keeps working on a keyless development instance.
  *   - Fail-safe. If a value is encrypted but the key is missing/wrong (or the
  *     crypto extension is unavailable), decryption returns '' rather than
  *     throwing — the affected feature reports "secret unavailable" instead of
@@ -38,6 +41,9 @@ class Crypto {
 
     private const BACKEND_OPENSSL = "\x01";
     private const BACKEND_SODIUM = "\x02";
+
+    private const FINGERPRINT_UNKEYED_PREFIX = 'u1:';
+    private const FINGERPRINT_UNKEYED_DOMAIN = 'zabbix-ai-unkeyed-fingerprint-v1';
 
     private static bool $key_cache_initialized = false;
     private static ?string $resolved_key_cache = null;
@@ -79,6 +85,15 @@ class Crypto {
         $value = strtolower(trim((string) getenv(self::ENV_ALLOW_PLAINTEXT)));
 
         return in_array($value, ['1', 'true', 'yes', 'on'], true);
+    }
+
+    /**
+     * Effective plaintext-compatibility policy for a single call. Config-aware
+     * callers pass the settings-checkbox result; the server-side environment
+     * override is always OR-ed in so config-less entry points keep working.
+     */
+    private static function plaintextAllowed(bool $configured_allow_plaintext): bool {
+        return $configured_allow_plaintext || self::allowsPlaintextSecrets();
     }
 
     /**
@@ -254,16 +269,35 @@ class Crypto {
         return '';
     }
 
-    /** Opaque equality fingerprint which cannot be brute-forced without the deployment key. */
-    public static function keyedFingerprint(string $value, string $purpose = 'sensitive binding'): string {
+    /**
+     * Opaque equality fingerprint. With a deployment key this is an HMAC that
+     * cannot be brute-forced. When the caller has explicitly armed plaintext
+     * compatibility AND no key exists, it degrades to an unkeyed,
+     * purpose-domain-separated digest carrying a distinct "u1:" algorithm tag,
+     * so a keyed and an unkeyed value can never be equal or be mistaken for
+     * one another. An available key always takes precedence over the policy.
+     */
+    public static function keyedFingerprint(
+        string $value,
+        string $purpose = 'sensitive binding',
+        bool $allow_unkeyed = false
+    ): string {
         $key = self::resolveKey();
-        if ($key === null) {
+        if ($key !== null) {
+            return hash_hmac('sha256', $value, $key);
+        }
+
+        if (!self::plaintextAllowed($allow_unkeyed)) {
             throw new \RuntimeException(
-                'Cannot bind '.$purpose.' without ZABBIX_AI_ENCRYPTION_KEY or ZABBIX_AI_ENCRYPTION_KEY_FILE.'
+                'Cannot bind '.$purpose.' without ZABBIX_AI_ENCRYPTION_KEY or '
+                .'ZABBIX_AI_ENCRYPTION_KEY_FILE. For isolated development only, the warned plaintext '
+                .'compatibility option in AI Settings (or ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS=1) permits '
+                .'an unkeyed binding digest instead.'
             );
         }
 
-        return hash_hmac('sha256', $value, $key);
+        return self::FINGERPRINT_UNKEYED_PREFIX
+            .hash('sha256', self::FINGERPRINT_UNKEYED_DOMAIN."\0".$purpose."\0".$value);
     }
 
     /**
