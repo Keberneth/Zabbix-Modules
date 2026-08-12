@@ -4,6 +4,7 @@ A Zabbix **frontend report module** that turns the trend and history data you al
 
 Built and tested on **Zabbix 7.0**.
 
+Current release: **1.4.0** (build **1.4.0-20260801.1**).
 
 ---
 
