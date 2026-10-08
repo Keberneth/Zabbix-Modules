@@ -47,6 +47,20 @@ The toolbar lets you focus the graph without rebuilding it:
   view, plus **History (days)**, **Minimum separation**, and horizontal/vertical
   scale controls for layout.
 
+### Full screen
+
+The buttons in the top-right corner of the map are **Fit**, which zooms so the whole map is visible, and **Full screen**.
+
+Full screen uses the browser's Fullscreen API. The whole Network Map module takes over the entire screen without the Zabbix menu, the page or the browser toolbars: filters, status line, graph and traffic summary. Filtering works there just like on the normal page:
+- Type in any filter and press **Enter** or **Draw graph**.
+- Use **Hide filters** / **Show filters** in the map toolbar to collapse the filter panel when you want the most room for the map.
+- Click a node and the traffic summary opens beside the graph, or below it on screens narrower than 1400 px.
+- The graph refits whenever full screen is entered or left.
+
+Leave full screen with **Exit full screen** or <kbd>Esc</kbd>. If a filter's suggestion list is open, the first <kbd>Esc</kbd> only closes the list. Filter values are kept when you switch between the normal page and full screen.
+
+Some browsers don't allow element full screen, for example iPhone Safari, older Safari versions, or a Zabbix page embedded in an `<iframe>` without `allowfullscreen`. There the same button pins the module over the whole browser window instead, with the same filters and controls, and <kbd>Esc</kbd> still returns to the normal page.
+
 The view follows the active Zabbix theme, including dark mode:
 
 ![Network map in dark theme](docs/images/02-network-map-dark.jpg)

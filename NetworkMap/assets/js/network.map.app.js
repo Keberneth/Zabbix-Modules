@@ -57,7 +57,7 @@
 
     root.classList.add("knm-root");
     root.innerHTML = `
-      <section class="knm-panel">
+      <section id="knm-filters" class="knm-panel knm-filters-panel">
         <div class="knm-form-grid">
           <label class="knm-form-field">
             <span>Host scope</span>
@@ -208,6 +208,8 @@
             <ul>
               <li><strong>Minimum separation</strong> — spacing between nodes (10–500)</li>
               <li><strong>Horizontal / Vertical scale</strong> — stretch or compress the layout</li>
+              <li><strong>Fit</strong> (top-right of the map) — zoom so the whole map is visible</li>
+              <li><strong>Full screen</strong> (top-right of the map) — show the filters, map and traffic summary on the whole screen; <strong>Hide filters</strong> gives the map more room, and <kbd>Esc</kbd> or <strong>Exit full screen</strong> returns</li>
             </ul>
 
             <h4>Traffic summary</h4>
@@ -221,6 +223,15 @@
 
       <div class="knm-main">
         <section class="knm-panel knm-graph-panel">
+          <div class="knm-graph-toolbar" role="toolbar" aria-label="Map view">
+            <button id="knm-btnFilters" class="knm-btn knm-btn-secondary knm-btn-compact knm-fullscreen-only"
+              type="button" aria-controls="knm-filters" aria-expanded="true"
+              title="Hide the filter panel to give the map more room">Hide filters</button>
+            <button id="knm-btnFit" class="knm-btn knm-btn-secondary knm-btn-compact" type="button"
+              title="Zoom to fit the whole map">Fit</button>
+            <button id="knm-btnFullscreen" class="knm-btn knm-btn-secondary knm-btn-compact" type="button"
+              aria-pressed="false" title="Show the map in full screen (Esc to exit)">Full screen</button>
+          </div>
           <div id="knm-loading" class="knm-loading" hidden>Loading…</div>
           <div id="knm-cy" aria-live="polite"></div>
         </section>
@@ -431,6 +442,8 @@
         const items = getItems(inputEl.value);
         if (items[activeIndex]) selectItem(items[activeIndex]);
       } else if (e.key === "Escape") {
+        // Handled here: Esc only closes the suggestions, not full screen.
+        e.preventDefault();
         listEl.classList.remove("knm-ac-open");
       }
     });
@@ -1092,6 +1105,192 @@
     });
   }
 
+  // Full screen covers the whole module (filters, status, graph and traffic
+  // summary). The browser Fullscreen API is used when available; where it is
+  // missing or refused (old Safari, iPhone, an iframe without allowfullscreen)
+  // the module is pinned over the whole window instead, and Esc leaves either
+  // mode. In full screen the filter panel can be collapsed for more map room.
+  const FULLSCREEN_CLASS = "knm-fullscreen";
+  const FALLBACK_CLASS = "knm-fullscreen-fallback";
+  const SCROLL_LOCK_CLASS = "knm-fullscreen-lock";
+  const FILTERS_COLLAPSED_CLASS = "knm-filters-collapsed";
+
+  function getFullscreenTarget() {
+    return state.root || null;
+  }
+
+  function setFiltersCollapsed(collapsed) {
+    const button = getEl("knm-btnFilters");
+
+    if (state.root) {
+      state.root.classList.toggle(FILTERS_COLLAPSED_CLASS, collapsed);
+    }
+
+    if (button) {
+      button.textContent = collapsed ? "Show filters" : "Hide filters";
+      button.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      button.title = collapsed
+        ? "Show the filter panel"
+        : "Hide the filter panel to give the map more room";
+    }
+  }
+
+  function getNativeFullscreenElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement || null;
+  }
+
+  function isMapFullscreen() {
+    const target = getFullscreenTarget();
+
+    return !!target && (getNativeFullscreenElement() === target || target.classList.contains(FALLBACK_CLASS));
+  }
+
+  function fitGraph() {
+    // Wait for the new layout box before measuring the canvas.
+    global.requestAnimationFrame(() => {
+      if (state.cy) {
+        state.cy.resize();
+        state.cy.fit(40);
+      }
+    });
+  }
+
+  function syncFullscreenState() {
+    const target = getFullscreenTarget();
+    const button = getEl("knm-btnFullscreen");
+    const active = isMapFullscreen();
+
+    if (target) {
+      target.classList.toggle(FULLSCREEN_CLASS, active);
+    }
+
+    if (!active) {
+      // The normal page always shows its filters.
+      setFiltersCollapsed(false);
+    }
+
+    document.documentElement.classList.toggle(
+      SCROLL_LOCK_CLASS,
+      !!target && target.classList.contains(FALLBACK_CLASS)
+    );
+
+    if (button) {
+      button.textContent = active ? "Exit full screen" : "Full screen";
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      button.title = active ? "Leave full screen (Esc)" : "Show the map in full screen (Esc to exit)";
+    }
+
+    fitGraph();
+  }
+
+  async function enterFullscreen() {
+    const target = getFullscreenTarget();
+
+    if (!target) {
+      return;
+    }
+
+    const request = target.requestFullscreen || target.webkitRequestFullscreen;
+
+    if (request) {
+      try {
+        await request.call(target, { navigationUI: "hide" });
+        return; // fullscreenchange syncs the UI
+      } catch (error) {
+        // Refused (permissions policy, no user gesture): use the in-page mode.
+      }
+    }
+
+    target.classList.add(FALLBACK_CLASS);
+    syncFullscreenState();
+  }
+
+  function exitFullscreen() {
+    const target = getFullscreenTarget();
+
+    if (!target) {
+      return;
+    }
+
+    if (getNativeFullscreenElement() === target) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+
+      if (exit) {
+        Promise.resolve(exit.call(document)).catch(() => {});
+      }
+      return; // fullscreenchange syncs the UI
+    }
+
+    target.classList.remove(FALLBACK_CLASS);
+    syncFullscreenState();
+  }
+
+  function bindViewControls() {
+    const filtersButton = getEl("knm-btnFilters");
+    const fitButton = getEl("knm-btnFit");
+    const fullscreenButton = getEl("knm-btnFullscreen");
+    const cyContainer = getEl("knm-cy");
+
+    if (filtersButton) {
+      filtersButton.addEventListener("click", () => {
+        setFiltersCollapsed(!(state.root && state.root.classList.contains(FILTERS_COLLAPSED_CLASS)));
+      });
+    }
+
+    if (fitButton) {
+      fitButton.addEventListener("click", () => {
+        if (state.cy) {
+          state.cy.fit(40);
+        }
+      });
+    }
+
+    if (fullscreenButton) {
+      fullscreenButton.addEventListener("click", () => {
+        if (isMapFullscreen()) {
+          exitFullscreen();
+        } else {
+          enterFullscreen();
+        }
+      });
+    }
+
+    document.addEventListener("fullscreenchange", syncFullscreenState);
+    document.addEventListener("webkitfullscreenchange", syncFullscreenState);
+
+    document.addEventListener("keydown", (event) => {
+      const target = getFullscreenTarget();
+
+      // Native full screen handles Esc itself; the fallback needs it here.
+      // An Esc already used to close an autocomplete list is left alone.
+      if (event.key === "Escape" && !event.defaultPrevented
+          && target && target.classList.contains(FALLBACK_CLASS)) {
+        exitFullscreen();
+      }
+    });
+
+    // Opening or closing the traffic summary changes the canvas width without a
+    // window resize; keep Cytoscape's canvas in step but leave the zoom alone.
+    if (cyContainer && typeof global.ResizeObserver === "function") {
+      let pending = false;
+
+      new global.ResizeObserver(() => {
+        if (pending) {
+          return;
+        }
+
+        pending = true;
+        global.requestAnimationFrame(() => {
+          pending = false;
+
+          if (state.cy) {
+            state.cy.resize();
+          }
+        });
+      }).observe(cyContainer);
+    }
+  }
+
   function init() {
     const root = getEl("network-map-root");
 
@@ -1109,6 +1308,7 @@
     buildLayout(root);
     bindSummaryPanel();
     bindControls();
+    bindViewControls();
 
     state.initialized = true;
 
