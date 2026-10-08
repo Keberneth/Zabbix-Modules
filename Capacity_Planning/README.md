@@ -148,7 +148,7 @@ The separate **CPU** and **RAM** tabs: sustained utilization against each host's
 
 ## Features
 
-- **Real disk forecasting, not just charts** — a robust Theil–Sen trend (median of pairwise slopes) is fitted over nested 12-month/6-month/3-month/1-month/1-week windows; the best-qualified window is chosen automatically and a well-supported recent acceleration can shorten the estimate. The same acceleration rule is applied to the byte model and to a direct used-percentage series in its own units, so the two models describe the same time period; when their estimates still diverge (for example after a capacity change), the report says so explicitly. The growth noise floor is capacity-relative, so small filesystems with real growth are still forecast while noise-level slopes on large volumes are discarded by both models together.
+- **Real disk forecasting, not just charts** — a robust Theil–Sen trend (median of pairwise slopes) is fitted over nested 12-month/6-month/3-month/1-month/1-week windows; the best-qualified window is chosen automatically and a well-supported recent acceleration can shorten the estimate. The same acceleration rule is applied to the byte model and to a direct used-percentage series in its own units, so the two models describe the same time period; when their estimates still diverge (for example after a capacity change), the report says so explicitly. The growth noise floor is capacity-relative, so small filesystems with real growth are still forecast while noise-level slopes on large volumes are discarded by both models together. The exact formulas and thresholds are listed in [How the calculations work](#how-the-calculations-work).
 - **Conservative filesystem truth** — stale current metrics are excluded, usable capacity prefers `used + free`, Linux `total` is never treated as usable capacity by itself, and direct `pused` history drives percentage ETAs when available while byte growth independently drives free-space ETAs. Current breaches remain visible even when there is too little history to fit a model.
 - **ETAs to the thresholds that actually alarm** — warning/critical percentage macros (`{$VFS.FS.PUSED.MAX.WARN/CRIT}` with `label(name)`/FSNAME contexts, regex contexts included) and absolute free-space macros are resolved with real Zabbix precedence: host → template chain by depth → global. Fallback defaults are used only when no macro resolves, and every fallback is reported.
 - **Risk classification** — every finding is classified Critical / High / Medium / Watch / Healthy / Unknown from current breaches, projected ETAs and forecast confidence, so the report leads with what needs action.
@@ -178,6 +178,180 @@ The separate **CPU** and **RAM** tabs: sustained utilization against each host's
 - If an item has no hourly trends, a bounded raw-history fallback (7 days, bucketed hourly) is used and marked as low-confidence.
 
 > Forecast dates are planning estimates, not guarantees. The ETA is the projected threshold crossing — not the exact moment a Zabbix problem event fires (triggers may require sustained breaches).
+
+## How the calculations work
+
+All calculations run on the server in `actions/CapacityPlanningData.php`, except the display-only "Possible path" pattern, which the browser computes. The input is Zabbix hourly **trends** (`min`/`avg`/`max`/`num`). CPU and memory also use up to 31 days of raw **history**. Every number in the report comes from the rules below; nothing is machine-learned or tuned per installation.
+
+### 1. Data preparation
+
+- **Daily points**: hourly trend rows are combined into one value per UTC day, averaged with the hour's sample count (`num`) as weight.
+- **Analysis windows**: 12 months (365 days), 6 months (183), 3 months (92), 1 month (31), 2 weeks (14) and 1 week (7), all ending now and limited by the selected lookback.
+- **Coverage** of a window is the share of its hours that contain data: `distinct hours with data ÷ (window days × 24)`.
+- **Per-window statistics**: sample-weighted average, sample-weighted 95th percentile (p95), peak (highest hourly max), percentage of samples above the review and alarm thresholds, trend slope and R².
+
+### 2. Trend line: Theil–Sen estimator
+
+The growth rate is a **Theil–Sen** robust linear regression over the window's daily points:
+
+- **slope** = the median of the slopes between *every pair* of daily points, `(yⱼ − yᵢ) / (xⱼ − xᵢ)`. Long windows are evenly sampled down to 60 points (about 1,800 pairs). At least 3 points are required.
+- **intercept** = the median of `y − slope · x`.
+- **R²** = `1 − Σ(residual²) / Σ(y − mean)²` against that line, clamped to 0–1. It measures how linear the growth really is.
+
+Theil–Sen is used instead of ordinary least squares because it is robust: up to about 29% of the points can be outliers (a log cleanup, a one-off restore, a spike) without moving the slope.
+
+### 3. Filesystem forecast
+
+**Usable capacity** is `used + free`, otherwise `used ÷ pused`, and on Windows `total`. A Linux `total` is never used on its own, because it includes reserved blocks.
+
+Two independent models are fitted and the worse result wins:
+
+- **Byte model**: growth of used bytes per day. It drives the full date and the free-space thresholds.
+- **Percentage model**: growth of used % per day, taken from the `pused` history directly or derived from bytes ÷ capacity. It drives the percentage thresholds.
+
+**Window choice**: the first window in this order that meets both minimums is used:
+
+| Order | Window | Minimum days with data | Minimum coverage |
+|---|---|---|---|
+| 1 | 3 months | 60 | 55% |
+| 2 | 6 months | 90 | 45% |
+| 3 | 12 months | 180 | 45% |
+| 4 | 1 month | 21 | 55% |
+| 5 | 1 week | 5 | 55% |
+
+If none qualifies, the longest window with at least 5 days and 25% coverage is used. Otherwise there is no model and the result is **Unknown**.
+
+**Acceleration**: the 1-month slope replaces the selected slope when both of these hold:
+- the 1-month window has ≥ 21 days, ≥ 70% coverage and R² ≥ 0.35;
+- its slope is greater than `max(1.5 × selected slope, noise floor)`.
+
+This is the ⚠ "accelerating" marker in the report.
+
+**Noise floor**: a byte slope below `min(1 MiB/day, capacity × 0.00001 per day)` counts as no growth. The percentage model uses the same floor converted to percentage points, or 0.01 pp/day when capacity is unknown.
+
+**ETA**: the remaining distance divided by the slope, in days. A threshold that is already crossed gives 0, and zero or negative growth gives no ETA.
+
+| ETA | Formula |
+|---|---|
+| Warning / critical (percent) | `(threshold % − current used %) ÷ percentage slope` |
+| Warning / critical (free space) | `(current free − free-space threshold) ÷ byte slope` |
+| Full | `current free ÷ byte slope` |
+
+When both a percentage and a free-space threshold exist, the earlier ETA is reported together with its basis.
+
+**Forecast confidence**:
+
+- **High**: ≥ 60 days of data, ≥ 70% coverage, R² ≥ 0.55, and the recent 1-month trend points the same way.
+- **Medium**: ≥ 21 days and ≥ 45% coverage, with the same direction check.
+- **Low**: anything else.
+
+The direction check only counts when the 1-month window itself has ≥ 14 days and ≥ 45% coverage.
+
+**Filesystem risk**:
+
+| Condition | Risk |
+|---|---|
+| Used % above the critical threshold now, or free space below the critical free-space threshold | Critical |
+| Above the warning threshold now | at least High |
+| Next critical event (earliest of critical ETA and full ETA) ≤ 7 / 30 / 90 / 180 days | Critical / High / Medium / Watch |
+| Warning ETA ≤ 7 / 30 / 90 days | High / Medium / Watch |
+| A model exists but no ETA falls in these ranges | Healthy |
+| No qualified model | Unknown |
+
+The higher of the critical-ETA and warning-ETA results wins. **Low confidence caps the result at Medium.**
+
+**Threshold macros**: these are resolved with Zabbix precedence (host → templates by depth → global; exact context, then regex context, then the plain macro).
+
+| Threshold | Macro | Default when no macro resolves |
+|---|---|---|
+| Disk warning % | `{$VFS.FS.PUSED.MAX.WARN:"<fs>"}` | 90 (remote filesystems 85) |
+| Disk critical % | `{$VFS.FS.PUSED.MAX.CRIT:"<fs>"}` | 95 (remote filesystems 90) |
+| Free-space warning / critical | `{$VFS.FS.MAX.GB.WARN/CRIT}`, then `{$VFS.FS.FREE.MIN.WARN/CRIT}` | disabled |
+
+On Windows the context is the item label, for example `System(C:)`. A bare number in a free-space macro means bytes (`5G` = 5 GiB).
+
+### 4. CPU and memory
+
+CPU and memory are judged on **sustained evidence**, not on a trend line.
+
+**Window choice**: the first window in this order that meets both minimums:
+
+| Order | Window | Minimum days | Minimum coverage |
+|---|---|---|---|
+| 1 | 1 month | 21 | 55% |
+| 2 | 2 weeks | 10 | 60% |
+| 3 | 3 months | 60 | 45% |
+| 4 | 1 week | 5 | 60% |
+| 5 | 6 months | 120 | 40% |
+| 6 | 12 months | 180 | 40% |
+
+**Thresholds**:
+
+| Threshold | Source | Default |
+|---|---|---|
+| CPU alarm | `{$CPU.UTIL.CRIT}` | 99 |
+| CPU review | `{$CPU.UTIL.WARN}`, or the legacy `{$CPU.UTIL.WARNING}` (non-Windows only), when configured | alarm − 10 pp (at most 90) |
+| Memory alarm | `{$MEMORY.UTIL.MAX}` | 95 |
+| Memory review | — | alarm − 5 pp (at most 90) |
+
+The stock Linux and Windows templates only define the alarm macros, so the review level is normally derived from the alarm.
+
+**Baseline risk**: computed from the selected window. "Above" means the share of samples above the threshold.
+
+| Risk | Rule |
+|---|---|
+| Critical | average ≥ alarm, **or** ≥ 10% above alarm and p95 ≥ alarm |
+| High | p95 ≥ alarm and ≥ 2% above alarm, **or** ≥ 20% above review and p95 ≥ review |
+| Medium | p95 ≥ review and ≥ 5% above review |
+| Watch | the fresh current value is ≥ review |
+| Healthy | none of the above |
+| Unknown | no window qualified (Watch if the current value is ≥ review) |
+
+**Confirmed saturation episodes**: computed over the last 31 days of raw history in 5-minute buckets.
+
+- A bucket counts as saturated only when all of these hold:
+  - the bucket is complete;
+  - it holds at least 2 samples;
+  - its sample coverage is ≥ 75%;
+  - its **minimum** is ≥ 95%.
+- Hourly trend rows can also qualify under the same rules (complete, ≥ 2 samples, ≥ 75% coverage, minimum ≥ 95%).
+- Consecutive saturated buckets form an episode. Episodes shorter than 15 minutes are ignored, and those of 30 minutes or more count as long.
+- A maximum ≥ 99% is recorded as a "near-full" observation, but on its own it never proves duration.
+- Episodes are rated as follows:
+
+| Risk | Rule |
+|---|---|
+| Critical | an ongoing episode ≥ 60 min, **or** ≥ 3 episodes of ≥ 60 min on ≥ 3 days totalling ≥ 360 min |
+| High | ≥ 3 episodes of ≥ 30 min on ≥ 3 days, **or** longest ≥ 60 min with a total ≥ 120 min |
+| Medium | ≥ 2 episodes on ≥ 2 days, **or** a total ≥ 60 min |
+| Watch | ≥ 1 episode, **or** ≥ 6 near-full observations across ≥ 2 days |
+
+The overall CPU or memory risk is the higher of the baseline risk and the saturation risk. When the baseline is Unknown and saturation is Healthy, the result stays Unknown, because no saturation evidence is not the same as proof of health.
+
+**Regime change**: the last *N* days are compared with the *N* days before, for N = 7, 14, 21, 28 and 31. A change is accepted when all of these hold:
+- both halves have data on ≥ 75% of their days and ≥ 70% coverage;
+- the averages differ by ≥ 10 percentage points **and** ≥ 20% relative;
+- ≥ 70% of the recent days stay beyond the prior median ± 6 pp.
+
+The newer level then replaces the older baseline, and pre-change saturation remains visible as history.
+
+**Confidence**:
+- **High**: ≥ 80% coverage and ≥ 80% of the window's days present.
+- **Medium**: ≥ 60% coverage and ≥ 65% of the days present.
+- **Low**: anything else.
+
+A stale current value lowers confidence by one step.
+
+### 5. "Possible path" (chart only)
+
+The detail chart can draw a second, fainter line that continues a repeating pattern, such as weekly cleanups. The browser removes the linear trend from the daily values and runs a **masked autocorrelation** on what remains. The line is drawn only when all of these hold:
+
+- at least 21 days of data and at least 3 complete cycles;
+- the correlation at the detected period is a local peak and is ≥ max(0.5, 3 ÷ √pairs);
+- the correlation at twice the period is ≥ 0.25;
+- the cycle amplitude over the last 3 cycles varies by no more than 2.5×.
+
+This line never changes any ETA, marker, risk or export value. Those always come from the linear model.
 
 ## Usage
 

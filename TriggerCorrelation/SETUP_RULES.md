@@ -43,11 +43,12 @@ receiver-LLD mode is always `trigger.correlation.state[<your Correlation ID>]`
 3. **Run self-check** (Settings) — everything should be green within a minute or
    two. **Repair automatic setup** fixes what is not.
 
-> Already had a hand-made setup? It keeps working: any host with the heartbeat item
-> is used as the engine, its URL is left alone, and the secret is only replaced when
-> the heartbeat is being refused with "Invalid evaluation token". If you call
-> `eval.php` from cron instead, set Settings → Automatic setup → **Evaluation driver**
-> to "I call eval.php myself".
+> Already had a hand-made setup? It keeps working unchanged — the module does not
+> touch a host it did not create. Click **Repair automatic setup** once to let it
+> take over your engine host (the one named like Settings → Engine host): it then
+> manages its secret and URL, and new rules get automatic correlation hosts. If you
+> call `eval.php` from cron instead, set Settings → Automatic setup → **Evaluation
+> driver** to "I call eval.php myself".
 
 ---
 

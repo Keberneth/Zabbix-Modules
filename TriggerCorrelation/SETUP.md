@@ -85,7 +85,7 @@ correlation host group, and any unused correlation hosts. If something is red,
 |---|---|
 | `Template Trigger Correlation Receiver` | engine template: heartbeat HTTP-agent item (calls `eval.php` every minute) + receiver LLD |
 | `Template Trigger Correlation Auto Receiver` | receiver LLD only, for correlation hosts |
-| **Engine host** `Zabbix Correlation Engine` | runs the heartbeat. Any host that already has the heartbeat item is used instead, so an existing hand-made setup keeps working. Its `{$TRIGGER.CORRELATION.URL}` is a server-verified address and `{$TRIGGER.CORRELATION.TOKEN}` the module-generated secret |
+| **Engine host** `Zabbix Correlation Engine` | runs the heartbeat. Its `{$TRIGGER.CORRELATION.URL}` is a server-verified address and `{$TRIGGER.CORRELATION.TOKEN}` the module-generated secret. A hand-made engine from an older setup keeps working and is taken over only when you click **Repair automatic setup** |
 | **Correlation hosts** `Correlation: <host> + <host>` | one per set of source hosts, shared by every rule over the same hosts; in the engine host's host group unless you pick another one in Settings → Automatic setup |
 
 After the next heartbeat the discovered state item shows the current correlated

@@ -42,7 +42,12 @@ The module does **not** use `zabbix_sender` and does **not** write directly to t
 
 - `problem.get` to read active trigger problems.
 - `history.push` to write `0`, `4`, `5`, etc. to Zabbix trapper items.
-- Normal Zabbix triggers on the receiver template create and resolve the final correlation problems.
+- Normal Zabbix triggers on a **correlation host** create and resolve the final correlation problems.
+
+The module **creates those correlation hosts itself** — one per set of source hosts,
+e.g. `Correlation: sccm01 + web01` — together with its templates, the engine host
+that runs the evaluation and the evaluation secret. You only enter the Zabbix API
+URL and an API token.
 
 The default design is:
 
@@ -51,9 +56,9 @@ Zabbix trigger problems
         ↓
 Trigger Correlation module
         ↓ history.push
-Receiver host trapper items
+Correlation host (created automatically) trapper items
         ↓
-Normal Zabbix trigger prototypes
+Normal Zabbix trigger prototypes → correlation problem
 ```
 
 ### Files
@@ -90,18 +95,18 @@ sudo find /usr/share/zabbix/modules/TriggerCorrelation -type d -exec chmod 0755 
 sudo find /usr/share/zabbix/modules/TriggerCorrelation -type f -exec chmod 0644 {} \;
 ```
 
-No writable directory and no database migration are required.
+No writable directory and no database migration are required. The module stores
+all configuration and rules in the Zabbix `module` database table (the same place
+Zabbix keeps every module's config), so the state is shared by every frontend
+node and survives Docker container restarts. This is what makes it work on
+single-server, split/multi-frontend and Docker installs alike.
 
 > **Multi-frontend / Docker:** install the module directory on **every** frontend
 > node. *Administration → Modules → Scan directory* run on a node that lacks the
 > directory deletes the module's database row — and with it all rules and settings.
 > (If that happened, re-enable the module, recreate the rules and use **Repair
 > automatic setup**: it clears the correlation states and raised severities the lost
-> rules left behind.) The module stores
-all configuration and rules in the Zabbix `module` database table (the same place
-Zabbix keeps every module's config), so the state is shared by every frontend
-node and survives Docker container restarts. This is what makes it work on
-single-server, split/multi-frontend and Docker installs alike.
+> rules left behind.)
 
 Then in Zabbix frontend:
 
@@ -127,7 +132,7 @@ link a template or set macros: when you save your first rule the module
 
 - imports its two templates (create-only — an existing template is never changed),
 - creates the **engine host** `Zabbix Correlation Engine` (its heartbeat item runs
-  the evaluation once a minute) — or reuses any host that already has that heartbeat,
+  the evaluation once a minute),
 - generates the **evaluation shared secret**, stores only its hash and writes the
   secret into the engine host's `{$TRIGGER.CORRELATION.TOKEN}` macro (SECRET_TEXT),
 - picks the `{$TRIGGER.CORRELATION.URL}` the **Zabbix server** can actually reach —
@@ -136,6 +141,13 @@ link a template or set macros: when you save your first rule the module
 - and creates a **correlation host for the rule's set of source hosts**, e.g.
   `Correlation: sccm01 + web01`, with the receiver template linked. Every rule over
   the same hosts reuses that host.
+
+> **Upgrading from a version where you set this up by hand?** Your rules and your
+> hand-made `Zabbix Correlation Engine` keep working unchanged. Click **Settings →
+> Repair automatic setup** once to let the module take over that engine host (its
+> secret and URL); from then on new rules get automatic correlation hosts. The
+> module never takes over a host on its own — anyone with write access to a host
+> group could otherwise plant one.
 
 Now create a rule:
 
@@ -225,7 +237,8 @@ Critical business service incident
 
 A Zabbix frontend module is PHP code running inside the Zabbix web frontend. It does not run continuously by itself in the Zabbix server process.
 
-To avoid an external daemon and avoid `zabbix_sender`, the receiver template includes an HTTP agent item:
+To avoid an external daemon and avoid `zabbix_sender`, the **engine host** — created
+by the module the first time you save a rule — carries an HTTP agent item:
 
 ```text
 trigger.correlation.eval
@@ -250,7 +263,7 @@ Zabbix API problem.get
         ↓
 Zabbix API history.push
         ↓
-Receiver trapper items and trigger prototypes
+Correlation host trapper items and trigger prototypes
 ```
 
 No external binary, no `zabbix_sender`, no direct database event writes.
@@ -261,8 +274,11 @@ No external binary, no `zabbix_sender`, no direct database event writes.
 - Zabbix frontend modules enabled.
 - PHP cURL extension recommended.
 - Zabbix API token.
-- A receiver host with the included receiver template.
-- Network access from the Zabbix server to the Zabbix frontend URL if you want scheduled automatic evaluation.
+- Rules are saved by a **Super Admin**: the module creates its templates, hosts and
+  macros under that session. Nothing has to be prepared in Zabbix by hand.
+- Network access from the Zabbix server to the Zabbix frontend (for the once-a-minute
+  evaluation). The module checks this from the server's side and picks an address
+  that works; see *Evaluation endpoint*.
 
 ### API permissions
 
@@ -270,7 +286,7 @@ Use a dedicated API token. The token user needs enough permissions to:
 
 - Read source hosts and source trigger problems.
 - Read triggers and hosts for the UI search.
-- Write history to the receiver host trapper items through `history.push`.
+- Write history to the correlation host trapper items through `history.push` (Read on their host group is enough).
 - Add problem update comments (`event.acknowledge`) on the source and receiver problems — only required if you enable the comment-injection feature.
 - Change problem severity (`event.acknowledge` change-severity action) on the target problems — only required for **Severity escalation** rules. The token user needs "Change severity" permission on those host groups.
 
@@ -347,8 +363,12 @@ Then set:
 Evaluation token env var: ZABBIX_TRIGGER_CORRELATION_EVAL_TOKEN
 ```
 
-If you paste the evaluation secret in the UI instead, the module stores a one-way
-password hash, not the plain secret.
+By default you set neither: the module generates the evaluation secret, stores a
+one-way password hash and writes the secret into the engine host's
+`{$TRIGGER.CORRELATION.TOKEN}` (SECRET_TEXT) macro. If you paste a secret in the UI
+instead, it is stored as a hash too and copied to the engine host for you — and,
+being yours, it is never rotated automatically. A token macro you keep in a secret
+vault is never overwritten.
 
 Encryption at rest (optional): if you paste the Zabbix API token into the UI it
 is stored in the database. To encrypt it at rest, set a passphrase in the
@@ -618,11 +638,19 @@ This makes it possible to build exact host/trigger correlations without manually
 
 ### Output modes
 
-#### 1. Receiver LLD template mode
+#### 1. Automatic correlation host (default, recommended)
 
-This is the recommended mode.
+Nothing to prepare. When you save the rule the module creates — or re-uses — the
+correlation host for the rule's **set of source hosts** and links **Template Trigger
+Correlation Auto Receiver** to it:
 
-The module writes to:
+```text
+Source hosts sccm01 + web01      →  host "Correlation: sccm01 + web01"
+                                     (technical name trigger-correlation-<key>)
+Another rule over web01 + sccm01 →  the same host
+```
+
+The module then writes to that host:
 
 ```text
 trigger.correlation.discovery
@@ -630,14 +658,34 @@ trigger.correlation.state[<correlation_id>]
 trigger.correlation.context[<correlation_id>]
 ```
 
-The included template creates item prototypes and trigger prototypes.
+and the template's trigger prototypes raise `Correlation HIGH: <rule name>` etc.
 
-In the rule editor set:
+- **Correlation ID** — optional; it defaults to the rule name. It becomes the item key
+  `trigger.correlation.state[<correlation_id>]` (letters, digits, `_ . -`,
+  lower-cased) and must be unique among the rules on the same correlation host.
+- Changing the rule's source hosts moves it to the host for the new set; if no other
+  rule shares its current host, that host is re-keyed in place so its history and
+  open problem carry over.
+- The first result appears within about two minutes (Zabbix needs a heartbeat run to
+  discover the item); until then the rule shows *Setting up*.
 
-- **Receiver host** — only for the advanced "receiver host I manage" mode: a host that has **Template Trigger Correlation Auto Receiver** linked (your own host representing the flow/integration). Do not link the heartbeat template (**Template Trigger Correlation Receiver**) to such hosts — keep exactly one engine host. This is a **host name**, not a template name. With the default *Automatic correlation host* you set none of this.
-- **Correlation ID** — a short unique id **you** choose, e.g. `public_web_app_integration_flow`. It is **not** an item name and **not** a template name; the module discovers `trigger.correlation.state[<correlation_id>]` on the receiver host from it (letters, digits, `_ . -`, lower-cased automatically). You do not edit that `{#CORRELATION.ID}` prototype in the template — the macro is what makes discovery work.
+#### 2. A receiver host I manage (advanced)
 
-#### 2. Existing item mode
+Use this when the correlation must land on a specific host of yours (one that
+represents an integration flow, with its own actions and maintenance). Link
+**Template Trigger Correlation Auto Receiver** to it (both templates are imported
+automatically once any rule has been saved), then set in the rule editor:
+
+- **Receiver host** — that host's technical name (a **host name**, not a template
+  name). Do not link the heartbeat template (**Template Trigger Correlation
+  Receiver**) to such hosts — keep exactly one engine host.
+- **Correlation ID** — a short unique id **you** choose, e.g.
+  `public_web_app_integration_flow`. The module discovers
+  `trigger.correlation.state[<correlation_id>]` on the host from it. You do not edit
+  the `{#CORRELATION.ID}` prototype in the template — that macro is what makes
+  discovery work.
+
+#### 3. My own trapper item (advanced)
 
 Use this if you already have a host/template with a trapper item and trigger.
 An example template to clone is `templates/trigger_correlation_manual_item_zabbix_7.yaml`
@@ -648,7 +696,7 @@ The module writes the selected value to the selected item.
 Example:
 
 ```text
-Host: Zabbix Correlation Engine
+Host: Payments Flow
 Item key: custom.correlation.windows_update_web01
 Value when matched: 1
 Value when clear: 0
@@ -657,14 +705,16 @@ Value when clear: 0
 Then your own trigger can be:
 
 ```text
-last(/Zabbix Correlation Engine/custom.correlation.windows_update_web01)=1
+last(/Payments Flow/custom.correlation.windows_update_web01)=1
 ```
 
 ### Cloning the templates
 
-Both templates are starting points you can copy:
+Only relevant for the two advanced output modes — automatic correlation hosts need
+no template work at all.
 
-- **Receiver LLD template** (`trigger_correlation_receiver_zabbix_7.yaml`) — link as-is.
+- **Receiver templates** (`trigger_correlation_auto_receiver_zabbix_7.yaml`, and the
+  engine's `trigger_correlation_receiver_zabbix_7.yaml`) — link as-is.
   Keep the `{#CORRELATION.ID}` macro in the item/trigger prototypes; that is the LLD macro
   discovery fills in from each rule's Correlation ID. Do not hardcode it.
 - **Manual item template** (`trigger_correlation_manual_item_zabbix_7.yaml`) — clone it, then
@@ -685,7 +735,7 @@ Both templates are starting points you can copy:
 ### Evaluation endpoint
 
 The Zabbix server drives evaluation by calling a **standalone** endpoint every
-minute (via the receiver template's HTTP-agent item):
+minute, via the heartbeat HTTP-agent item of the engine host the module set up:
 
 ```text
 modules/TriggerCorrelation/eval.php
@@ -705,6 +755,15 @@ default config already routes `*.php` under the document root to php-fpm, so
 locked-down nginx that only allows specific PHP files, add a `location`/alias that
 routes that one file to PHP (the same approach as the AI module's webhook).
 
+**Which URL the heartbeat uses** is chosen by the module: it asks the Zabbix server
+to fetch candidate addresses (the explicit *Evaluation URL* setting, the Frontend
+URL from *Administration → General → Other*, the API URL's host, and this web
+server's own names) — the same request as the item **Test** button — and writes
+the first one that answers as `eval.php` into the engine host's
+`{$TRIGGER.CORRELATION.URL}`. If none works it says so; set *Settings → Automatic
+setup → Evaluation URL* (in Docker usually the web container's service name, e.g.
+`http://zabbix-web:8080/modules/TriggerCorrelation/eval.php`).
+
 Authentication (header only — the token is never accepted as a URL query
 parameter, so it cannot leak into access logs, proxy logs or browser history):
 
@@ -716,6 +775,13 @@ The endpoint requires a valid evaluation token. The in-UI "Run evaluation now"
 button uses a separate, CSRF-protected, Super Admin-only action instead — and the
 older `zabbix.php?action=triggercorrelation.eval` action still works on installs
 that allow anonymous/guest access.
+
+The module generates this secret and copies it into the engine host's
+`{$TRIGGER.CORRELATION.TOKEN}` (SECRET_TEXT) macro; you never see it. To call the
+endpoint yourself (cron/curl), enter your own secret under *Settings → Evaluation
+endpoint* — the module copies it to the engine host and never rotates a secret you
+chose — or set *Evaluation driver* to "I call eval.php myself" if cron should be the
+only driver.
 
 Manual test:
 
@@ -750,10 +816,7 @@ Condition 2:
   Trigger: Current month CU not installed
 
 Output mode:
-  Receiver LLD template
-
-Receiver host:
-  Zabbix Correlation Engine
+  Automatic correlation host   (→ "Correlation: sccm01 + web01", created on save)
 
 Correlation ID:
   windows_update_web01_current_cu
@@ -777,10 +840,7 @@ Condition 2:
   Trigger: Last month CU not installed
 
 Output mode:
-  Receiver LLD template
-
-Receiver host:
-  Zabbix Correlation Engine
+  Automatic correlation host   (→ the same "Correlation: sccm01 + web01" host)
 
 Correlation ID:
   windows_update_web01_last_month_cu
@@ -791,13 +851,13 @@ Match value:
 
 ### Operational notes
 
-The first evaluation pushes LLD discovery and state values. Zabbix may need one LLD cycle before the discovered items exist. If the first evaluation returns `No permissions to referred object or it does not exist` for the state item, wait one or two minutes and run evaluation again.
+The first evaluation after a rule is saved pushes LLD discovery to its correlation host; Zabbix creates the item within one or two heartbeat runs. Meanwhile the rule shows *Setting up — Zabbix is still creating the correlation item*. If that persists for more than a few minutes it turns into an error that points to the self-check.
 
 The module pushes `0` when a rule no longer matches. The normal Zabbix trigger then resolves.
 
 If the Zabbix frontend is unavailable, evaluation stops because the HTTP agent item cannot call the module endpoint.
 
-If the Zabbix API token loses access to the receiver host, `history.push` fails and correlation states will not update.
+If the Zabbix API token loses access to the correlation host, `history.push` fails and correlation states will not update — the rule then reports a permission error (not *Setting up*), and the self-check names the hosts the token cannot see.
 
 ### Troubleshooting
 
@@ -843,29 +903,38 @@ For Apache reverse proxies, make sure the `Authorization` header is not stripped
 
 #### Evaluation heartbeat has no data
 
-Check receiver host macros:
+Run **Settings → Run self-check**. Its *Engine host* line shows the heartbeat as the
+Zabbix server sees it, e.g. "The Zabbix server reached eval.php at … 20s ago", or the
+exact error with what to do. Then click **Repair automatic setup**:
 
-```text
-{$TRIGGER.CORRELATION.URL}
-{$TRIGGER.CORRELATION.TOKEN}
-```
+- *Invalid evaluation token* (401) → the engine host gets a new secret, written to its
+  `{$TRIGGER.CORRELATION.TOKEN}` macro and stored as a hash in one transaction.
+- *Could not resolve host / connection refused / 404* → the server tests candidate
+  addresses and the first one that reaches `eval.php` is written to
+  `{$TRIGGER.CORRELATION.URL}`. If none does, set *Settings → Automatic setup →
+  Evaluation URL*.
+- No engine host at all → Repair creates one (or takes over a hand-made one named
+  like *Settings → Engine host*).
 
-From the Zabbix server, test:
-
-```bash
-curl -k -H 'X-Trigger-Correlation-Token: long-random-secret' \
-  'https://your-zabbix.example.com/modules/TriggerCorrelation/eval.php'
-```
+You do not edit these macros by hand.
 
 #### State item does not exist
 
-Run evaluation once to push discovery, wait for LLD processing, then run evaluation again.
-
-Check latest data for:
+Right after a rule is saved this is normal for a minute or two (*Setting up*). If it
+persists, run the self-check: it reports missing correlation hosts (Repair recreates
+them) and whether the API token's user can see them. Check latest data on the
+correlation host for:
 
 ```text
 trigger.correlation.discovery
 ```
+
+#### Problems stuck after the module configuration was lost
+
+*Administration → Modules → Scan directory* on a frontend node without the module
+directory deletes the module's database row — rules and settings are gone, but the
+problems they raised are not. **Repair automatic setup** clears correlation states no
+rule owns any more and restores severities a deleted escalation rule had raised.
 
 #### Correlation problem does not resolve
 
@@ -881,7 +950,12 @@ trigger.correlation.state[<correlation_id>]
 
 - Use a dedicated service user and API token.
 - Limit source host groups to read-only access.
-- Limit receiver host group to the smallest possible read-write access.
+- Give the token user only **Read** on the correlation host group (enough for
+  `history.push` and comments); keep write access to the engine host's group
+  restricted, since whoever can edit that host can repoint its evaluation URL.
+- The module only writes secrets and URLs to — and only re-uses or deletes — hosts it
+  created itself (or that a Super Admin handed to it with *Repair*). Another host
+  carrying the heartbeat item or the module's tags is reported, never trusted.
 - Store the API token in an environment variable where possible, or set the
   `ZABBIX_TRIGGER_CORRELATION_ENCRYPTION_KEY` env var to encrypt it at rest.
 - Use HTTPS and TLS verification, and set an explicit API URL on split/Docker installs.
@@ -910,10 +984,20 @@ Then remove files:
 sudo rm -rf /usr/share/zabbix/modules/TriggerCorrelation
 ```
 
-Remove config if no longer needed:
+The configuration lives in the Zabbix `module` table and goes away with the module
+row. (Very old versions kept a config file; remove it if it exists:
+`sudo rm -rf /var/lib/zabbix/modules/trigger-correlation`.)
 
-```bash
-sudo rm -rf /var/lib/zabbix/modules/trigger-correlation
+When all generated correlation items and problems are no longer needed, delete what
+the module created (all tagged `trigger-correlation`):
+
+```text
+Data collection → Hosts → filter tag trigger-correlation:
+  value "auto"   — the correlation hosts ("Correlation: …")
+  value "engine" — the engine host (if the module created it)
+Data collection → Templates:
+  Template Trigger Correlation Receiver, Template Trigger Correlation Auto Receiver
 ```
 
-Remove or unlink the receiver template/host when all generated correlation items and problems are no longer needed.
+Settings → *Delete unused correlation hosts* removes correlation hosts no rule uses
+while the module is still enabled.
