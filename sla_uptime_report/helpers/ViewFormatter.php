@@ -59,6 +59,9 @@ class ViewFormatter {
 			case 'noitem':
 				return $this->pill('neutral', _('No item'));
 
+			case 'maint':
+				return $this->pill('neutral', _('In maintenance'));
+
 			default:
 				return $this->pill('neutral', _('No data'));
 		}

@@ -32,6 +32,7 @@ class HtmlExportRenderer {
 		$sla_summary = $report['sla_summary'];
 		$target = (float) $filter['target'];
 		$verdict = $this->verdict($report, $target);
+		$show_maintenance = (int) $fleet['maintenance_hosts'] > 0;
 
 		$minutes_axis = static function($value, int $decimals = 0, $reference = null): string {
 		$value = (float) $value;
@@ -119,6 +120,12 @@ class HtmlExportRenderer {
 			)) ?>
 		<?php else: ?>
 			<?= $h(_('No availability data was found for this period.')) ?>
+		<?php endif; ?>
+		<?php if ($show_maintenance): ?>
+			<?= $h(sprintf(
+				_('%1$s inside maintenance windows is accepted downtime and is not counted.'),
+				$helper->formatDuration((int) $fleet['maintenance_seconds'])
+			)) ?>
 		<?php endif; ?>
 	</p>
 </section>
@@ -262,6 +269,9 @@ class HtmlExportRenderer {
 					<th><?= $h(_('Availability')) ?></th>
 					<th class="num"><?= $h(_('Uptime')) ?></th>
 					<th class="num"><?= $h(_('Downtime')) ?></th>
+					<?php if ($show_maintenance): ?>
+						<th class="num"><?= $h(_('Maintenance')) ?></th>
+					<?php endif; ?>
 				</tr>
 			</thead>
 			<tbody>
@@ -271,6 +281,9 @@ class HtmlExportRenderer {
 						<td><?= $fmt->hostState((string) $row['state'], $row['pct']) ?></td>
 						<td class="num"><?= $h($row['pct'] !== null ? $helper->formatDuration((int) $row['uptime_seconds']) : '—') ?></td>
 						<td class="num"><?= $h($row['pct'] !== null ? $helper->formatDuration((int) $row['downtime_seconds']) : '—') ?></td>
+						<?php if ($show_maintenance): ?>
+							<td class="num"><?= $h((int) $row['maintenance_seconds'] > 0 ? $helper->formatDuration((int) $row['maintenance_seconds']) : '—') ?></td>
+						<?php endif; ?>
 					</tr>
 				<?php endforeach; ?>
 			</tbody>
@@ -294,6 +307,10 @@ class HtmlExportRenderer {
 		<?= $h(sprintf(
 			_('Source: Zabbix %1$s. SLI values come from the Zabbix SLA engine; host availability is measured from each host\'s availability item. All times UTC.'),
 			$report['source_used'] === 'trends' ? _('hourly trends') : _('raw history')
+		)) ?>
+		<?= $h(sprintf(
+			_('Maintenance windows on a host or its host groups are accepted downtime and excluded from its availability (recurring periods in %1$s time).'),
+			$report['maintenance']['timezone']
 		)) ?>
 	</div>
 	<?php foreach (($report['warnings'] ?? []) as $warning): ?>

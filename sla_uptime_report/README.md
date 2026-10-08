@@ -82,10 +82,56 @@ The calculation source follows the window length:
 
 The page always says which source it used, and what that means for precision.
 
+### Maintenance windows
+
+Downtime inside a maintenance window (*Data collection → Maintenance*) is **accepted downtime**:
+that time is left out of the host's measured time, so it counts as neither uptime nor downtime.
+The host table, the KPI cards, the export and the availability CSV show the maintenance time
+separately.
+
+The module applies maintenance the way the Zabbix server does:
+
+- A maintenance covers the hosts it lists **and every host in its host groups**, including
+  nested groups — a maintenance on `Linux` also covers hosts in `Linux/DB`.
+- Both maintenance types count: with and without data collection. On the history path a
+  polling gap during a no-data maintenance therefore costs nothing.
+- One-time periods are clipped to the maintenance's *Active since/till*. Daily, weekly and
+  monthly periods (including "every N days/weeks" and "first … last weekday of the month")
+  are expanded exactly as the server runs them, including skipping a start time that a DST
+  change makes not exist.
+- A maintenance **limited to problem tags does not count**. It only suppresses the matching
+  problems, so a host outage was never part of what it accepted. The report lists any such
+  maintenance that would otherwise have applied.
+
+Points to be aware of:
+
+- **Time zone.** The server runs recurring periods in its own local time zone, which the
+  frontend cannot see. The module uses the frontend's default time zone (*Administration →
+  General → GUI → Default time zone*, where *System* means PHP's configured zone) and names it
+  on the page. **Set it to the Zabbix server's time zone**, or recurring windows will be
+  shifted by the difference.
+- **Hourly trends (> 7 days).** An hour that touches a maintenance window is excluded whole.
+  The server floors integer trend averages, so a single down sample inside the window marks
+  the whole hour as down. Keeping the hour would charge accepted downtime to the minutes
+  around it. Raw history (≤ 7 days) is cut at the exact second.
+- **Configuration as it is now.** Zabbix keeps no history of maintenance windows, so they are
+  rebuilt from the current configuration. Expired maintenances keep working for past reports
+  until someone deletes them. A deleted maintenance no longer applies, and an edited one
+  applies as edited.
+- **Permissions.** Maintenances are read with the viewer's permissions. Zabbix only returns a
+  maintenance to a non-super-admin who can read *all* of its hosts and host groups, so a
+  maintenance that also covers other customers' groups is invisible to a customer-scoped user
+  and is not applied to their report. The page says so for such users. Generate customer
+  reports as a super admin, or scope maintenances per customer.
+- A host that spent the whole period in maintenance shows **In maintenance** instead of a
+  percentage. It counts neither as measured nor as "without data".
+
 ### SLI numbers
 
 SLI values come from the Zabbix SLA engine (`sla.getSli`) — the same numbers the native SLA
-report shows — so this module never disagrees with Zabbix about compliance. One subtlety the
+report shows — so this module never disagrees with Zabbix about compliance. Maintenance needs
+no handling here: the SLA engine already ignores problems suppressed by a maintenance. Use the
+SLA's *Excluded downtimes* for planned work that is not set up as a maintenance. One subtlety the
 module handles: the SLI matrix columns follow the API **response's** service order, not the
 request's, and mapping them naively attributes one service's SLI to another.
 
@@ -118,8 +164,9 @@ landscape (use the browser's *Print → Save as PDF* for a PDF).
 
 ![Export: heatmaps and attention list](docs/images/06-export-detail.jpg)
 
-CSV exports: the SLA heatmap (one row per service-month), host availability, and daily
-downtime per group. All CSV cells are neutralised against spreadsheet formula injection.
+CSV exports: the SLA heatmap (one row per service-month), host availability (with uptime,
+downtime and maintenance seconds per host), and daily downtime per group. All CSV cells are
+neutralised against spreadsheet formula injection.
 
 ---
 
@@ -171,6 +218,14 @@ instead:
 - **Zero samples is "no data", never "0% available"** — a dead item, a scan cap and a
   decommissioned host all look the same, and inventing a hard-down verdict would page someone
   about a host that may be fine.
+- **Maintenance is cut out, not converted into uptime.** Time inside a maintenance window
+  leaves the denominator, the same way Zabbix's SLA engine treats excluded downtime, so a
+  host that was fine outside its patch window reports 100%. It is not credited with the
+  window as if it had been up.
+- **Maintenance groups are matched like the server matches them**: nested groups included,
+  tag-limited maintenances excluded, and recurring periods expanded with the server's own
+  day, week, month and DST rules. These rules were checked against a port of the server's
+  period code.
 
 ---
 
@@ -188,6 +243,7 @@ counters and discarded, so memory stays flat no matter how many hosts or how wid
 | History samples scanned | 2 000 000 (streamed in 2 000-row pages; bounds time, not memory) |
 | Trend rows per API call | ~50 000 (chunk size adapts to the window length) |
 | Per-day sparklines | first 400 hosts (totals and charts cover every host) |
+| Maintenances read | 5 000, most recently ending first (only those active in the window are expanded) |
 | Report window | 768 days |
 | Page time limit | 300 s |
 

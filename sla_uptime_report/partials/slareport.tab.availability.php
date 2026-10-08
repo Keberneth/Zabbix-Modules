@@ -13,6 +13,9 @@
 
 $fleet = $report['fleet'];
 $target = (float) $filter['target'];
+
+// The maintenance column only appears when some host had maintenance.
+$show_maintenance = (int) $fleet['maintenance_hosts'] > 0;
 ?>
 
 <div class="sr-kpis">
@@ -35,6 +38,15 @@ $target = (float) $filter['target'];
 			: '—') ?></div>
 		<div class="sr-kpi-sub"><?= $esc(_('Summed across all measured hosts')) ?></div>
 	</div>
+	<?php if ($show_maintenance): ?>
+		<div class="sr-kpi sr-kpi--neutral">
+			<div class="sr-kpi-label"><?= $esc(_('Maintenance')) ?></div>
+			<div class="sr-kpi-value"><?= $esc($helper->formatDuration((int) $fleet['maintenance_seconds'])) ?></div>
+			<div class="sr-kpi-sub"><?= $esc((int) $fleet['maintenance_hosts'] === 1
+				? _('On 1 host, excluded from availability')
+				: sprintf(_('On %1$d hosts, excluded from availability'), (int) $fleet['maintenance_hosts'])) ?></div>
+		</div>
+	<?php endif; ?>
 	<div class="sr-kpi sr-kpi--<?= (int) $fleet['na'] > 0 ? 'warning' : 'ok' ?>">
 		<div class="sr-kpi-label"><?= $esc(_('Without data')) ?></div>
 		<div class="sr-kpi-value"><?= $esc((string) (int) $fleet['na']) ?></div>
@@ -86,6 +98,9 @@ $target = (float) $filter['target'];
 						<th><?= $esc(_('Daily trend')) ?></th>
 						<th class="sr-num"><?= $esc(_('Uptime')) ?></th>
 						<th class="sr-num"><?= $esc(_('Downtime')) ?></th>
+						<?php if ($show_maintenance): ?>
+							<th class="sr-num"><?= $esc(_('Maintenance')) ?></th>
+						<?php endif; ?>
 						<th><?= $esc(_('Item')) ?></th>
 					</tr>
 				</thead>
@@ -109,6 +124,11 @@ $target = (float) $filter['target'];
 									? $helper->formatDuration((int) $row['downtime_seconds'])
 									: '—') ?>
 							</td>
+							<?php if ($show_maintenance): ?>
+								<td class="sr-num sr-dim"><?= $esc((int) $row['maintenance_seconds'] > 0
+									? $helper->formatDuration((int) $row['maintenance_seconds'])
+									: '—') ?></td>
+							<?php endif; ?>
 							<td class="sr-dim"><?= $esc($row['item_key'] ?? _('none')) ?></td>
 						</tr>
 					<?php endforeach; ?>
@@ -124,6 +144,18 @@ $target = (float) $filter['target'];
 			<?= $esc(_('This period is read from hourly trends: each hour counts as up or down as a whole, so short blips inside an hour can round away. For exact figures pick a window of 7 days or less, which is read from raw history.')) ?>
 		<?php else: ?>
 			<?= $esc(_('This period is read from raw history samples. Missing samples count as downtime, so a polling gap shows up rather than hiding.')) ?>
+		<?php endif; ?>
+	</p>
+	<p class="sr-hint">
+		<?= $esc(sprintf(
+			_('Maintenance windows on a host, or on one of its host groups, are accepted downtime: that time is left out of the host\'s measured time and counts as neither uptime nor downtime. Recurring maintenance periods are laid out in the %1$s time zone (the frontend default), which must match the Zabbix server\'s.'),
+			$report['maintenance']['timezone']
+		)) ?>
+		<?php if ($report['source_used'] === 'trends'): ?>
+			<?= $esc(_('On hourly trends, an hour that touches a maintenance window is left out whole.')) ?>
+		<?php endif; ?>
+		<?php if ($report['maintenance']['restricted']): ?>
+			<?= $esc(_('Only maintenances whose hosts and host groups you can all read are applied.')) ?>
 		<?php endif; ?>
 	</p>
 </div>

@@ -98,7 +98,7 @@ class ReportDownload extends CController {
 					'availability_report_'.$period_slug.'.csv',
 					[
 						'Host group', 'Host', 'Availability pct', 'State',
-						'Uptime seconds', 'Downtime seconds', 'Item key',
+						'Uptime seconds', 'Downtime seconds', 'Maintenance seconds', 'Item key',
 						'Window start UTC', 'Window end UTC'
 					],
 					$helper->flattenAvailabilityRows($report['groups'], $time_from, $time_to)

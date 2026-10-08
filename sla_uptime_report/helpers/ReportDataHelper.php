@@ -3,6 +3,9 @@
 namespace Modules\SlaUptimeReport\Helpers;
 
 use API;
+use CSettingsHelper;
+use CTimezoneHelper;
+use CWebUser;
 
 class ReportDataHelper {
 
@@ -40,6 +43,13 @@ class ReportDataHelper {
 	 * per-group daily chart are computed for every host regardless.
 	 */
 	public const MAX_SPARK_HOSTS = 400;
+
+	/**
+	 * Maintenances read per report. They are read newest-ending first, so the
+	 * cap can only cut the oldest, and the page says so when a cut one could
+	 * still reach into the window.
+	 */
+	public const MAX_MAINTENANCES = 5000;
 
 	/**
 	 * Availability is detected from any one of these item keys (priority order:
@@ -225,6 +235,7 @@ class ReportDataHelper {
 		$report['fleet'] = $availability['fleet'];
 		$report['daily'] = $availability['daily'];
 		$report['availability_health'] = $availability['health'];
+		$report['maintenance'] = $availability['maintenance'];
 
 		$slas = ($filter['slaids'] !== [] && $report['selected_slaids'] === [])
 			? ['slas' => [], 'summary' => $report['sla_summary']]
@@ -248,12 +259,10 @@ class ReportDataHelper {
 			'selected_groupids' => [],
 			'selected_slaids' => [],
 			'groups' => [],
-			'fleet' => [
-				'avg' => null, 'hosts_total' => 0, 'with_data' => 0, 'below_target' => 0,
-				'na' => 0, 'downtime_seconds' => 0, 'worst_host' => null, 'worst_pct' => null
-			],
+			'fleet' => self::emptyFleet(),
 			'daily' => ['dates' => [], 'series' => []],
 			'availability_health' => ['critical' => [], 'warning' => [], 'nodata' => []],
+			'maintenance' => ['applied' => 0, 'timezone' => 'UTC', 'restricted' => false],
 			'slas' => [],
 			'sla_summary' => [
 				'slas_total' => 0, 'services_total' => 0, 'meeting' => 0, 'below' => 0, 'na' => 0,
@@ -263,6 +272,19 @@ class ReportDataHelper {
 			'attention' => [],
 			'warnings' => [],
 			'error' => null
+		];
+	}
+
+	/**
+	 * maintenance_seconds sums the maintenance time of every host with an
+	 * availability item; maintenance_only counts hosts whose whole period was
+	 * maintenance - they are neither measured nor "without data".
+	 */
+	private static function emptyFleet(): array {
+		return [
+			'avg' => null, 'hosts_total' => 0, 'with_data' => 0, 'below_target' => 0,
+			'na' => 0, 'downtime_seconds' => 0, 'worst_host' => null, 'worst_pct' => null,
+			'maintenance_seconds' => 0, 'maintenance_hosts' => 0, 'maintenance_only' => 0
 		];
 	}
 
@@ -344,12 +366,10 @@ class ReportDataHelper {
 	): array {
 		$empty = [
 			'groups' => [],
-			'fleet' => [
-				'avg' => null, 'hosts_total' => 0, 'with_data' => 0, 'below_target' => 0,
-				'na' => 0, 'downtime_seconds' => 0, 'worst_host' => null, 'worst_pct' => null
-			],
+			'fleet' => self::emptyFleet(),
 			'daily' => ['dates' => [], 'series' => []],
-			'health' => ['critical' => [], 'warning' => [], 'nodata' => []]
+			'health' => ['critical' => [], 'warning' => [], 'nodata' => []],
+			'maintenance' => ['applied' => 0, 'timezone' => 'UTC', 'restricted' => false]
 		];
 
 		// An explicit selection that resolved to nothing stays nothing.
@@ -406,10 +426,12 @@ class ReportDataHelper {
 			$used[$candidate] = true;
 		}
 
+		// Group names cover ALL of a host's groups, not just the selected ones:
+		// a maintenance on any of them - or on a parent group - applies.
 		$host_params = [
 			'output' => ['hostid', 'host', 'name', 'status'],
 			'groupids' => array_keys($group_map),
-			'selectHostGroups' => ['groupid']
+			'selectHostGroups' => ['groupid', 'name']
 		];
 		if ($exclude_disabled) {
 			$host_params['monitored_hosts'] = true;
@@ -427,16 +449,19 @@ class ReportDataHelper {
 
 		$host_rows = [];
 		$hostids = [];
+		$host_group_names = [];
 		foreach ($hosts as $host) {
 			$hostid = (string) $host['hostid'];
 			$hostids[] = $hostid;
 
 			$names = [];
+			$host_group_names[$hostid] = [];
 			foreach ((array) ($host['hostgroups'] ?? []) as $group) {
 				$groupid = (string) $group['groupid'];
 				if (isset($group_map[$groupid])) {
 					$names[] = $group_map[$groupid];
 				}
+				$host_group_names[$hostid][] = (string) $group['name'];
 			}
 
 			$host_rows[$hostid] = [
@@ -449,6 +474,7 @@ class ReportDataHelper {
 				'state' => 'noitem',
 				'uptime_seconds' => 0,
 				'downtime_seconds' => 0,
+				'maintenance_seconds' => 0,
 				'spark' => []
 			];
 		}
@@ -503,9 +529,19 @@ class ReportDataHelper {
 			}
 		}
 
+		// Maintenance windows are accepted downtime: both measurement paths
+		// leave them out of each host's measured time.
+		$maintenance = $this->getMaintenanceWindows(
+			array_intersect_key($host_group_names, $items_by_host),
+			$time_from,
+			$time_to
+		);
+
 		$measured = (($time_to - $time_from) > self::TRENDS_THRESHOLD_SECONDS)
-			? $this->availabilityFromTrends(array_values($items_by_host), $time_from, $time_to, $group_of_host)
-			: $this->availabilityFromHistory(array_values($items_by_host), $time_from, $time_to, $group_of_host);
+			? $this->availabilityFromTrends(array_values($items_by_host), $time_from, $time_to, $group_of_host,
+				$maintenance['hosts'])
+			: $this->availabilityFromHistory(array_values($items_by_host), $time_from, $time_to, $group_of_host,
+				$maintenance['hosts']);
 		$group_daily = $measured['group_daily'];
 
 		// Merge measurements into the host rows.
@@ -517,8 +553,10 @@ class ReportDataHelper {
 				continue;
 			}
 
+			$host_rows[$hostid]['maintenance_seconds'] = (int) ($info['maintenance_seconds'] ?? 0);
+
 			if ($info === null || $info['pct'] === null) {
-				$host_rows[$hostid]['state'] = 'nodata';
+				$host_rows[$hostid]['state'] = !empty($info['maintenance_only']) ? 'maint' : 'nodata';
 				continue;
 			}
 
@@ -609,12 +647,19 @@ class ReportDataHelper {
 		ksort($group_rollups, SORT_NATURAL | SORT_FLAG_CASE);
 
 		// ---- fleet ----------------------------------------------------------
-		$fleet = [
-			'avg' => null, 'hosts_total' => count($host_rows), 'with_data' => 0, 'below_target' => 0,
-			'na' => 0, 'downtime_seconds' => 0, 'worst_host' => null, 'worst_pct' => null
-		];
+		$fleet = ['hosts_total' => count($host_rows)] + self::emptyFleet();
 		$values = [];
 		foreach ($host_rows as $row) {
+			if ((int) $row['maintenance_seconds'] > 0) {
+				$fleet['maintenance_seconds'] += (int) $row['maintenance_seconds'];
+				$fleet['maintenance_hosts']++;
+			}
+
+			if ($row['state'] === 'maint') {
+				$fleet['maintenance_only']++;
+				continue;
+			}
+
 			if ($row['pct'] === null) {
 				$fleet['na']++;
 				continue;
@@ -656,7 +701,15 @@ class ReportDataHelper {
 			'groups' => array_values($group_rollups),
 			'fleet' => $fleet,
 			'daily' => $daily,
-			'health' => $health
+			'health' => $health,
+			'maintenance' => [
+				'applied' => $maintenance['applied'],
+				'timezone' => $maintenance['timezone'],
+				// Maintenance is read with the viewer's permissions, so a
+				// maintenance that also covers objects they cannot read is
+				// invisible to them - the page says so.
+				'restricted' => CWebUser::getType() != USER_TYPE_SUPER_ADMIN
+			]
 		];
 	}
 
@@ -746,6 +799,10 @@ class ReportDataHelper {
 	 * max(observed, window / interval) - a polling gap counts as downtime.
 	 * An item with zero samples reports null (no data), never 0%.
 	 *
+	 * Maintenance windows are cut out exactly: samples inside them are
+	 * neither up nor down, and the expected count covers only the time
+	 * outside them, so a gap during a no-data maintenance costs nothing.
+	 *
 	 * Keyset pagination detail: a full page may cut a run of same-clock rows
 	 * in half, so on a full page the rows carrying the final clock are NOT
 	 * processed and the cursor is set to that clock - they are re-read intact
@@ -754,9 +811,10 @@ class ReportDataHelper {
 	 *
 	 * @param array<int,array{itemid:string,hostid:string,delay:?string}> $items
 	 * @param array<string,string> $group_of_host hostid => charged group name
+	 * @param array<string,array<int,array{0:int,1:int}>> $maintenance hostid => maintenance windows
 	 */
 	private function availabilityFromHistory(array $items, int $time_from, int $time_to,
-			array $group_of_host): array {
+			array $group_of_host, array $maintenance): array {
 		$result = ['hosts' => [], 'group_daily' => []];
 		$window_seconds = max(1, ($time_to - $time_from) + 1);
 
@@ -779,7 +837,8 @@ class ReportDataHelper {
 				'seen' => 0,
 				'prev' => null,
 				'deltas' => [],
-				'days' => []
+				'days' => [],
+				'window' => 0
 			];
 		}
 
@@ -820,13 +879,8 @@ class ReportDataHelper {
 					$itemid = (string) $row['itemid'];
 					$item_state = &$state[$itemid];
 
-					$item_state['seen']++;
-					if ($this->sampleUp((float) $row['value']) >= 1.0) {
-						$item_state['ok']++;
-						$date = gmdate('Y-m-d', $clock);
-						$item_state['days'][$date] = ($item_state['days'][$date] ?? 0) + 1;
-					}
-
+					// The polling cadence is the same inside maintenance, so
+					// every sample feeds the interval estimate.
 					if ($item_state['prev'] !== null && count($item_state['deltas']) < 512) {
 						$delta = $clock - $item_state['prev'];
 						if ($delta > 0) {
@@ -834,6 +888,27 @@ class ReportDataHelper {
 						}
 					}
 					$item_state['prev'] = $clock;
+
+					// Rows arrive in clock order, so each item's window cursor
+					// only ever moves forward.
+					$in_maintenance = false;
+					$windows = $maintenance[$host_by_item[$itemid]] ?? null;
+					if ($windows !== null) {
+						while (isset($windows[$item_state['window']]) && $windows[$item_state['window']][1] <= $clock) {
+							$item_state['window']++;
+						}
+						$in_maintenance = isset($windows[$item_state['window']])
+							&& $windows[$item_state['window']][0] <= $clock;
+					}
+
+					if (!$in_maintenance) {
+						$item_state['seen']++;
+						if ($this->sampleUp((float) $row['value']) >= 1.0) {
+							$item_state['ok']++;
+							$date = gmdate('Y-m-d', $clock);
+							$item_state['days'][$date] = ($item_state['days'][$date] ?? 0) + 1;
+						}
+					}
 					unset($item_state);
 
 					$processed++;
@@ -864,27 +939,36 @@ class ReportDataHelper {
 		foreach ($itemids as $itemid) {
 			$item_state = $state[$itemid];
 			$hostid = $host_by_item[$itemid];
+			$windows = $maintenance[$hostid] ?? [];
+			$maintenance_seconds = self::overlapSeconds($windows, $time_from, $time_to + 1);
+			$measured_seconds = max(0, $window_seconds - $maintenance_seconds);
+			$interval = $this->inferIntervalFromDeltas($item_state['deltas'], $delay_by_item[$itemid] ?? null);
 
 			if ($item_state['seen'] === 0) {
 				// Zero samples is "no data", never "0% available" - the row
 				// cap, a dead item and a decommissioned host all look the
 				// same here, and inventing a hard-down verdict for them
-				// would page someone about a host that may be fine.
+				// would page someone about a host that may be fine. A host
+				// left without one polling interval outside maintenance
+				// simply spent the period in maintenance.
 				$result['hosts'][$hostid] = [
-					'pct' => null, 'uptime_seconds' => 0, 'downtime_seconds' => 0, 'spark' => []
+					'pct' => null, 'uptime_seconds' => 0, 'downtime_seconds' => 0,
+					'maintenance_seconds' => $maintenance_seconds,
+					'maintenance_only' => $maintenance_seconds > 0 && $measured_seconds < $interval,
+					'spark' => []
 				];
 				continue;
 			}
 
-			$interval = $this->inferIntervalFromDeltas($item_state['deltas'], $delay_by_item[$itemid] ?? null);
-			$expected = max($item_state['seen'], (int) floor($window_seconds / max(1, $interval)));
+			$expected = max($item_state['seen'], (int) floor($measured_seconds / max(1, $interval)));
 			$pct = $expected > 0 ? (($item_state['ok'] / $expected) * 100.0) : null;
-			$uptime_seconds = $pct !== null ? (int) round(($pct / 100.0) * $window_seconds) : 0;
+			$uptime_seconds = $pct !== null ? (int) round(($pct / 100.0) * $measured_seconds) : 0;
 
 			// Daily series: every day inside the window is charged against its
 			// expected sample count, so a day with no samples at all shows as
 			// a full day of downtime - matching the headline number instead of
-			// silently vanishing from the chart.
+			// silently vanishing from the chart. Each day's maintenance time
+			// comes off first; a day spent wholly in maintenance has no point.
 			$spark = [];
 			$group = $group_of_host[$hostid] ?? null;
 			for ($day_start = $time_from; $day_start <= $time_to; $day_start = $day_end + 1) {
@@ -892,7 +976,12 @@ class ReportDataHelper {
 				$day_end = min($time_to, (int) gmmktime(23, 59, 59,
 					(int) substr($date, 5, 2), (int) substr($date, 8, 2), (int) substr($date, 0, 4)));
 
-				$overlap = $day_end - $day_start + 1;
+				$overlap = $day_end - $day_start + 1 - self::overlapSeconds($windows, $day_start, $day_end + 1);
+				if ($overlap <= 0) {
+					$spark[] = null;
+					continue;
+				}
+
 				$day_expected = max(1, (int) floor($overlap / max(1, $interval)));
 				$day_ok = min($day_expected, (int) ($item_state['days'][$date] ?? 0));
 				$availability = $day_ok / $day_expected;
@@ -907,8 +996,9 @@ class ReportDataHelper {
 
 			$result['hosts'][$hostid] = [
 				'pct' => $pct,
-				'uptime_seconds' => max(0, min($window_seconds, $uptime_seconds)),
-				'downtime_seconds' => max(0, $window_seconds - $uptime_seconds),
+				'uptime_seconds' => max(0, min($measured_seconds, $uptime_seconds)),
+				'downtime_seconds' => max(0, $measured_seconds - $uptime_seconds),
+				'maintenance_seconds' => $maintenance_seconds,
 				'spark' => $spark
 			];
 		}
@@ -931,11 +1021,17 @@ class ReportDataHelper {
 	 * counted as downtime (trend gaps usually mean retention, not outage);
 	 * a host with zero coverage reports null.
 	 *
+	 * An hour that touches a maintenance window is excluded whole. The server
+	 * floors integer trend averages, so one down sample inside the window
+	 * marks the entire hour down - keeping the hour would charge accepted
+	 * downtime to the minutes around it.
+	 *
 	 * @param array<int,array{itemid:string,hostid:string,delay:?string}> $items
 	 * @param array<string,string> $group_of_host hostid => charged group name
+	 * @param array<string,array<int,array{0:int,1:int}>> $maintenance hostid => maintenance windows
 	 */
 	private function availabilityFromTrends(array $items, int $time_from, int $time_to,
-			array $group_of_host): array {
+			array $group_of_host, array $maintenance): array {
 		$result = ['hosts' => [], 'group_daily' => []];
 		$window_seconds = max(1, ($time_to - $time_from) + 1);
 
@@ -985,6 +1081,11 @@ class ReportDataHelper {
 				}
 
 				$hostid = $host_by_item[$itemid];
+
+				if (isset($maintenance[$hostid]) && self::hourInWindows($maintenance[$hostid], (int) $trend['clock'])) {
+					continue;
+				}
+
 				$value = $this->sampleUp((float) $trend['value_avg']);
 				$date = gmdate('Y-m-d', (int) $trend['clock']);
 
@@ -1009,16 +1110,23 @@ class ReportDataHelper {
 		foreach ($items as $item) {
 			$hostid = (string) $item['hostid'];
 			$covered = $covered_hours[$hostid] ?? 0;
+			$maintenance_seconds = self::overlapSeconds($maintenance[$hostid] ?? [], $time_from, $time_to + 1);
+			$measured_seconds = max(0, $window_seconds - $maintenance_seconds);
 
 			if ($covered === 0) {
+				// Less than an hour outside maintenance cannot hold a single
+				// whole trend hour: the period was spent in maintenance.
 				$result['hosts'][$hostid] = [
-					'pct' => null, 'uptime_seconds' => 0, 'downtime_seconds' => 0, 'spark' => []
+					'pct' => null, 'uptime_seconds' => 0, 'downtime_seconds' => 0,
+					'maintenance_seconds' => $maintenance_seconds,
+					'maintenance_only' => $maintenance_seconds > 0 && $measured_seconds < 3600,
+					'spark' => []
 				];
 				continue;
 			}
 
 			$pct = max(0.0, min(100.0, (($up_hours[$hostid] ?? 0.0) / $covered) * 100.0));
-			$uptime_seconds = (int) round(($pct / 100.0) * $window_seconds);
+			$uptime_seconds = (int) round(($pct / 100.0) * $measured_seconds);
 
 			$spark = [];
 			if (isset($spark_covered[$hostid])) {
@@ -1034,13 +1142,385 @@ class ReportDataHelper {
 
 			$result['hosts'][$hostid] = [
 				'pct' => $pct,
-				'uptime_seconds' => max(0, min($window_seconds, $uptime_seconds)),
-				'downtime_seconds' => max(0, $window_seconds - $uptime_seconds),
+				'uptime_seconds' => max(0, min($measured_seconds, $uptime_seconds)),
+				'downtime_seconds' => max(0, $measured_seconds - $uptime_seconds),
+				'maintenance_seconds' => $maintenance_seconds,
 				'spark' => $spark
 			];
 		}
 
 		return $result;
+	}
+
+	// -------------------------------------------------------------- maintenance
+
+	/**
+	 * Maintenance windows of every host inside the report window: sorted,
+	 * merged, half-open [start, end) pairs clipped to [time_from, time_to].
+	 *
+	 * Mirrors how the Zabbix server applies maintenance: one covers the hosts
+	 * it lists plus every host in its host groups, nested groups included
+	 * ("Linux" also covers "Linux/DB"), with or without data collection. A
+	 * maintenance limited to problem tags does not count - it only suppresses
+	 * the matching problems, so a host outage was never part of what it
+	 * accepted. The SLA engine draws the same line: it ignores only
+	 * suppressed problems.
+	 *
+	 * Maintenances are read as configured now. One deleted since no longer
+	 * applies, and an edited one applies as edited.
+	 *
+	 * @param array<string,array<int,string>> $host_group_names hostid => names of all its host groups
+	 *
+	 * @return array{hosts:array<string,array<int,array{0:int,1:int}>>,applied:int,timezone:string}
+	 */
+	private function getMaintenanceWindows(array $host_group_names, int $time_from, int $time_to): array {
+		$timezone = $this->getMaintenanceTimezone();
+		$result = ['hosts' => [], 'applied' => 0, 'timezone' => $timezone->getName()];
+		$until = $time_to + 1;
+
+		if ($host_group_names === []) {
+			return $result;
+		}
+
+		// Cheap first pass: only maintenances active at some point inside
+		// the window have their hosts, groups and periods read.
+		$candidates = API::Maintenance()->get([
+			'output' => ['maintenanceid', 'active_since', 'active_till'],
+			'sortfield' => 'active_till',
+			'sortorder' => ZBX_SORT_DOWN,
+			'limit' => self::MAX_MAINTENANCES
+		]);
+
+		if (!is_array($candidates)) {
+			$this->addNote(_('Maintenance periods could not be read, so downtime inside maintenance windows is counted.'));
+
+			return $result;
+		}
+
+		if (count($candidates) >= self::MAX_MAINTENANCES
+				&& (int) $candidates[count($candidates) - 1]['active_till'] > $time_from) {
+			$this->addNote(_s('Only the %1$d most recently ending maintenances were read; older ones that reach into this period are not excluded.', self::MAX_MAINTENANCES));
+		}
+
+		$maintenanceids = [];
+		foreach ($candidates as $candidate) {
+			if ((int) $candidate['active_since'] < $until && (int) $candidate['active_till'] > $time_from) {
+				$maintenanceids[] = (string) $candidate['maintenanceid'];
+			}
+		}
+
+		if ($maintenanceids === []) {
+			return $result;
+		}
+
+		$hosts_by_group = [];
+		foreach ($host_group_names as $hostid => $names) {
+			foreach ($names as $name) {
+				$hosts_by_group[$name][] = (string) $hostid;
+			}
+		}
+
+		$windows_by_maintenance = [];
+		$maintenances_by_host = [];
+		$tag_limited = [];
+
+		foreach (array_chunk($maintenanceids, 500) as $maintenanceid_chunk) {
+			$maintenances = API::Maintenance()->get([
+				'output' => ['maintenanceid', 'name', 'active_since', 'active_till'],
+				'maintenanceids' => $maintenanceid_chunk,
+				'selectHosts' => ['hostid'],
+				'selectHostGroups' => ['name'],
+				'selectTags' => ['tag'],
+				'selectTimeperiods' => ['timeperiod_type', 'every', 'month', 'dayofweek', 'day', 'start_time',
+					'period', 'start_date']
+			]);
+
+			if (!is_array($maintenances)) {
+				$this->addNote(_('Maintenance periods could not be read, so downtime inside maintenance windows is counted.'));
+
+				continue;
+			}
+
+			foreach ($maintenances as $maintenance) {
+				$covered = [];
+				foreach ((array) ($maintenance['hosts'] ?? []) as $host) {
+					if (isset($host_group_names[$host['hostid']])) {
+						$covered[(string) $host['hostid']] = true;
+					}
+				}
+
+				foreach ((array) ($maintenance['hostgroups'] ?? []) as $group) {
+					$group_name = (string) $group['name'];
+					foreach ($hosts_by_group as $name => $hostids) {
+						// Group names can be numeric, which PHP turns into int keys.
+						$name = (string) $name;
+						if ($name === $group_name || str_starts_with($name, $group_name.'/')) {
+							foreach ($hostids as $hostid) {
+								$covered[$hostid] = true;
+							}
+						}
+					}
+				}
+
+				if ($covered === []) {
+					continue;
+				}
+
+				$windows = [];
+				foreach ((array) ($maintenance['timeperiods'] ?? []) as $period) {
+					foreach ($this->expandTimeperiod($period, (int) $maintenance['active_since'],
+							(int) $maintenance['active_till'], $time_from, $until, $timezone) as $window) {
+						$windows[] = $window;
+					}
+				}
+
+				if ($windows === []) {
+					continue;
+				}
+
+				if (!empty($maintenance['tags'])) {
+					$tag_limited[(string) $maintenance['name']] = true;
+					continue;
+				}
+
+				$maintenanceid = (string) $maintenance['maintenanceid'];
+				$windows_by_maintenance[$maintenanceid] = $windows;
+				foreach (array_keys($covered) as $hostid) {
+					$maintenances_by_host[(string) $hostid][] = $maintenanceid;
+				}
+			}
+		}
+
+		// Hosts under the same set of maintenances share one merged list.
+		$merged = [];
+		foreach ($maintenances_by_host as $hostid => $ids) {
+			sort($ids);
+			$key = implode(',', $ids);
+
+			if (!isset($merged[$key])) {
+				$windows = [];
+				foreach ($ids as $id) {
+					foreach ($windows_by_maintenance[$id] as $window) {
+						$windows[] = $window;
+					}
+				}
+				$merged[$key] = self::mergeWindows($windows);
+			}
+
+			$result['hosts'][(string) $hostid] = $merged[$key];
+		}
+
+		$result['applied'] = count($windows_by_maintenance);
+
+		if ($tag_limited !== []) {
+			$names = array_map('strval', array_keys($tag_limited));
+			sort($names, SORT_NATURAL | SORT_FLAG_CASE);
+			$listed = implode(', ', array_slice($names, 0, 5));
+			if (count($names) > 5) {
+				$listed .= ' '._s('and %1$d more', count($names) - 5);
+			}
+
+			$this->addNote(_s('Maintenance limited to specific problem tags is not treated as accepted downtime: %1$s.', $listed));
+		}
+
+		return $result;
+	}
+
+	/**
+	 * Occurrences of one maintenance time period inside [from, until), as the
+	 * Zabbix server runs them.
+	 *
+	 * A one-time period is clipped to the maintenance's active range. A
+	 * recurring one starts on every matching day at its start time - skipped
+	 * on a day DST makes that time not exist - runs only if it starts inside
+	 * the active range, and stops at "active till". The every-N-days/weeks
+	 * cadence counts calendar days from the day "active since" falls on (the
+	 * week from its Monday), so a DST change cannot shift it.
+	 *
+	 * @return array<int,array{0:int,1:int}>
+	 */
+	private function expandTimeperiod(array $period, int $active_since, int $active_till, int $from, int $until,
+			\DateTimeZone $timezone): array {
+		$length = (int) ($period['period'] ?? 0);
+		$lower = max($from, $active_since);
+		$upper = min($until, $active_till);
+
+		if ($length <= 0 || $lower >= $upper) {
+			return [];
+		}
+
+		$type = (int) ($period['timeperiod_type'] ?? -1);
+
+		if ($type === TIMEPERIOD_TYPE_ONETIME) {
+			$start = max($lower, (int) $period['start_date']);
+			$end = min($upper, (int) $period['start_date'] + $length);
+
+			return $start < $end ? [[$start, $end]] : [];
+		}
+
+		if (!in_array($type, [TIMEPERIOD_TYPE_DAILY, TIMEPERIOD_TYPE_WEEKLY, TIMEPERIOD_TYPE_MONTHLY], true)) {
+			return [];
+		}
+
+		$start_time = (int) ($period['start_time'] ?? 0);
+		$every = max(1, (int) ($period['every'] ?? 1));
+		$dayofweek = (int) ($period['dayofweek'] ?? 0);
+		$months = (int) ($period['month'] ?? 0);
+		$month_day = (int) ($period['day'] ?? 0);
+
+		// Calendar day numbers, so 23- and 25-hour DST days count as one day.
+		$day_number = static fn(int $year, int $month, int $day): int =>
+			intdiv(gmmktime(0, 0, 0, $month, $day, $year), 86400);
+
+		$anchor = (new \DateTimeImmutable('@'.$active_since))->setTimezone($timezone);
+		[$year, $month, $mday, $wday] = array_map('intval', explode(' ', $anchor->format('Y n j N')));
+		$anchor_day = $day_number($year, $month, $mday);
+		$anchor_monday = $anchor_day - ($wday - 1);
+
+		// Only an occurrence starting after (lower - length) can reach the
+		// window, and none starts before active_since.
+		$day = (new \DateTimeImmutable('@'.max($active_since, $lower - $length)))
+			->setTimezone($timezone)
+			->setTime(0, 0);
+		$windows = [];
+
+		for (; $day->getTimestamp() < $upper; $day = $day->modify('+1 day')->setTime(0, 0)) {
+			[$year, $month, $mday, $wday, $days_in_month] = array_map('intval', explode(' ', $day->format('Y n j N t')));
+			$number = $day_number($year, $month, $mday);
+			$weekday_bit = 1 << ($wday - 1);
+
+			switch ($type) {
+				case TIMEPERIOD_TYPE_DAILY:
+					$match = ($number - $anchor_day) % $every === 0;
+					break;
+
+				case TIMEPERIOD_TYPE_WEEKLY:
+					$match = ($dayofweek & $weekday_bit) !== 0 && intdiv($number - $anchor_monday, 7) % $every === 0;
+					break;
+
+				default:
+					if (($months & (1 << ($month - 1))) === 0) {
+						$match = false;
+					}
+					elseif ($month_day !== 0) {
+						$match = $mday === $month_day;
+					}
+					else {
+						// every: 1-4 = first..fourth such weekday, 5 = the last one.
+						$match = ($dayofweek & $weekday_bit) !== 0
+							&& ($every === 5 ? $mday + 7 > $days_in_month : intdiv($mday - 1, 7) + 1 === $every);
+					}
+			}
+
+			if (!$match) {
+				continue;
+			}
+
+			$start_at = $day->setTime(intdiv($start_time, 3600), intdiv($start_time % 3600, 60), $start_time % 60);
+			$clock = array_map('intval', explode(':', $start_at->format('G:i:s')));
+			if ($clock[0] * 3600 + $clock[1] * 60 + $clock[2] !== $start_time) {
+				continue;
+			}
+
+			$start = $start_at->getTimestamp();
+			if ($start < $active_since || $start >= $active_till) {
+				continue;
+			}
+
+			$window_start = max($start, $lower);
+			$window_end = min($start + $length, $upper);
+			if ($window_start < $window_end) {
+				$windows[] = [$window_start, $window_end];
+			}
+		}
+
+		return $windows;
+	}
+
+	/**
+	 * The time zone recurring maintenance periods are laid out in. The server
+	 * runs them in its own local time, which the frontend cannot see; the
+	 * frontend's default time zone (Administration > General > GUI) is the
+	 * setting that describes the installation, with "System" meaning PHP's
+	 * configured zone as everywhere else in Zabbix.
+	 */
+	private function getMaintenanceTimezone(): \DateTimeZone {
+		try {
+			$name = CSettingsHelper::get(CSettingsHelper::DEFAULT_TIMEZONE);
+			if ($name === ZBX_DEFAULT_TIMEZONE) {
+				$name = CTimezoneHelper::getSystemTimezone();
+			}
+
+			return new \DateTimeZone($name);
+		}
+		catch (\Exception $e) {
+			return new \DateTimeZone('UTC');
+		}
+	}
+
+	/**
+	 * @param array<int,array{0:int,1:int}> $windows
+	 *
+	 * @return array<int,array{0:int,1:int}> sorted, with overlapping and touching windows joined
+	 */
+	private static function mergeWindows(array $windows): array {
+		usort($windows, static fn(array $a, array $b): int => $a[0] <=> $b[0] ?: $a[1] <=> $b[1]);
+
+		$merged = [];
+		$last = -1;
+		foreach ($windows as [$start, $end]) {
+			if ($last >= 0 && $start <= $merged[$last][1]) {
+				$merged[$last][1] = max($merged[$last][1], $end);
+			}
+			else {
+				$merged[] = [$start, $end];
+				$last++;
+			}
+		}
+
+		return $merged;
+	}
+
+	/**
+	 * Seconds of [from, until) covered by sorted, merged windows.
+	 *
+	 * @param array<int,array{0:int,1:int}> $windows
+	 */
+	private static function overlapSeconds(array $windows, int $from, int $until): int {
+		$seconds = 0;
+		foreach ($windows as [$start, $end]) {
+			if ($start >= $until) {
+				break;
+			}
+			if ($end > $from) {
+				$seconds += min($end, $until) - max($start, $from);
+			}
+		}
+
+		return $seconds;
+	}
+
+	/**
+	 * Whether the trend hour starting at $hour_start touches any of the
+	 * sorted, merged windows: binary search for the first window ending
+	 * after the hour starts.
+	 *
+	 * @param array<int,array{0:int,1:int}> $windows
+	 */
+	private static function hourInWindows(array $windows, int $hour_start): bool {
+		$low = 0;
+		$high = count($windows);
+		while ($low < $high) {
+			$mid = ($low + $high) >> 1;
+			if ($windows[$mid][1] <= $hour_start) {
+				$low = $mid + 1;
+			}
+			else {
+				$high = $mid;
+			}
+		}
+
+		return $low < count($windows) && $windows[$low][0] < $hour_start + 3600;
 	}
 
 	// ---------------------------------------------------------------------- SLA
@@ -1315,6 +1795,18 @@ class ReportDataHelper {
 			'tone' => 'neutral'
 		];
 
+		if ((int) $fleet['maintenance_hosts'] > 0) {
+			$cards[] = [
+				'key' => 'maintenance',
+				'label' => _('Maintenance'),
+				'value' => $this->formatDuration((int) $fleet['maintenance_seconds']),
+				'sub' => (int) $fleet['maintenance_hosts'] === 1
+					? _('On 1 host, excluded from availability')
+					: _s('On %1$d hosts, excluded from availability', (int) $fleet['maintenance_hosts']),
+				'tone' => 'neutral'
+			];
+		}
+
 		if ((int) $sla['services_total'] > 0) {
 			$graded = (int) $sla['meeting'] + (int) $sla['below'];
 			$cards[] = [
@@ -1577,6 +2069,7 @@ class ReportDataHelper {
 					$row['state'],
 					$row['uptime_seconds'],
 					$row['downtime_seconds'],
+					$row['maintenance_seconds'] ?? 0,
 					$row['item_key'] ?? '',
 					gmdate('Y-m-d H:i:s', $time_from),
 					gmdate('Y-m-d H:i:s', $time_to)
