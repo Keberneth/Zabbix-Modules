@@ -171,6 +171,14 @@ final class Util {
 
     public static function truncate(string $value, int $max_length = 800): string {
         $value = trim($value);
+        // Character-based, so a cut never splits a multibyte UTF-8 character
+        // (Zabbix rejects invalid UTF-8 in host names/descriptions).
+        if (function_exists('mb_strlen')) {
+            if (mb_strlen($value, 'UTF-8') <= $max_length) {
+                return $value;
+            }
+            return rtrim(mb_substr($value, 0, $max_length - 1, 'UTF-8')).'…';
+        }
         if (strlen($value) <= $max_length) {
             return $value;
         }

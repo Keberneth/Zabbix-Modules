@@ -8,6 +8,7 @@ use CController;
 use Modules\TriggerCorrelation\Lib\CorrelationEvaluator;
 use Modules\TriggerCorrelation\Lib\CorrelationStore;
 use Modules\TriggerCorrelation\Lib\JsonResponse;
+use Modules\TriggerCorrelation\Lib\Util;
 
 require_once dirname(__DIR__).'/lib/CorrelationStore.php';
 require_once dirname(__DIR__).'/lib/JsonResponse.php';
@@ -50,6 +51,19 @@ class Evaluate extends CController {
     protected function doAction(): void {
         try {
             $store = new CorrelationStore();
+            // Token already verified in checkPermissions(): note this caller as an
+            // evaluation driver, like eval.php does (throttled), so automatic setup
+            // never adds an engine host next to an external cron/curl caller.
+            try {
+                $settings = (array) (($store->load())['settings'] ?? []);
+                $agent = Util::truncate(Util::stripControlChars((string) ($_SERVER['HTTP_USER_AGENT'] ?? '')), 120);
+                if (time() - (int) ($settings['driver_last_call'] ?? 0) >= 300 || $agent !== (string) ($settings['driver_user_agent'] ?? '')) {
+                    $store->recordDriverCall($agent);
+                }
+            }
+            catch (\Throwable $e) {
+                // never fail the evaluation over this
+            }
             $evaluator = new CorrelationEvaluator($store);
             $ruleId = $this->inputString('ruleid');
             $result = $evaluator->evaluate($ruleId !== '' ? $ruleId : null);

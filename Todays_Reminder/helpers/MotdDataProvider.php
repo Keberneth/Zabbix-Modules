@@ -29,6 +29,9 @@ class MotdDataProvider {
 	/** Cap the unreachable host-interface scan on large installs. */
 	private const MAX_UNREACHABLE_INTERFACES = 5000;
 
+	/** zabbix[queue,10m] items considered (server first, then proxies). */
+	private const MAX_QUEUE_ITEMS = 50;
+
 	/** Per-instance trigger metadata cache populated by a single batched lookup. */
 	private $trigger_cache = [];
 
@@ -574,7 +577,8 @@ class MotdDataProvider {
 				'output' => ['proxyid', 'state', 'lastaccess']
 			]);
 			foreach ($proxies as $proxy) {
-				if ((int) ($proxy['state'] ?? 0) === 2) {
+				// 7.0 proxy states: 0 unknown, 1 offline, 2 online.
+				if ((int) ($proxy['state'] ?? ZBX_PROXY_STATE_UNKNOWN) === ZBX_PROXY_STATE_OFFLINE) {
 					$unreachable_proxies++;
 				}
 			}
@@ -585,13 +589,25 @@ class MotdDataProvider {
 
 		$queue_backlog = null;
 		try {
+			// Only real, monitored items: the "Zabbix server health" / "Zabbix proxy health" templates
+			// carry the same key and never have history. Prefer the server's own item over a proxy's.
 			$queue_items = API::Item()->get([
 				'output' => ['itemid'],
+				'selectHosts' => ['monitored_by'],
 				'filter' => ['key_' => 'zabbix[queue,10m]'],
-				'limit' => 1
+				'templated' => false,
+				'monitored' => true,
+				'sortfield' => 'itemid',
+				'limit' => self::MAX_QUEUE_ITEMS
 			]);
 			if ($queue_items) {
 				$itemid = $queue_items[0]['itemid'];
+				foreach ($queue_items as $queue_item) {
+					if ((int) ($queue_item['hosts'][0]['monitored_by'] ?? -1) === ZBX_MONITORED_BY_SERVER) {
+						$itemid = $queue_item['itemid'];
+						break;
+					}
+				}
 				$history = API::History()->get([
 					'itemids' => [$itemid],
 					'history' => 3,

@@ -413,6 +413,7 @@ html[theme="hc-dark"] .ai-sticky-actions,
 
 .ai-tab-section { display: none; }
 
+#tc-root[data-active-tab="dashboard"] .ai-tab-section[data-tab="dashboard"],
 #tc-root[data-active-tab="rules"] .ai-tab-section[data-tab="rules"],
 #tc-root[data-active-tab="severity"] .ai-tab-section[data-tab="severity"],
 #tc-root[data-active-tab="settings"] .ai-tab-section[data-tab="settings"],
@@ -519,4 +520,333 @@ html[theme="hc-dark"] .ai-sticky-actions,
     .ai-span-2,
     .ai-span-3 { grid-column: span 1; }
     .ai-header { flex-direction: column; }
+}
+
+/* API URL field with its inline "Detect" button. */
+.tc-page .tc-input-with-button {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.tc-page .tc-input-with-button .ai-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* ── Dashboard ──
+   Severity colours are Zabbix's own (identical in its light and dark themes), so
+   a chip reads the same here as in Monitoring → Problems. Dark text keeps the
+   contrast on every one of them. */
+.ai-page {
+    --tc-sev-0: #97aab3;
+    --tc-sev-1: #7499ff;
+    --tc-sev-2: #ffc859;
+    --tc-sev-3: #ffa059;
+    --tc-sev-4: #e97659;
+    --tc-sev-5: #e45959;
+    --tc-sev-fg: #1f2b3a;
+}
+
+.tc-dash-header {
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.tc-dash-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.tc-seg {
+    display: inline-flex;
+    border: 1px solid var(--ai-border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.tc-seg-btn {
+    border: 0;
+    padding: 5px 12px;
+    background: var(--ai-bg);
+    color: var(--ai-fg);
+    cursor: pointer;
+    font: inherit;
+}
+
+.tc-seg-btn + .tc-seg-btn {
+    border-left: 1px solid var(--ai-border);
+}
+
+.tc-seg-btn.is-active {
+    background: var(--ai-user-bg);
+    font-weight: 700;
+}
+
+.tc-seg-btn:focus-visible {
+    outline: 2px solid #2e7dd1;
+    outline-offset: -2px;
+}
+
+.tc-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 12px;
+    margin: 4px 0 18px;
+}
+
+.tc-tile {
+    border: 1px solid var(--ai-border);
+    border-left: 4px solid var(--ai-border);
+    border-radius: 6px;
+    padding: 10px 14px;
+    background: var(--ai-bg-subtle);
+    min-width: 0;
+}
+
+.tc-tile-ok { border-left-color: #2e8a4e; }
+.tc-tile-warn { border-left-color: var(--ai-warning-border); }
+.tc-tile-alert { border-left-color: var(--tc-sev-5); }
+
+.tc-tile-label {
+    font-size: 12px;
+    color: var(--ai-fg-muted);
+}
+
+.tc-tile-value {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 2px 0;
+    font-variant-numeric: tabular-nums;
+    color: var(--ai-fg);
+    overflow-wrap: anywhere;
+}
+
+.tc-tile-sub {
+    font-size: 12px;
+    color: var(--ai-fg-muted);
+}
+
+.tc-chip-row {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.tc-dash-h {
+    margin: 18px 0 10px;
+}
+
+.tc-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));
+    gap: 14px;
+}
+
+.tc-card {
+    border: 1px solid var(--ai-border);
+    border-left: 5px solid var(--ai-ok-border);
+    border-radius: 6px;
+    background: var(--ai-bg);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.tc-card.is-disabled { opacity: 0.65; }
+.tc-card-sev-1 { border-left-color: var(--tc-sev-1); }
+.tc-card-sev-2 { border-left-color: var(--tc-sev-2); }
+.tc-card-sev-3 { border-left-color: var(--tc-sev-3); }
+.tc-card-sev-4 { border-left-color: var(--tc-sev-4); }
+.tc-card-sev-5 { border-left-color: var(--tc-sev-5); }
+
+.tc-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 14px 6px;
+}
+
+.tc-card-titles { min-width: 0; }
+
+.tc-card-title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--ai-fg);
+    overflow-wrap: anywhere;
+}
+
+.tc-card-meta {
+    font-size: 12px;
+    margin-top: 2px;
+}
+
+.tc-members {
+    padding: 2px 14px 8px;
+    display: grid;
+    gap: 8px;
+}
+
+.tc-member-host {
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 3px;
+}
+
+.tc-trig-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 3px;
+}
+
+.tc-trig {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    min-width: 0;
+}
+
+.tc-trig-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--ai-fg);
+}
+
+.tc-trig:not(.is-problem) .tc-trig-name { color: var(--ai-fg-muted); }
+
+.tc-trig-age {
+    flex: 0 0 auto;
+    font-variant-numeric: tabular-nums;
+}
+
+.tc-arrow { color: var(--ai-fg-muted); }
+
+.tc-sev {
+    display: inline-block;
+    flex: 0 0 auto;
+    padding: 1px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 18px;
+    white-space: nowrap;
+    color: var(--tc-sev-fg);
+    background: var(--tc-sev-0);
+}
+
+.tc-sev-1 { background: var(--tc-sev-1); }
+.tc-sev-2 { background: var(--tc-sev-2); }
+.tc-sev-3 { background: var(--tc-sev-3); }
+.tc-sev-4 { background: var(--tc-sev-4); }
+.tc-sev-5 { background: var(--tc-sev-5); }
+.tc-sev-esc { background: var(--ai-user-bg); color: var(--ai-fg); border: 1px solid var(--ai-border); }
+
+.tc-sev-ok {
+    background: var(--ai-ok-bg);
+    color: var(--ai-fg);
+    border: 1px solid var(--ai-ok-border);
+    font-weight: 600;
+}
+
+.tc-raised {
+    margin: 0 14px 8px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    background: var(--ai-bg-subtle);
+    border: 1px solid var(--ai-border-light);
+}
+
+.tc-raised-title {
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+
+.tc-card-foot {
+    margin-top: auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 8px 14px;
+    border-top: 1px solid var(--ai-border-light);
+    font-size: 12px;
+}
+
+.tc-card-problem {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.tc-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.tc-card-error {
+    padding: 0 14px 10px;
+}
+
+.tc-feeds {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 14px 12px;
+    font-size: 12px;
+}
+
+.tc-link {
+    color: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.tc-empty {
+    padding: 28px 16px;
+    text-align: center;
+    border: 1px dashed var(--ai-border);
+    border-radius: 6px;
+}
+
+.tc-empty p { margin: 6px 0 14px; }
+
+/* ── Rule editor: add from a host group / cluster preset ── */
+.tc-group-add {
+    margin: 10px 0 4px;
+    padding: 10px 12px;
+    border: 1px dashed var(--ai-border);
+    border-radius: 6px;
+    background: var(--ai-bg-subtle);
+}
+
+.tc-group-add-title {
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+
+.tc-group-add-action {
+    display: flex;
+    align-items: flex-end;
+}
+
+.tc-preset-wrap .btn { white-space: nowrap; }
+
+@media (max-width: 640px) {
+    .tc-dash-controls { width: 100%; }
+    .tc-card-foot { flex-direction: column; align-items: flex-start; }
 }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Modules\TriggerCorrelation\Lib\CorrelationStore;
 use Modules\TriggerCorrelation\Lib\CorrelationEvaluator;
 use Modules\TriggerCorrelation\Lib\SeverityEvaluator;
+use Modules\TriggerCorrelation\Lib\Util;
 
 /**
  * Standalone evaluation endpoint for the Trigger Correlation module.
@@ -126,6 +127,21 @@ try {
 
     if (!CorrelationStore::verifyToken((array) ($config['settings'] ?? []), tc_eval_token())) {
         tc_eval_respond(401, ['ok' => false, 'error' => 'Invalid evaluation token.']);
+    }
+
+    // Remember who drives evaluation (the engine host's HTTP agent identifies as
+    // "Zabbix", an external cron/curl caller does not), so automatic setup never
+    // adds a second driver next to an external one. Throttled to one write per
+    // five minutes; never allowed to fail the evaluation.
+    $settings = (array) ($config['settings'] ?? []);
+    $agent = Util::truncate(Util::stripControlChars((string) ($_SERVER['HTTP_USER_AGENT'] ?? '')), 120);
+    if (time() - (int) ($settings['driver_last_call'] ?? 0) >= 300 || $agent !== (string) ($settings['driver_user_agent'] ?? '')) {
+        try {
+            $store->recordDriverCall($agent);
+        }
+        catch (\Throwable $e) {
+            error_log('[TriggerCorrelation] eval.php could not record the driver: '.$e->getMessage());
+        }
     }
 
     $ruleId = (isset($_GET['ruleid']) && is_string($_GET['ruleid'])) ? trim($_GET['ruleid']) : '';

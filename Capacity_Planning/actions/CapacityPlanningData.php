@@ -2322,24 +2322,31 @@ final class CapacityPlanningData extends CController {
 
 			$cpu_crit = $this->percentThreshold(
 				$this->resolveMacro($macro_index, $hostid, 'CPU.UTIL.CRIT', []), self::CPU_CRIT_DEFAULT);
-			if ($host['os'] === 'Windows') {
-				// The latest Windows template only carries CPU.UTIL.CRIT; the review
-				// threshold is analytic, not a real second macro.
-				$alarm = $cpu_crit['v'] ?? self::CPU_WARN_DEFAULT;
-				$cpu_warn = ['v' => max(0.0, min($alarm - 10.0, self::CPU_WARN_DEFAULT)),
-					'src' => _('review level (alarm − 10 pp)'), 'fb' => true, 'amb' => false];
-			}
-			else {
-				$cpu_warn = $this->percentThreshold(
-					$this->resolveMacro($macro_index, $hostid, 'CPU.UTIL.WARN', []), self::CPU_WARN_DEFAULT);
-				if ($cpu_warn['fb']) {
-					$legacy = $this->percentThreshold(
-						$this->resolveMacro($macro_index, $hostid, 'CPU.UTIL.WARNING', []), self::CPU_WARN_DEFAULT);
-					if (!$legacy['fb']) {
-						$cpu_warn = $legacy;
+			// The current Linux and Windows templates only carry CPU.UTIL.CRIT, so unless a warning
+			// macro is configured the review threshold is analytic (alarm − 10 pp), not a real second
+			// macro. Older/custom non-Windows templates may still define CPU.UTIL.WARN or WARNING.
+			$alarm = $cpu_crit['v'] ?? self::CPU_WARN_DEFAULT;
+			$cpu_warn = ['v' => max(0.0, min($alarm - 10.0, self::CPU_WARN_DEFAULT)),
+				'src' => _('review level (alarm − 10 pp)'), 'fb' => true, 'amb' => false];
+			$cpu_warn_configured = null; // first usable warning macro
+			$cpu_warn_invalid = null;    // a warning macro that exists but cannot be used
+			if ($host['os'] !== 'Windows') {
+				foreach (['CPU.UTIL.WARN', 'CPU.UTIL.WARNING'] as $warn_macro) {
+					$macro = $this->resolveMacro($macro_index, $hostid, $warn_macro, []);
+					if ($macro['value'] === null) {
+						continue;
 					}
+					$parsed = $this->percentThreshold($macro, self::CPU_WARN_DEFAULT);
+					if (!$parsed['fb']) {
+						$cpu_warn_configured = $parsed;
+						break;
+					}
+					$cpu_warn_invalid = $cpu_warn_invalid ?? $parsed;
 				}
-				if ($cpu_crit['v'] !== null && $cpu_warn['v'] !== null && $cpu_crit['v'] <= $cpu_warn['v']) {
+			}
+			if ($cpu_warn_configured !== null) {
+				$cpu_warn = $cpu_warn_configured;
+				if ($cpu_crit['v'] !== null && $cpu_crit['v'] <= $cpu_warn['v']) {
 					$this->addQuality('Warning', $host['name'], 'CPU', _('Invalid CPU threshold order'),
 						_('The warning threshold was not below the critical threshold; a conservative review fallback was used.'));
 					$cpu_warn = ['v' => min(self::CPU_WARN_DEFAULT, max(0.0, $cpu_crit['v'] - 5.0)),
@@ -2347,8 +2354,14 @@ final class CapacityPlanningData extends CController {
 				}
 			}
 			$this->addResourceThresholdQuality($host['name'], 'CPU', _('CPU critical'), $cpu_crit);
-			if ($host['os'] !== 'Windows') {
+			// An absent warning macro is the template default, not a data-quality issue; a configured
+			// one that is ambiguous, unparsable or not below critical is.
+			if ($cpu_warn_configured !== null) {
 				$this->addResourceThresholdQuality($host['name'], 'CPU', _('CPU warning'), $cpu_warn);
+			}
+			elseif ($cpu_warn_invalid !== null) {
+				$this->addResourceThresholdQuality($host['name'], 'CPU', _('CPU warning'),
+					['amb' => $cpu_warn_invalid['amb']] + $cpu_warn);
 			}
 
 			// lastvalue without a lastclock is a never-collected sentinel, not a value.

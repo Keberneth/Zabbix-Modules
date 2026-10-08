@@ -9,25 +9,36 @@ require_once __DIR__.'/CorrelationStore.php';
 require_once __DIR__.'/ZabbixApiClient.php';
 
 final class CorrelationEvaluator {
+    private const DEFAULT_DISCOVERY_KEY = 'trigger.correlation.discovery';
+    private const DEFAULT_STATE_KEY = 'trigger.correlation.state[%s]';
+    private const DEFAULT_CONTEXT_KEY = 'trigger.correlation.context[%s]';
+
     private CorrelationStore $store;
     private array $config;
     private array $settings;
     private ZabbixApiClient $api;
     private array $hostIdCache = [];
+    /** Current technical names of automatic correlation hosts: hostid → host ('' = gone). */
+    private array $autoHostNames = [];
 
-    public function __construct(CorrelationStore $store) {
+    /**
+     * The unattended eval endpoint has no user session, so by default the
+     * evaluator uses the token HTTP client. The Super Admin save actions pass
+     * their in-process client instead (clearing a rule's state or syncing
+     * discovery then works even before an API token is configured).
+     */
+    public function __construct(CorrelationStore $store, ?ZabbixApiClient $api = null) {
         $this->store = $store;
         $this->config = $store->load();
         $this->settings = $this->config['settings'];
-        // The evaluator runs from the unattended HTTP-agent endpoint (no user
-        // session) and uses history.push, so it must use the token HTTP client.
-        $this->api = ZabbixApiClient::fromConfig($this->settings);
+        $this->api = $api ?? ZabbixApiClient::fromConfig($this->settings);
     }
 
     public function evaluate(?string $ruleId = null): array {
         $started = time();
         $rules = array_values((array) ($this->config['rules'] ?? []));
         $selectedRules = [];
+        $this->resolveAutoHosts($rules);
 
         foreach ($rules as $idx => $rule) {
             if ($ruleId !== null && (string) ($rule['id'] ?? '') !== $ruleId) {
@@ -51,13 +62,14 @@ final class CorrelationEvaluator {
 
         // A discovery-push failure must NOT abort the whole evaluation: rules
         // (especially existing_item-mode ones that need no discovery) still run.
-        if ((bool) ($this->settings['push_discovery_every_eval'] ?? true)) {
-            try {
-                $summary['discovery'] = $this->pushDiscovery($rules, $ruleId);
-            }
-            catch (\Throwable $e) {
-                $summary['discovery'] = ['type' => 'discovery', 'ok' => false, 'error' => $e->getMessage()];
-            }
+        // Automatic correlation hosts depend on discovery, so they always get it;
+        // the setting only governs receiver hosts the user manages.
+        try {
+            $summary['discovery'] = $this->pushDiscovery($rules, $ruleId,
+                (bool) ($this->settings['push_discovery_every_eval'] ?? true));
+        }
+        catch (\Throwable $e) {
+            $summary['discovery'] = ['type' => 'discovery', 'ok' => false, 'error' => $e->getMessage()];
         }
 
         // Collect only the runtime fields each evaluated rule produced, keyed by
@@ -107,6 +119,8 @@ final class CorrelationEvaluator {
      */
     public function clearRule(array $rule): bool {
         try {
+            // The host may have been re-keyed/renamed since: write to its CURRENT name.
+            $this->resolveAutoHosts([$rule]);
             $context = $this->buildContext($rule, 0, false, [], [], time(), 0, 0);
             $push = $this->pushState($rule, 0, $context, time());
             return !empty($push['ok']);
@@ -129,6 +143,11 @@ final class CorrelationEvaluator {
         $id = trim((string) ($o['correlation_id'] ?? ''));
         if ($id === '') {
             $id = (string) ($rule['name'] ?? $rule['id'] ?? 'correlation');
+        }
+        // An automatic host keeps its id when it is re-keyed to new source hosts
+        // (its technical name changes), and it is still the same target then.
+        if (!empty($o['receiver_auto']) && trim((string) ($o['receiver_hostid'] ?? '')) !== '') {
+            return 'auto|'.trim((string) $o['receiver_hostid']).'|'.CorrelationStore::slug($id);
         }
         return 'lld|'.trim((string) ($o['receiver_host'] ?? '')).'|'.CorrelationStore::slug($id);
     }
@@ -184,7 +203,7 @@ final class CorrelationEvaluator {
             }
             $total = count($conditionResults);
 
-            $state = $enabled ? $this->resolveState($output, $activeCount, $total) : 0;
+            $state = $enabled ? self::resolveState($output, $activeCount, $total) : 0;
             $matched = $state !== 0;
             $context = $this->buildContext($rule, $state, $matched, $conditionResults, $matchedProblems, $clock, $activeCount, $total);
 
@@ -192,7 +211,18 @@ final class CorrelationEvaluator {
             $pushResult = $push['result'];
             if (!$push['ok']) {
                 $pending = $push['pending'];
-                $error = ($pending ? 'Discovery pending (the receiver item is not created yet): ' : '').$push['error'];
+                // "Not created yet" is only believable for a few minutes after the
+                // rule (or its correlation host) was set up.
+                // Since the later of: the host was set up, the rule was last saved
+                // (a new Correlation ID needs a fresh discovery too).
+                $since = max((int) ($output['provisioned_at'] ?? 0), (int) ($rule['updated_at'] ?? 0));
+                if ($pending && $since > 0 && $clock - $since > 300) {
+                    $pending = false;
+                    $error = 'The receiver item still does not accept data '.intdiv($clock - $since, 60).' minutes after the rule was saved — run the self-check in Settings: '.$push['error'];
+                }
+                else {
+                    $error = ($pending ? 'Setting up — Zabbix is still creating the correlation item (usually 1–2 minutes after the rule is saved): ' : '').$push['error'];
+                }
             }
 
             // Best-effort comment injection — fully isolated so it can never turn a
@@ -287,22 +317,54 @@ final class CorrelationEvaluator {
         ];
     }
 
-    private function pushDiscovery(array $rules, ?string $ruleId): array {
+    private function pushDiscovery(array $rules, ?string $ruleId, bool $includeManual = true, ?array $onlyHosts = null, bool $seedEmpty = false): array {
+        // A run for ONE rule must still send that receiver host's complete row
+        // set: LLD treats a row missing from a payload as "lost", so pushing just
+        // the one rule's row would retire every sibling rule's item on the host.
+        if ($ruleId !== null && $onlyHosts === null) {
+            $onlyHosts = [];
+            foreach ($rules as $rule) {
+                if ((string) ($rule['id'] ?? '') === $ruleId) {
+                    $onlyHosts[] = $this->receiverHost($rule);
+                }
+            }
+        }
+
         $groups = [];
+        $autoHosts = [];
+        if ($seedEmpty && $onlyHosts !== null) {
+            // A host synced explicitly gets a push even with no rows left
+            // ({"data":[]}), so its discovered items age out by LLD lifetime.
+            foreach ($onlyHosts as $host) {
+                $host = trim((string) $host);
+                if ($host !== '') {
+                    $groups[$host] = [];
+                    if (str_starts_with($host, 'trigger-correlation-')) {
+                        $autoHosts[$host] = true;
+                    }
+                }
+            }
+        }
         foreach ($rules as $rule) {
-            if ($ruleId !== null && (string) ($rule['id'] ?? '') !== $ruleId) {
+            if ($onlyHosts !== null && !in_array($this->receiverHost($rule), $onlyHosts, true)) {
                 continue;
             }
-            if (!(bool) ($rule['enabled'] ?? true)) {
-                continue;
-            }
+            // Disabled rules keep their row: their item must stay alive so the
+            // clear (0) pushed for them is accepted, and their history is kept.
             $output = (array) ($rule['output'] ?? []);
             if (($output['mode'] ?? 'receiver_lld') !== 'receiver_lld') {
                 continue;
             }
-            $receiverHost = trim((string) ($output['receiver_host'] ?? $this->settings['receiver_host'] ?? ''));
+            $auto = self::isAuto($rule);
+            if (!$auto && !$includeManual) {
+                continue;
+            }
+            $receiverHost = $this->receiverHost($rule);
             if ($receiverHost === '') {
                 continue;
+            }
+            if ($auto) {
+                $autoHosts[$receiverHost] = true;
             }
             $correlationId = $this->correlationId($rule);
             $groups[$receiverHost][] = [
@@ -313,11 +375,14 @@ final class CorrelationEvaluator {
             ];
         }
 
-        $discoveryKey = (string) ($this->settings['receiver_discovery_key'] ?? '') ?: 'trigger.correlation.discovery';
+        $configuredKey = (string) ($this->settings['receiver_discovery_key'] ?? '') ?: self::DEFAULT_DISCOVERY_KEY;
         $pushes = [];
         $allOk = true;
 
         foreach ($groups as $receiverHost => $data) {
+            // The automatic hosts' template has fixed keys; the configurable keys
+            // only apply to receiver hosts the user built their own template for.
+            $discoveryKey = isset($autoHosts[$receiverHost]) ? self::DEFAULT_DISCOVERY_KEY : $configuredKey;
             $payload = ['data' => array_values($data)];
             // One bad receiver host must not abort discovery for the others.
             try {
@@ -366,19 +431,25 @@ final class CorrelationEvaluator {
             }
         }
         else {
-            $receiverHost = trim((string) ($output['receiver_host'] ?? $this->settings['receiver_host'] ?? ''));
+            $receiverHost = $this->receiverHost($rule);
             if ($receiverHost === '') {
-                throw new \RuntimeException('The receiver host is not set.');
+                throw new \RuntimeException(self::isAuto($rule)
+                    ? 'This rule has no correlation host. Open the rule and save it again (or use “Repair automatic setup” in Settings).'
+                    : 'The receiver host is not set.');
             }
+            $auto = self::isAuto($rule);
             $correlationId = $this->correlationId($rule);
             // str_replace (not sprintf) so a stray '%' in the user-editable
             // template can never throw a ValueError; '?:' so a cleared field
             // falls back to the default instead of producing an empty key.
-            $stateTemplate = (string) ($this->settings['receiver_state_key_template'] ?? '') ?: 'trigger.correlation.state[%s]';
+            // Automatic hosts always use the fixed keys of their template.
+            $stateTemplate = $auto ? self::DEFAULT_STATE_KEY
+                : ((string) ($this->settings['receiver_state_key_template'] ?? '') ?: self::DEFAULT_STATE_KEY);
             $stateKey = str_replace('%s', $correlationId, $stateTemplate);
             $rows[] = ['host' => $receiverHost, 'key' => $stateKey, 'value' => $state, 'clock' => $clock];
 
-            $contextKeyTemplate = trim((string) ($this->settings['receiver_context_key_template'] ?? ''));
+            $contextKeyTemplate = $auto ? self::DEFAULT_CONTEXT_KEY
+                : trim((string) ($this->settings['receiver_context_key_template'] ?? ''));
             if ($contextKeyTemplate !== '') {
                 $rows[] = [
                     'host' => $receiverHost,
@@ -414,11 +485,22 @@ final class CorrelationEvaluator {
                 continue;
             }
             $err = trim((string) ($row['error'] ?? ''));
-            if ($err !== '') {
-                $errors[] = $err;
-                if (self::isPendingError($err)) {
-                    $pendingCount++;
-                }
+            if ($err === '') {
+                continue;
+            }
+            // history.push answers "No permissions to referred object or it does
+            // not exist" both for an item the server has not created/cached yet
+            // (no itemid in the row) and for an item that exists but the API token
+            // user may not read (the row carries the itemid). Only the first is a
+            // transient "setting up" state; the second never fixes itself.
+            if ((string) ($row['itemid'] ?? '') !== '' && self::isPendingError($err)) {
+                $errors[] = 'The API token user has no read permission on the receiver host (item '.(string) $row['itemid']
+                    .'). Grant its user group at least Read on that host group.';
+                continue;
+            }
+            $errors[] = $err;
+            if (self::isPendingError($err)) {
+                $pendingCount++;
             }
         }
 
@@ -473,6 +555,85 @@ final class CorrelationEvaluator {
         ];
     }
 
+    /**
+     * Push the current discovery rows for the given receiver hosts right away
+     * (also an empty row set to a host no rule uses any more), so a saved,
+     * moved or deleted rule takes effect at once instead of at the next
+     * heartbeat. Best effort; returns the per-host push report.
+     */
+    public function syncDiscovery(array $receiverHosts): array {
+        $hosts = array_values(array_unique(array_filter(array_map(static fn($h): string => trim((string) $h), $receiverHosts),
+            static fn(string $h): bool => $h !== '')));
+        if ($hosts === []) {
+            return ['type' => 'discovery', 'ok' => true, 'groups' => 0, 'pushes' => []];
+        }
+        $rules = array_values((array) ($this->config['rules'] ?? []));
+        $this->resolveAutoHosts($rules);
+        try {
+            return $this->pushDiscovery($rules, null, true, $hosts, true);
+        }
+        catch (\Throwable $e) {
+            return ['type' => 'discovery', 'ok' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * For automatic rules the stored host id is authoritative: look up the
+     * hosts' CURRENT technical names in one call, so a renamed host keeps
+     * working and a deleted one is reported as such instead of "setting up".
+     */
+    private function resolveAutoHosts(array $rules): void {
+        $ids = [];
+        foreach ($rules as $rule) {
+            $id = self::isAuto($rule) ? trim((string) ($rule['output']['receiver_hostid'] ?? '')) : '';
+            if ($id !== '' && !array_key_exists($id, $this->autoHostNames)) {
+                $ids[$id] = true;
+            }
+        }
+        if ($ids === []) {
+            return;
+        }
+        try {
+            $rows = (array) $this->api->call('host.get', ['output' => ['hostid', 'host'], 'hostids' => array_keys($ids)]);
+        }
+        catch (\Throwable $e) {
+            return; // fall back to the stored names
+        }
+        // A host missing here may just be invisible to the API token's user: keep
+        // the stored name for it, so the push reports the real cause (a permission
+        // error carries the item id) instead of claiming the host was deleted.
+        foreach ($rows as $row) {
+            $this->autoHostNames[(string) $row['hostid']] = (string) $row['host'];
+        }
+    }
+
+    /** True for a rule whose receiver host the module provisions automatically. */
+    private static function isAuto(array $rule): bool {
+        $output = (array) ($rule['output'] ?? []);
+        return (string) ($output['mode'] ?? 'receiver_lld') === 'receiver_lld' && !empty($output['receiver_auto']);
+    }
+
+    /**
+     * Technical host name a receiver-LLD rule writes to. Automatic rules never
+     * fall back to the default receiver from Settings: that would silently write
+     * to the engine host instead of the rule's own correlation host.
+     */
+    private function receiverHost(array $rule): string {
+        $output = (array) ($rule['output'] ?? []);
+        $host = trim((string) ($output['receiver_host'] ?? ''));
+        if (self::isAuto($rule)) {
+            $id = trim((string) ($output['receiver_hostid'] ?? ''));
+            if ($id !== '' && ($this->autoHostNames[$id] ?? '') !== '') {
+                return $this->autoHostNames[$id];
+            }
+            return $host;
+        }
+        if ($host !== '') {
+            return $host;
+        }
+        return trim((string) ($this->settings['receiver_host'] ?? ''));
+    }
+
     private function correlationId(array $rule): string {
         $output = (array) ($rule['output'] ?? []);
         $id = trim((string) ($output['correlation_id'] ?? ''));
@@ -500,7 +661,7 @@ final class CorrelationEvaluator {
      *   any   → match_value when at least one is active
      *   count → the highest tier value whose min ≤ active count (0 below the lowest)
      */
-    private function resolveState(array $output, int $activeCount, int $total): int {
+    public static function resolveState(array $output, int $activeCount, int $total): int {
         $mode = (string) ($output['match_mode'] ?? 'all');
 
         if ($mode === 'any') {
@@ -634,9 +795,15 @@ final class CorrelationEvaluator {
         }
 
         // receiver_lld: the template tags the correlation trigger with correlation.id.
-        $receiverHost = trim((string) ($output['receiver_host'] ?? $this->settings['receiver_host'] ?? ''));
+        $receiverHost = $this->receiverHost($rule);
         $correlationId = $this->correlationId($rule);
         $hostid = $receiverHost !== '' ? $this->resolveHostId($receiverHost) : '';
+        if ($hostid === '') {
+            // Never search every host: the same correlation id is normal on
+            // different correlation hosts, so the comment could land on another
+            // host's problem.
+            return '';
+        }
         $events = $this->api->activeProblemsByTag('correlation.id', $correlationId, $hostid);
         return (string) ($events[0]['eventid'] ?? '');
     }

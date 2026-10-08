@@ -26,9 +26,16 @@ require_once __DIR__.'/Crypto.php';
  * token/api helpers) is kept stable so the action controllers and the evaluator
  * do not need to know where the data lives.
  */
+/** The configuration would exceed the module.config column. Message is user-facing. */
+final class ConfigTooLargeException extends \InvalidArgumentException {
+}
+
 final class CorrelationStore {
 
     public const MODULE_ID = 'trigger_correlation';
+
+    /** Leaves headroom under MySQL's 65,535-byte TEXT (the API re-encodes less compactly). */
+    private const CONFIG_MAX_BYTES = 58000;
 
     /**
      * Optional PDO connection for the standalone eval.php entry point, which runs
@@ -324,14 +331,88 @@ final class CorrelationStore {
         }
 
         // Frontend path (the interactive "Run evaluation now"): re-read the current
-        // row so the write reflects any edit made since this request loaded, and
-        // overlay only the runtime fields.
-        $record = self::getModuleRecord();
-        if ($record === null) {
+        // row under the module-row lock, so the write reflects any edit committed
+        // since this request loaded — and cannot slip in between a concurrent
+        // save's read and write — and overlay only the runtime fields.
+        self::transaction(static function () use ($configKey, $runtimeKeys, $runtimeByRuleId): void {
+            $record = self::getModuleRecord();
+            if ($record === null) {
+                return;
+            }
+            $config = self::applyRuntimeState(self::decodeConfig($record['config'] ?? ''), $configKey, $runtimeKeys, $runtimeByRuleId);
+            self::persist($record['moduleid'], $config);
+        });
+    }
+
+    /**
+     * Write only the given settings keys onto a fresh re-read of the row, like
+     * writeRuntimeState(), so a value set during a slow request (e.g. the
+     * evaluation-secret hash written alongside the engine host macro) cannot be
+     * lost to — or clobber — a concurrent whole-config save. Secrets in $patch
+     * are stored in their at-rest form (encrypted API token).
+     */
+    public function updateSettings(array $patch): void {
+        if ($patch === []) {
             return;
         }
-        $config = self::applyRuntimeState(self::decodeConfig($record['config'] ?? ''), $configKey, $runtimeKeys, $runtimeByRuleId);
-        self::persist($record['moduleid'], $config);
+        $patch = self::encryptSecrets(['settings' => $patch])['settings'];
+
+        $apply = static function (array $row) use ($patch): void {
+            $config = self::decodeConfig($row['config'] ?? '');
+            $config['settings'] = array_merge((array) ($config['settings'] ?? []), $patch);
+            $config['storage_initialized'] = true;
+            self::persist($row['moduleid'], $config);
+        };
+
+        if (self::$pdo !== null) {
+            $pdo = self::$pdo;
+            $ownTxn = !$pdo->inTransaction();
+            if ($ownTxn) {
+                $pdo->beginTransaction();
+            }
+            try {
+                $stmt = $pdo->prepare('SELECT moduleid,config FROM module WHERE id = :id FOR UPDATE');
+                $stmt->execute([':id' => self::MODULE_ID]);
+                $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+                if ($row) {
+                    $apply($row);
+                }
+                if ($ownTxn) {
+                    $pdo->commit();
+                }
+            }
+            catch (\Throwable $e) {
+                if ($ownTxn && $pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                throw $e;
+            }
+            return;
+        }
+
+        self::transaction(static function () use ($apply): void {
+            $record = self::getModuleRecord();
+            if ($record === null) {
+                throw new \RuntimeException('The Trigger Correlation module is not registered in the Zabbix database.');
+            }
+            $apply($record);
+        });
+    }
+
+    /**
+     * Replace the evaluation secret hash, keeping the previous one valid for a
+     * short grace window: the Zabbix server only picks up the engine host's new
+     * macro on its next configuration-cache sync, and a heartbeat sent with the
+     * old value in between must not be rejected (and turn the item unsupported).
+     */
+    public function rotateEvalSecret(array &$settings, string $secret): void {
+        $patch = [
+            'eval_token_hash' => self::tokenHash($secret),
+            'eval_token_hash_prev' => (string) ($settings['eval_token_hash'] ?? ''),
+            'eval_token_rotated_at' => time()
+        ];
+        $this->updateSettings($patch);
+        $settings = array_merge($settings, $patch);
     }
 
     /**
@@ -368,7 +449,7 @@ final class CorrelationStore {
         $settings['eval_token_set'] = self::hasSecret($settings['eval_token_hash'] ?? '')
             || self::hasSecretFromEnv($settings['eval_token_env'] ?? '');
         $settings['eval_token'] = '';
-        unset($settings['eval_token_hash']);
+        unset($settings['eval_token_hash'], $settings['eval_token_hash_prev']);
 
         return [
             // Generic, non-sensitive description only — never the absolute path.
@@ -393,6 +474,16 @@ final class CorrelationStore {
                 'eval_token_hash' => '',
                 'eval_token_env' => 'ZABBIX_TRIGGER_CORRELATION_EVAL_TOKEN',
                 'receiver_host' => 'Zabbix Correlation Engine',
+                // Automatic setup (see ReceiverProvisioner).
+                'eval_url' => '',
+                // auto = the module keeps an engine host whose heartbeat calls
+                // eval.php; external = you call eval.php yourself (cron/curl).
+                'eval_driver' => 'auto',
+                // Empty = the engine host's group when one exists (the API token
+                // user already has rights there), else "Trigger Correlation".
+                'auto_host_group' => '',
+                // Deleting a host purges its problem history, so keep by default.
+                'auto_delete_hosts' => false,
                 'receiver_discovery_key' => 'trigger.correlation.discovery',
                 'receiver_state_key_template' => 'trigger.correlation.state[%s]',
                 'receiver_context_key_template' => 'trigger.correlation.context[%s]',
@@ -438,13 +529,24 @@ final class CorrelationStore {
         if ($env_name !== '') {
             $env_value = getenv($env_name);
             if (is_string($env_value) && $env_value !== '') {
-                return hash_equals(Util::stripControlChars($env_value), $token);
+                return hash_equals(Util::stripControlChars(trim($env_value)), $token);
             }
         }
 
         $hash = (string) ($settings['eval_token_hash'] ?? '');
-        return $hash !== '' && password_verify($token, $hash);
+        if ($hash !== '' && password_verify($token, $hash)) {
+            return true;
+        }
+
+        // Grace window after an automatic rotation (see rotateEvalSecret()).
+        $prev = (string) ($settings['eval_token_hash_prev'] ?? '');
+        $rotatedAt = (int) ($settings['eval_token_rotated_at'] ?? 0);
+        return $prev !== '' && $rotatedAt > 0 && (time() - $rotatedAt) < self::SECRET_GRACE_SECONDS
+            && password_verify($token, $prev);
     }
+
+    /** How long the previous evaluation secret stays valid after a rotation. */
+    public const SECRET_GRACE_SECONDS = 600;
 
     public static function apiToken(array $settings): string {
         $env_name = trim((string) ($settings['api_token_env'] ?? ''));
@@ -459,6 +561,17 @@ final class CorrelationStore {
         // Stored value may be encrypted at rest (enc:v1:...). decrypt() returns
         // plaintext unchanged when no key is configured.
         return Util::stripControlChars(trim(Crypto::decrypt($stored)));
+    }
+
+    /** The module's path relative to the frontend root, e.g. "modules/TriggerCorrelation". */
+    public static function moduleRelativePath(): string {
+        try {
+            $record = self::getModuleRecord();
+        }
+        catch (\Throwable $e) {
+            $record = null;
+        }
+        return trim((string) ($record['relative_path'] ?? ''));
     }
 
     public static function storageDescription(): string {
@@ -497,6 +610,13 @@ final class CorrelationStore {
             // wiping every rule and the eval token hash on the next load().
             throw new \RuntimeException('Unable to encode module configuration: '.json_last_error_msg());
         }
+        // module.config is a TEXT column (64 KB on MySQL): refuse, with a clear
+        // message, a configuration that would be cut off or rejected.
+        if (strlen($json) > self::CONFIG_MAX_BYTES) {
+            throw new ConfigTooLargeException('The rules no longer fit in the module configuration ('
+                .intdiv(strlen($json), 1024).' KB of at most '.intdiv(self::CONFIG_MAX_BYTES, 1024).' KB). '
+                .'Remove source triggers or rules — a rule needs one source trigger per host, not every trigger of a group.');
+        }
 
         if (self::$pdo !== null) {
             $stmt = self::$pdo->prepare('UPDATE module SET config = :config WHERE moduleid = :moduleid');
@@ -505,10 +625,18 @@ final class CorrelationStore {
         }
 
         try {
-            \API::Module()->update([[
+            // The frontend API wrapper reports errors by returning false (with
+            // the message on the frontend message stack), not by throwing.
+            $ok = \API::Module()->update([[
                 'moduleid' => (string) $moduleid,
                 'config' => $config
             ]]);
+            if ($ok === false) {
+                if (class_exists('\CMessageHelper')) {
+                    \CMessageHelper::clear();
+                }
+                throw new \RuntimeException('module.update failed');
+            }
         }
         catch (\Throwable $e) {
             // Sessionless callers (the HTTP-agent eval endpoint) have no
@@ -523,6 +651,60 @@ final class CorrelationStore {
                 ]
             ]]);
         }
+    }
+
+    /**
+     * Run $fn as one critical section across every frontend node: a database
+     * transaction holding a row lock on this module's config row. The in-process
+     * API calls made inside join the transaction (the local API client only opens
+     * its own when none is active), so provisioning hosts, saving the config and
+     * cleaning up either all happen or none do, and two saves — from two nodes,
+     * or a double click — run one after the other instead of creating duplicate
+     * hosts or losing each other's rule. eval.php locks the same row for its
+     * runtime-state write. Frontend path only.
+     */
+    public static function transaction(callable $fn) {
+        global $DB;
+
+        if (self::$pdo !== null || !function_exists('DBstart')) {
+            return $fn();
+        }
+        // Already inside one (and holding the lock): Zabbix transactions do not nest.
+        if (!empty($DB['TRANSACTIONS'])) {
+            return $fn();
+        }
+
+        \DBstart();
+        try {
+            // DBselect() reports a lock-wait timeout by returning false, not by
+            // throwing — carrying on would run the save without the lock.
+            if (\DBselect('SELECT moduleid FROM module WHERE id='.\zbx_dbstr(self::MODULE_ID).' FOR UPDATE') === false) {
+                throw new \RuntimeException('The module configuration is locked by another save that is still running. Try again in a moment.');
+            }
+            $result = $fn();
+        }
+        catch (\Throwable $e) {
+            \DBend(false);
+            throw $e;
+        }
+
+        // DBend() rolls back (and returns false) when any statement inside failed.
+        if (!\DBend(true)) {
+            throw new \RuntimeException('The change could not be saved: the database transaction was rolled back.');
+        }
+        return $result;
+    }
+
+    /**
+     * Note who drives the evaluation (called by eval.php after a valid call), so
+     * automatic setup can tell an external driver (cron/curl) from the engine
+     * host's heartbeat and never creates a second driver next to it.
+     */
+    public function recordDriverCall(string $userAgent): void {
+        $this->updateSettings([
+            'driver_last_call' => time(),
+            'driver_user_agent' => Util::truncate(Util::stripControlChars($userAgent), 120)
+        ]);
     }
 
     private static function decodeConfig($config): array {

@@ -49,49 +49,60 @@ A new **Monitoring → Trigger Correlation** menu item appears (Super Admin only
 
 ---
 
-## 2. Settings + self-check
+## 2. Settings: API URL + token — that is all
 
-Open **Monitoring → Trigger Correlation → Settings** and set the **API URL**
-(`https://<your-zabbix>/api_jsonrpc.php` — mind the spelling, one `r` in
-`jsonrpc`), an **API token**, and an **Evaluation shared secret**. Then click
-**Run self-check** — every line should be green:
+Open **Monitoring → Trigger Correlation → Settings** and set the **API URL** (click
+**Detect** — it finds the address this web server reaches its own
+`api_jsonrpc.php` at; or type `https://<your-zabbix>/api_jsonrpc.php`) and an
+**API token**. Save.
+
+You do not set an evaluation secret, import a template, create a host or set
+macros. The first time you save a rule the module does all of that itself (see
+the next section), and the self-check verifies it.
 
 ![Settings tab with an all-green self-check](docs/images/05-settings-selfcheck.png)
 
-What the checks mean:
+**Run self-check** at any time. Besides the API URL/token, the database path of
+`eval.php` and the web server routing, it reports from the **Zabbix server's**
+point of view whether the engine host's heartbeat reaches `eval.php`, whether the
+API token's user can see the correlation hosts, which user groups can see the
+correlation host group, and any unused correlation hosts. If something is red,
+**Repair automatic setup** fixes most of it:
 
-- **Zabbix API reachable (token path)** — the URL + token the evaluator uses over
-  HTTP. (The separate **Test API** button uses the in-process frontend API, so it
-  can pass even if this fails — fix the API URL until *both* are green.)
-- **Database (eval.php path)** — `eval.php` can open its own DB connection (needs
-  `pdo_mysql`/`pdo_pgsql` installed).
-- **eval.php reachable** — the standalone evaluator endpoint is served and
-  token-gated; the ℹ line gives you the exact `{$TRIGGER.CORRELATION.URL}` value.
+- a heartbeat refused with "Invalid evaluation token" gets a new secret (written to
+  the engine host and stored as a hash in one transaction);
+- a heartbeat that cannot reach `eval.php` gets the first URL the Zabbix server
+  itself can fetch (it tests candidates such as the API URL's host, the Frontend
+  URL and the web container's own names);
+- deleted correlation hosts are recreated, and states/severities left behind by
+  rules that no longer exist are cleared.
 
 ---
 
-## 3. The receiver host (`Zabbix Correlation Engine`)
+## 3. What the module sets up for you
 
-The **Correlation** feature writes a synthetic severity to a trapper item and lets
-a normal Zabbix trigger raise the problem. Import
-`templates/trigger_correlation_receiver_zabbix_7.yaml`, create a host (the default
-name **`Zabbix Correlation Engine`** works well), link the template, and set its
-macros:
+| Object | What it is |
+|---|---|
+| `Template Trigger Correlation Receiver` | engine template: heartbeat HTTP-agent item (calls `eval.php` every minute) + receiver LLD |
+| `Template Trigger Correlation Auto Receiver` | receiver LLD only, for correlation hosts |
+| **Engine host** `Zabbix Correlation Engine` | runs the heartbeat. Any host that already has the heartbeat item is used instead, so an existing hand-made setup keeps working. Its `{$TRIGGER.CORRELATION.URL}` is a server-verified address and `{$TRIGGER.CORRELATION.TOKEN}` the module-generated secret |
+| **Correlation hosts** `Correlation: <host> + <host>` | one per set of source hosts, shared by every rule over the same hosts; in the engine host's host group unless you pick another one in Settings → Automatic setup |
 
-```text
-{$TRIGGER.CORRELATION.URL}   = https://<your-zabbix>/modules/TriggerCorrelation/eval.php
-{$TRIGGER.CORRELATION.TOKEN} = (the same Evaluation shared secret)
-```
-
-That host's HTTP-agent item calls `eval.php` once a minute, which drives **both**
-features. After it runs, the discovered state item shows the current correlated
+After the next heartbeat the discovered state item shows the current correlated
 severity in **Monitoring → Latest data**:
 
 ![Latest data on the receiver host showing the discovered correlation state item](docs/images/06-receiver-latest.png)
 
-> **Severity escalation does not need this host or template at all** — it only
-> needs the API URL + token (it edits existing problems in place). The receiver
-> host is only for the Correlation feature.
+> Running the evaluation from cron/curl instead? Set Settings → Automatic setup →
+> **Evaluation driver** to "I call eval.php myself": the module then never creates
+> an engine host or touches the secret. (It also notices a recent non-Zabbix caller
+> of `eval.php` by itself and does not add a second driver next to it.)
+
+> **Docker:** the Zabbix server reaches the web container by its service name
+> (e.g. `http://zabbix-web:8080/modules/TriggerCorrelation/eval.php`), not by the
+> address your browser uses. The server-side test finds such an address
+> automatically when it can; otherwise set Settings → Automatic setup →
+> **Evaluation URL**.
 
 ---
 
@@ -136,11 +147,13 @@ Rule name:        Windows server update problem
 Source triggers:  sccm01 → SSMS service is down
                   web01  → Current month CU not installed
 Match mode:       All conditions active
-Output mode:      Receiver LLD template
-Receiver host:    Zabbix Correlation Engine
-Correlation ID:   windows_update_problem
+Output mode:      Automatic correlation host (recommended)
+Correlation ID:   windows_update_problem      (optional — defaults to the rule name)
 Severity:         4 - High
 ```
+
+On save the module answers *Created the correlation host “Correlation: sccm01 +
+web01”*. A second rule over the same two hosts reuses that host.
 
 The saved rule shows its live **State** in the list (here **High**, because both
 source triggers are currently in problem):
@@ -150,8 +163,8 @@ source triggers are currently in problem):
 ### How it looks when it fires
 
 When both source problems are active, a new problem
-**`Correlation HIGH: Windows server update problem`** is raised on the receiver
-host. Its expression is just `last(.../trigger.correlation.state[windows_update_problem])=4`,
+**`Correlation HIGH: Windows server update problem`** is raised on the
+correlation host `Correlation: sccm01 + web01`. Its expression is just `last(.../trigger.correlation.state[windows_update_problem])=4`,
 it carries a `correlation.id` tag, and the module posts a `[TC]` comment listing
 the related triggers:
 
@@ -209,6 +222,50 @@ cycle in real time — both `Database read errors` problems go **Warning →
 Disaster** the moment MySQL saturates, and back to **Warning** when it recovers:
 
 ![Real-time severity escalation: Warning to Disaster and back](docs/images/escalation-severity.gif)
+
+---
+
+## Example C — Cluster: one node down is High, both down is Disaster
+
+A node going down in a two-node cluster is serious (no redundancy left) but the
+service still runs; both nodes down is an outage. One correlation rule covers both:
+
+1. In the rule editor, under **Add the same trigger from every host in a group**,
+   pick the cluster's host group and type the node-down trigger name (e.g.
+   *Cluster node is down*, or *is unreachable (ICMP ping)*) → **Add from group**.
+   One source trigger per node is added.
+2. Click **Cluster preset**: match mode *Escalate by active count* with tiers
+   **≥1 → High** and **≥ number of nodes → Disaster**.
+3. Output: *Automatic correlation host*. Save.
+
+```text
+Rule name:     Demo cluster availability
+Source:        demo-cluster-node01 → Cluster node is down
+               demo-cluster-node02 → Cluster node is down
+Match mode:    Escalate by active count   ≥1 → High, ≥2 → Disaster
+Output:        Automatic correlation host → "Correlation: demo-cluster-node01 + demo-cluster-node02"
+```
+
+One node down raises `Correlation HIGH: Demo cluster availability`; when the second
+goes down it becomes `Correlation CRITICAL: …` (the High one resolves), and it steps
+back down — or clears — as nodes return.
+
+---
+
+## The Dashboard
+
+The module opens on a live **Dashboard** (refreshes every 30 s):
+
+- **Summary** — correlations firing by severity, problems currently raised by
+  escalation, source problems involved, and whether evaluation is running.
+- **By correlation** — one card per rule, worst first: the severity it has *right
+  now*, its source triggers grouped per host (each with its problem severity and
+  age), the correlation problem it raised, and its correlation host. Severity
+  escalations follow, each with the problems it is holding up
+  (*Warning → Disaster*) and why.
+- **By host** — each host that takes part in a rule, its watched triggers, and
+  chips for every correlation/escalation it feeds, coloured by the criticality it
+  is causing.
 
 ---
 

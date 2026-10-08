@@ -30,28 +30,24 @@ receiver-LLD mode is always `trigger.correlation.state[<your Correlation ID>]`
 
 ## One-time setup (once per Zabbix)
 
-1. **Settings tab** → set:
-   - **API URL** — e.g. `https://your-zabbix/api_jsonrpc.php` (required; the token
-     is never sent to a URL derived from the request host).
-   - **API token** — a token whose user can read the source hosts and write
-     history to the receiver host. If you enable comments, it also needs
-     *add problem update* permission on those hosts.
-   - **Evaluation shared secret** — type any long random string. **Required:** while
-     it is blank the evaluation endpoint answers every call with *Access denied*.
-     It is stored as a one-way hash in the (shared) Zabbix database, so on
-     Docker/split installs every frontend container uses it — no env var needed.
-     (The *Evaluation token env var* field is just an optional alternative.)
-2. **Run evaluation automatically:** the receiver template ships an HTTP-agent
-   item that calls the module every minute. On the receiver host set the macros
-   (host-level, **not** global — the template default shadows a global macro):
-   - `{$TRIGGER.CORRELATION.URL}` = `https://your-zabbix/modules/TriggerCorrelation/eval.php`
-     (full eval-endpoint URL, reachable from the Zabbix **server**, not just the host name).
-   - `{$TRIGGER.CORRELATION.TOKEN}` = **exactly** the Evaluation shared secret above.
-3. Click **Test API** (top right) — it should report a host count.
+1. **Settings tab → Zabbix API** → set:
+   - **API URL** — click **Detect**, or type e.g. `https://your-zabbix/api_jsonrpc.php`
+     (required; the token is never sent to a URL derived from the request host).
+   - **API token** — a token whose user can read the source hosts and the
+     correlation host group (Read is enough for `history.push` and comments). For
+     severity escalation it also needs *change severity* on the target groups.
+2. **Save your first rule.** The module then sets up everything the evaluation
+   needs — templates, the engine host whose heartbeat runs the evaluation every
+   minute, the evaluation shared secret on both sides, and an evaluation URL the
+   Zabbix server has proven it can reach. Nothing to import, create or copy.
+3. **Run self-check** (Settings) — everything should be green within a minute or
+   two. **Repair automatic setup** fixes what is not.
 
-> Testing the eval URL in a browser always returns *Access denied* (there is no token
-> header). Test from the UI with **Run evaluation now** instead, or let the HTTP-agent
-> item run with the matching macro token.
+> Already had a hand-made setup? It keeps working: any host with the heartbeat item
+> is used as the engine, its URL is left alone, and the secret is only replaced when
+> the heartbeat is being refused with "Invalid evaluation token". If you call
+> `eval.php` from cron instead, set Settings → Automatic setup → **Evaluation driver**
+> to "I call eval.php myself".
 
 ---
 
@@ -100,32 +96,51 @@ instead of sticking at the last severity (a false positive).
 
 ---
 
-## Walkthrough — Receiver LLD (recommended)
+## Walkthrough — Automatic correlation host (recommended)
 
-1. **Import** `templates/trigger_correlation_receiver_zabbix_7.yaml`
-   (`Data collection → Templates → Import`). It creates **Template Trigger
-   Correlation Receiver**.
-2. **Link the template to a host.** Use the default **Zabbix Correlation Engine**,
-   or your own host representing the flow (e.g. *Public Web App Integration Flow*).
-   > ⚠️ The **Receiver host** field is a **host name**, and that host must have the
-   > **module's** receiver template linked. It is **not** a template name.
-3. **Create the rule** (Rules tab → Rule editor):
+1. **Create the rule** (Correlation rules tab → Rule editor):
    - **Conditions:** add the source triggers, e.g.
      - `web01` — *HTTP frontend down*
      - `db01` — *Database offline*
      - `app02` — *Cannot reach database*
-   - **Output mode:** `Receiver LLD template`
-   - **Receiver host:** the host you linked the template to.
-   - **Correlation ID:** a **short unique id you choose**, e.g.
-     `public_web_app_integration_flow`.
-     > ⚠️ The Correlation ID is **not** an item name and **not** a template name.
-     > The module creates `trigger.correlation.state[public_web_app_integration_flow]`
-     > on the receiver host. Letters, digits, `_ . -` only (lower-cased).
-   - **Match mode / severity:** see *Escalation* below.
-4. **Save**, then **Run evaluation now**. The first run may say *discovery
-   pending* until Zabbix processes the LLD — run it again after ~1 minute. Check
-   `Monitoring → Latest data` on the receiver host for
-   `trigger.correlation.state[...]`.
+     For a cluster or a farm, use **Add the same trigger from every host in a
+     group** instead: pick the host group and the trigger name, and one condition
+     per host is added.
+   - **Output mode:** `Automatic correlation host (recommended)`. The editor shows
+     which host the rule will use — a new one, or the existing host already shared
+     by rules over the same source hosts.
+   - **Correlation ID:** optional. It defaults to the rule name; it becomes the item
+     key `trigger.correlation.state[<id>]` on the correlation host (letters, digits,
+     `_ . -`, lower-cased) and must be unique among the rules on that host.
+   - **Match mode / severity:** see *Escalation* below (**Cluster preset** sets
+     "1 → High, all → Disaster").
+2. **Save.** The message tells you what was set up, e.g. *Created the correlation
+   host “Correlation: app02 + db01 + web01”*. The first result appears within about
+   two minutes: Zabbix needs a heartbeat run to discover the new host's item. Until
+   then the rule shows *Setting up — Zabbix is still creating the correlation item*.
+3. Follow it on the **Dashboard** tab, or in `Monitoring → Latest data` on the
+   correlation host (`trigger.correlation.state[...]`).
+
+Changing a rule's source hosts later moves it to the host for the new set — or, if
+no other rule shares its current host, re-keys that host in place so its history
+and open problem carry over.
+
+---
+
+## Walkthrough — A receiver host I manage (advanced)
+
+Use this when the correlation must land on a specific host of yours (e.g. one that
+represents an integration flow, with its own actions and maintenance).
+
+1. **Link a receiver template to that host:** **Template Trigger Correlation Auto
+   Receiver** (no heartbeat — the usual choice) or, only if it should also be the
+   engine, **Template Trigger Correlation Receiver**. Both are imported
+   automatically once you have saved any rule; or import them from `templates/`.
+2. **Create the rule** with **Output mode** `Advanced: a receiver host I manage`,
+   **Receiver host** = that host's technical name, and a **Correlation ID**.
+   > ⚠️ The Receiver host field is a **host name** — not a template name.
+3. **Save**, then **Run evaluation now**. Check `Monitoring → Latest data` on that
+   host for `trigger.correlation.state[...]`.
 
 ---
 
@@ -223,17 +238,19 @@ action code (default 4 = add message) and chunk size are in
 
 ---
 
-## Verify a receiver-LLD rule (checklist)
+## Verify a rule (checklist)
 
-- [ ] **Receiver host** = a host that has **Template Trigger Correlation
-      Receiver** linked. (A custom template of your own that does not contain the
-      module's discovery rule + `trigger.correlation.state[{#CORRELATION.ID}]`
-      prototype will **not** work for receiver-LLD — use the shipped template, or
-      switch to "Your own template (B)" / "Existing trapper item (C)" above.)
+- [ ] Settings: **API URL** + **API token** set; **Run self-check** is green —
+      in particular the *Engine host* line ("The Zabbix server reached eval.php …")
+      and *API token can write correlation hosts*.
+- [ ] Automatic rules: the rule list shows "on Correlation: … (automatic)". Manual
+      rules: the **Receiver host** has **Template Trigger Correlation Receiver** or
+      **… Auto Receiver** linked (a template of your own without the module's
+      discovery rule + `trigger.correlation.state[{#CORRELATION.ID}]` prototype
+      will not work — use "Your own template (B)" / "Existing trapper item (C)").
 - [ ] **Correlation ID** = a short unique id (e.g.
       `public_web_app_integration_flow`), **not** the template/item name.
-- [ ] Settings: **API URL** + **API token** set, **Test API** passes.
-- [ ] Receiver host macros `{$TRIGGER.CORRELATION.URL}` and
-      `{$TRIGGER.CORRELATION.TOKEN}` set (for automatic 1-minute evaluation).
 - [ ] After **Run evaluation now**, `trigger.correlation.state[<your id>]` shows
-      under Latest data on the receiver host (re-run once if *discovery pending*).
+      under Latest data on the correlation/receiver host (*Setting up* for a minute
+      or two after the rule was saved is normal).
+- [ ] Something still red? **Repair automatic setup** (Settings).

@@ -26,14 +26,18 @@
     searchHostGroups: root.getAttribute('data-url-search-hostgroups'),
     run: root.getAttribute('data-url-run'),
     apiTest: root.getAttribute('data-url-api-test'),
-    selfCheck: root.getAttribute('data-url-selfcheck')
+    selfCheck: root.getAttribute('data-url-selfcheck'),
+    setup: root.getAttribute('data-url-setup'),
+    dashboard: root.getAttribute('data-url-dashboard'),
+    problems: root.getAttribute('data-url-problems')
   };
   var csrf = {
     ruleSave: root.getAttribute('data-csrf-rule-save'),
     ruleDelete: root.getAttribute('data-csrf-rule-delete'),
     severityRuleSave: root.getAttribute('data-csrf-severity-rule-save'),
     severityRuleDelete: root.getAttribute('data-csrf-severity-rule-delete'),
-    run: root.getAttribute('data-csrf-run')
+    run: root.getAttribute('data-csrf-run'),
+    setup: root.getAttribute('data-csrf-setup')
   };
 
   var rulesData = readRulesData();
@@ -120,7 +124,7 @@
   // ── tabs ──────────────────────────────────────────────────────────────
   function setupTabs() {
     var tabs = qsa('.ai-settings-tab');
-    var keys = ['rules', 'severity', 'settings', 'help'];
+    var keys = ['dashboard', 'rules', 'severity', 'settings', 'help'];
     var storageKey = 'tcActiveTab';
 
     function activate(key, focus) {
@@ -134,6 +138,7 @@
         if (active && focus) { t.focus(); }
       });
       try { window.sessionStorage.setItem(storageKey, key); } catch (e) {}
+      onTabChange(key);
     }
 
     var tablist = qs('.ai-settings-tabs');
@@ -159,6 +164,7 @@
       try { var s = window.sessionStorage.getItem(storageKey); if (s && keys.indexOf(s) !== -1) { initial = s; } } catch (e) {}
     }
     activate(initial, false);
+    return activate;
   }
 
   // ── FAQ toggles ───────────────────────────────────────────────────────
@@ -250,7 +256,8 @@
         hostId.value = item.hostid || '';
         // host changed → re-pick the trigger
         trigId.value = '';
-        trigInput.dataset.selectedLabel = ' ';
+        trigInput.dataset.selectedLabel = '\u0000';
+        updateAutoHostLabel();
       });
 
       makeTypeahead(trigInput, trigId, trigDrop, function (q) {
@@ -265,6 +272,7 @@
           hostInput.value = hh.name || hh.host || hh.hostid || '';
           hostInput.dataset.selectedLabel = hostInput.value;
         }
+        updateAutoHostLabel();
       });
     });
 
@@ -287,6 +295,106 @@
       oItem.value = item.key_ || item.name || '';
       oItemId.value = item.itemid || '';
     });
+  }
+
+  // "Add the same trigger from every host in a group".
+  function bindGroupAdd() {
+    qsa('.tc-group-add').forEach(function (box) {
+      var grp = qs('.ga-group', box);
+      var grpId = qs('.ga-groupid', box);
+      var drop = qs('[data-typeahead="ga-group"] .ai-dropdown-list', box);
+      makeTypeahead(grp, grpId, drop, function (q) {
+        return getJson(buildUrl(urls.searchHostGroups, {q: q, limit: 25})).then(function (d) { return d.items || []; });
+      }, function (item) {
+        grp.value = item.name || item.label || '';
+        grpId.value = item.groupid || '';
+      });
+    });
+  }
+
+  function addFromGroup(box) {
+    var groupid = val(qs('.ga-groupid', box));
+    var name = val(qs('.ga-trigger', box));
+    var list = document.getElementById(box.getAttribute('data-target'));
+    if (!groupid) { setStatus('Pick a host group from the dropdown first.', true); return; }
+    if (!name) { setStatus('Type the trigger name to look for on each host.', true); return; }
+    setStatus('Looking for “' + name + '” on the hosts of the group…', false);
+    getJson(buildUrl(urls.searchTriggers, {q: name, groupid: groupid, limit: 500})).then(function (d) {
+      if (!d || d.ok === false) { setStatus((d && d.error) || 'Trigger search failed.', true); return; }
+      var items = d.items || [];
+      // Prefer exact name matches; fall back to "contains" — but never guess
+      // between several triggers on the same host.
+      var exact = items.filter(function (t) { return String(t.description).toLowerCase() === name.toLowerCase(); });
+      var pool = exact.length ? exact : items;
+      var perHost = {};
+      var ambiguous = {};
+      pool.forEach(function (t) {
+        var h = (t.hosts || [])[0];
+        if (!h) { return; }
+        if (perHost[h.hostid]) { ambiguous[h.hostid] = h.name || h.host; return; }
+        perHost[h.hostid] = {host: h, trigger: t};
+      });
+      Object.keys(ambiguous).forEach(function (hid) { delete perHost[hid]; });
+      var existingCount = qsa('.tc-condition .cond-triggerid', list).filter(function (i) { return !!i.value; }).length;
+      if (existingCount + Object.keys(perHost).length > 100) {
+        setStatus('That would make ' + (existingCount + Object.keys(perHost).length) + ' source triggers; a rule can have at most 100. Narrow the group or the trigger name.', true);
+        return;
+      }
+      var existing = {};
+      qsa('.tc-condition .cond-triggerid', list).forEach(function (i) { if (i.value) { existing[i.value] = true; } });
+      var added = 0;
+      Object.keys(perHost).forEach(function (hid) {
+        var p = perHost[hid];
+        if (existing[p.trigger.triggerid]) { return; }
+        var cond = {hostid: p.host.hostid, host: p.host.name || p.host.host, triggerid: p.trigger.triggerid, trigger: p.trigger.description};
+        // Fill an empty row first, then append.
+        var empty = qsa('.tc-condition', list).filter(function (row) { return !val(qs('.cond-hostid', row)) && !val(qs('.cond-triggerid', row)); })[0];
+        var row = buildCondition(cond);
+        if (empty) { list.replaceChild(row, empty); } else { list.appendChild(row); }
+        added++;
+      });
+      bindTypeaheads();
+      updateAutoHostLabel();
+      var hosts = Object.keys(perHost).length;
+      var ambiguousNames = Object.keys(ambiguous).map(function (hid) { return ambiguous[hid]; });
+      var skipped = ambiguousNames.length
+        ? ' Skipped ' + ambiguousNames.join(', ') + ': several triggers there contain “' + name + '” — type the full name.' : '';
+      if (!hosts) {
+        setStatus((ambiguousNames.length ? 'Nothing added.' : 'No enabled host in that group has a trigger matching “' + name + '”.') + skipped, true);
+        return;
+      }
+      setStatus('Added ' + added + ' source trigger(s) from ' + hosts + ' host(s)' + (exact.length ? '' : ' (name contains “' + name + '”)')
+        + (added < hosts ? '; ' + (hosts - added) + ' were already in the rule' : '') + '.' + skipped, ambiguousNames.length > 0);
+    }).catch(function (e) { setStatus('Search failed: ' + e.message, true); });
+  }
+
+  // One source host in problem → High; all of them → Disaster.
+  function applyClusterPreset() {
+    var editor = qs('#tc-rule-editor');
+    // Count mode counts active CONDITIONS (triggers), not hosts.
+    var hosts = {};
+    var conds = 0;
+    qsa('.tc-condition', editor).forEach(function (row) {
+      var hid = val(qs('.cond-hostid', row));
+      if (hid && val(qs('.cond-triggerid', row))) { hosts[hid] = true; conds++; }
+    });
+    var nHosts = Object.keys(hosts).length;
+    var n = Math.max(2, conds);
+    setVal('#tc-match-mode', 'count');
+    var tiers = qs('#tc-tiers');
+    if (tiers) {
+      tiers.innerHTML = '';
+      tiers.appendChild(buildTier({min: 1, value: 4}));
+      tiers.appendChild(buildTier({min: n, value: 5}));
+    }
+    updateMatchMode();
+    if (conds && conds !== nHosts) {
+      setStatus('Cluster preset: 1 active → High, all ' + n + ' source triggers active → Disaster. Note: the count is of triggers, and some of the '
+        + nHosts + ' hosts have more than one — use one trigger per node for “every node down”.', true);
+    }
+    else {
+      setStatus('Cluster preset: 1 active → High, ' + n + ' active (every node) → Disaster. Adjust the tiers if you like.', false);
+    }
   }
 
   document.addEventListener('click', function (e) {
@@ -321,11 +429,59 @@
   }
 
   function updateOutputMode() {
-    var mode = (qs('#tc-output-mode') || {}).value || 'receiver_lld';
+    var mode = (qs('#tc-output-mode') || {}).value || 'auto';
     var receiver = qs('#tc-output-receiver');
+    var receiverHost = qs('#tc-receiver-host-wrap');
+    var auto = qs('#tc-output-auto');
     var existing = qs('#tc-output-existing');
     if (receiver) { receiver.classList.toggle('ai-hidden', mode === 'existing_item'); }
+    if (receiverHost) { receiverHost.classList.toggle('ai-hidden', mode !== 'receiver_lld'); }
+    if (auto) { auto.classList.toggle('ai-hidden', mode !== 'auto'); }
     if (existing) { existing.classList.toggle('ai-hidden', mode !== 'existing_item'); }
+  }
+
+  // The automatic correlation host belongs to the exact SET of source hosts, so
+  // the label only names the current host while the editor still has that set.
+  function updateAutoHostLabel() {
+    var label = qs('#tc-auto-host-label');
+    var editor = qs('#tc-rule-editor');
+    if (!label || !editor) { return; }
+    var assigned = editor.getAttribute('data-auto-host') || '';
+    var assignedSet = editor.getAttribute('data-auto-hostset') || '';
+    var ids = [];
+    qsa('.tc-condition .cond-hostid', editor).forEach(function (el) {
+      var v = String(el.value || '').trim();
+      if (v && ids.indexOf(v) === -1) { ids.push(v); }
+    });
+    ids.sort();
+    if (assigned && assignedSet && ids.join(',') === assignedSet) {
+      label.textContent = assigned + ' (shared by every rule over these hosts)';
+      return;
+    }
+    // Preview: another saved rule may already own a host for exactly this set.
+    var editingId = editor.getAttribute('data-rule-id') || '';
+    var editing = rulesData.filter(function (r) { return String(r.id) === String(editingId); })[0];
+    var ownHostid = editing && editing.output && editing.output.receiver_auto ? String(editing.output.receiver_hostid || '') : '';
+    var sharing = rulesData.filter(function (r) {
+      var o = r.output || {};
+      return o.receiver_auto && String(r.id) !== String(editingId)
+        && (o.receiver_hostset_ids || []).slice().sort().join(',') === ids.join(',');
+    });
+    if (ids.length && sharing.length) {
+      var o = sharing[0].output || {};
+      label.textContent = (o.receiver_host_name || o.receiver_host) + ' — already exists; shared with “' + sharing[0].name + '”'
+        + (sharing.length > 1 ? ' and ' + (sharing.length - 1) + ' more' : '');
+    }
+    else if (ids.length && ownHostid && !rulesData.some(function (r) {
+      return String(r.id) !== String(editingId) && r.output && String(r.output.receiver_hostid || '') === ownHostid;
+    })) {
+      label.textContent = '“' + assigned + '” is moved to these source hosts when you save (its history is kept)';
+    }
+    else {
+      label.textContent = ids.length
+        ? 'created for these ' + ids.length + ' source host(s) when you save (or re-used if one exists)'
+        : 'created (or reused) automatically for these source hosts when you save';
+    }
   }
 
   function updateMatchMode() {
@@ -358,10 +514,15 @@
     conds.forEach(function (c) { list.appendChild(buildCondition(c)); });
 
     var out = rule.output || {};
-    setVal('#tc-output-mode', out.mode || 'receiver_lld');
+    // New rules default to the automatic correlation host; saved rules keep the
+    // mode they were created with (legacy receiver rules have no receiver_auto).
+    var uiMode = !rule.id ? 'auto' : (out.mode === 'existing_item' ? 'existing_item' : (out.receiver_auto ? 'auto' : 'receiver_lld'));
+    setVal('#tc-output-mode', uiMode);
+    editor.setAttribute('data-auto-host', out.receiver_auto ? (out.receiver_host_name || out.receiver_host || '') : '');
+    editor.setAttribute('data-auto-hostset', out.receiver_auto ? (out.receiver_hostset_ids || []).slice().sort().join(',') : '');
     setVal('#tc-match-mode', out.match_mode || 'all');
     setVal('#tc-match-value', String(out.match_value || 4));
-    setVal('#tc-receiver-host', out.receiver_host || defaultReceiver);
+    setVal('#tc-receiver-host', (!out.receiver_auto && out.receiver_host) || defaultReceiver);
     setVal('#tc-correlation-id', out.correlation_id || '');
     setVal('#tc-output-host', out.host || '');
     setVal('#tc-output-hostid', out.hostid || '');
@@ -383,6 +544,7 @@
     updateOutputMode();
     updateMatchMode();
     bindTypeaheads();
+    updateAutoHostLabel();
     setStatus('', false);
   }
 
@@ -399,10 +561,13 @@
       if (c.hostid || c.triggerid || c.host || c.trigger) { conditions.push(c); }
     });
 
-    var mode = (qs('#tc-output-mode') || {}).value || 'receiver_lld';
+    var uiMode = (qs('#tc-output-mode') || {}).value || 'auto';
+    // "Automatic" is a receiver-LLD rule whose receiver host the server provisions.
+    var mode = uiMode === 'existing_item' ? 'existing_item' : 'receiver_lld';
     var matchMode = (qs('#tc-match-mode') || {}).value || 'all';
     var output = {
       mode: mode,
+      receiver_auto: uiMode === 'auto',
       match_mode: matchMode,
       match_value: Number(val('#tc-match-value') || 4),
       clear_value: 0,
@@ -424,7 +589,7 @@
       output.key = val('#tc-output-item');
     }
     else {
-      output.receiver_host = val('#tc-receiver-host');
+      if (uiMode !== 'auto') { output.receiver_host = val('#tc-receiver-host'); }
       output.correlation_id = val('#tc-correlation-id') || slug(val('#tc-rule-name'));
     }
 
@@ -451,9 +616,19 @@
     var fields = {rule: JSON.stringify(rule)};
     fields[csrfField] = csrf.ruleSave;
     postForm(urls.ruleSave, fields).then(function (data) {
-      if (data.ok) { window.location.reload(); }
+      if (data.ok) {
+        flashNotes('Rule saved.', data.notes);
+        window.location.reload();
+      }
       else { setStatus(data.error || 'Save failed.', true); }
     }).catch(function (e) { setStatus('Save failed: ' + e.message, true); });
+  }
+
+  // Carry what the server set up automatically (hosts created, secret set, …)
+  // across the reload into the status line.
+  function flashNotes(lead, notes) {
+    if (!notes || !notes.length) { return; }
+    try { window.sessionStorage.setItem('tcFlash', [lead].concat(notes).join(' ')); } catch (e) {}
   }
 
   function deleteRule(id) {
@@ -462,7 +637,7 @@
     var fields = {id: id};
     fields[csrfField] = csrf.ruleDelete;
     postForm(urls.ruleDelete, fields).then(function (data) {
-      if (data.ok) { window.location.reload(); }
+      if (data.ok) { flashNotes('Rule deleted.', data.notes); window.location.reload(); }
       else { setStatus(data.error || 'Delete failed.', true); }
     }).catch(function (e) { setStatus('Delete failed: ' + e.message, true); });
   }
@@ -531,13 +706,54 @@
         if (data.eval_url) {
           var u = document.createElement('div');
           u.className = 'tc-check tc-check-info';
-          u.textContent = 'ℹ  Set {$TRIGGER.CORRELATION.URL} to:  ' + data.eval_url;
+          u.textContent = 'ℹ  Evaluation URL the engine host is given ({$TRIGGER.CORRELATION.URL}):  ' + data.eval_url;
           box.appendChild(u);
         }
       }
       var bad = (data.checks || []).filter(function (c) { return c.status === 'fail'; }).length;
       setStatus(bad ? (bad + ' problem(s) found — see the self-check results below.') : 'Self-check passed.', bad > 0);
     }).catch(function (e) { setStatus('Self-check failed: ' + e.message, true); });
+  }
+
+  // Setup/repair actions (Settings tab). They change Zabbix objects, so they
+  // are CSRF-protected POSTs, separate from the read-only self-check.
+  // Unsaved edits in the settings form (a reload would silently drop them).
+  function settingsDirty() {
+    var form = qs('#tc-settings-form');
+    if (!form) { return false; }
+    return qsa('input, select, textarea', form).some(function (f) {
+      if (f.type === 'hidden' || f.type === 'button' || f.type === 'submit') { return false; }
+      if (f.type === 'checkbox' || f.type === 'radio') { return f.checked !== f.defaultChecked; }
+      if (f.tagName === 'SELECT') {
+        return Array.prototype.some.call(f.options, function (o) { return o.selected !== o.defaultSelected; });
+      }
+      return f.value !== f.defaultValue;
+    });
+  }
+
+  function runSetup(op, busyText, confirmText) {
+    if (op !== 'detect_api' && settingsDirty()
+        && !window.confirm('You have unsaved changes in Settings. Continue without saving them? (Save settings first to keep them.)')) {
+      return;
+    }
+    if (confirmText && !window.confirm(confirmText)) { return; }
+    setStatus(busyText, false);
+    var fields = {op: op};
+    fields[csrfField] = csrf.setup;
+    postForm(urls.setup, fields).then(function (data) {
+      if (!data.ok) { setStatus(data.error || 'The action failed.', true); return; }
+      if (op === 'detect_api') {
+        // Fill the field in place — keeps anything else typed (e.g. a pasted token).
+        var input = qs('#tc-settings-form input[name="api_url"]');
+        var detected = data.detected_url || '';
+        if (input && detected) { input.value = detected; input.defaultValue = detected; }
+        setStatus((data.notes || []).join(' '), !detected);
+        return;
+      }
+      try { window.sessionStorage.setItem('tcActiveTab', 'settings'); } catch (e) {}
+      try { window.sessionStorage.setItem('tcFlash', (data.notes || []).join(' ')); } catch (e) {}
+      window.location.reload();
+    }).catch(function (e) { setStatus('The action failed: ' + e.message, true); });
   }
 
   // ── severity escalation editor ──────────────────────────────────────────
@@ -706,7 +922,7 @@
     var fields = {rule: JSON.stringify(rule)};
     fields[csrfField] = csrf.severityRuleSave;
     postForm(urls.severityRuleSave, fields).then(function (data) {
-      if (data.ok) { try { window.sessionStorage.setItem('tcActiveTab', 'severity'); } catch (e) {} window.location.reload(); }
+      if (data.ok) { flashNotes('Escalation rule saved.', data.notes); try { window.sessionStorage.setItem('tcActiveTab', 'severity'); } catch (e) {} window.location.reload(); }
       else { setStatus(data.error || 'Save failed.', true); }
     }).catch(function (e) { setStatus('Save failed: ' + e.message, true); });
   }
@@ -748,6 +964,321 @@
     return parts.join(' ');
   }
 
+  // ── dashboard ───────────────────────────────────────────────────────────
+  var activateTab = null;
+  var dash = {view: 'correlations', data: null, timer: null, loading: false};
+  var SEV_LABELS = ['Not classified', 'Information', 'Warning', 'Average', 'High', 'Disaster'];
+  try { var savedView = window.sessionStorage.getItem('tcDashView'); if (savedView === 'hosts') { dash.view = 'hosts'; } } catch (e) {}
+
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) { node.className = cls; }
+    if (text !== undefined && text !== null) { node.textContent = String(text); }
+    return node;
+  }
+
+  function sevChip(sev, text) {
+    var n = Math.max(0, Math.min(5, Number(sev) || 0));
+    return el('span', 'tc-sev tc-sev-' + n, text || SEV_LABELS[n]);
+  }
+
+  function ago(clock) {
+    if (!clock) { return ''; }
+    var s = Math.max(0, Math.floor(Date.now() / 1000) - Number(clock));
+    if (s < 60) { return s + 's'; }
+    if (s < 3600) { return Math.floor(s / 60) + 'm'; }
+    if (s < 86400) { return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm'; }
+    return Math.floor(s / 86400) + 'd ' + Math.floor((s % 86400) / 3600) + 'h';
+  }
+
+  function problemsLink(hostid, text) {
+    var a = el('a', 'tc-link', text);
+    a.href = urls.problems + (hostid ? '&hostids%5B%5D=' + encodeURIComponent(hostid) : '');
+    return a;
+  }
+
+  function onTabChange(key) {
+    if (key === 'dashboard') { loadDashboard(); scheduleDashboard(); }
+    else if (dash.timer) { clearTimeout(dash.timer); dash.timer = null; }
+  }
+
+  function scheduleDashboard() {
+    if (dash.timer) { clearTimeout(dash.timer); }
+    dash.timer = null;
+    var auto = qs('#tc-dash-auto');
+    if (auto && auto.checked && root.getAttribute('data-active-tab') === 'dashboard') {
+      dash.timer = setTimeout(function () { loadDashboard(); scheduleDashboard(); }, 30000);
+    }
+  }
+
+  function loadDashboard() {
+    if (!urls.dashboard || dash.loading || document.hidden) { return; }
+    dash.loading = true;
+    getJson(urls.dashboard).then(function (data) {
+      dash.loading = false;
+      if (!data || !data.ok) {
+        renderDashError((data && data.error) || 'Could not load the dashboard.');
+        return;
+      }
+      dash.data = data;
+      renderDashboard();
+      var upd = qs('#tc-dash-updated');
+      if (upd) { upd.textContent = 'Updated ' + new Date(data.generated_at * 1000).toLocaleTimeString(); }
+    }).catch(function (e) {
+      dash.loading = false;
+      renderDashError('Could not load the dashboard: ' + e.message);
+    });
+  }
+
+  function renderDashError(msg) {
+    var body = qs('#tc-dash-body');
+    if (!body) { return; }
+    body.innerHTML = '';
+    body.appendChild(el('div', 'ai-status ai-status-error', msg));
+  }
+
+  function renderDashboard() {
+    var data = dash.data;
+    if (!data) { return; }
+    renderSummary(data.summary || {});
+    var body = qs('#tc-dash-body');
+    body.innerHTML = '';
+    qsa('.tc-seg-btn').forEach(function (b) {
+      var on = b.getAttribute('data-dash-view') === dash.view;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+
+    if (!(data.correlations || []).length && !(data.escalations || []).length) {
+      var empty = el('div', 'tc-empty');
+      empty.appendChild(el('strong', '', 'No rules yet.'));
+      empty.appendChild(el('p', 'ai-muted', 'Create a correlation rule (a new problem when related triggers fire together) or a severity escalation (raise existing problems while a condition holds). The correlation host is set up for you.'));
+      var go = el('button', 'btn', 'Create a correlation rule');
+      go.type = 'button';
+      go.addEventListener('click', function () { if (activateTab) { activateTab('rules', true); } });
+      empty.appendChild(go);
+      body.appendChild(empty);
+      return;
+    }
+
+    if (dash.view === 'hosts') {
+      renderHosts(body, data.hosts || []);
+      return;
+    }
+    if ((data.correlations || []).length) {
+      body.appendChild(el('h3', 'tc-dash-h', 'Correlations'));
+      var grid = el('div', 'tc-cards');
+      data.correlations.forEach(function (c) { grid.appendChild(correlationCard(c)); });
+      body.appendChild(grid);
+    }
+    if ((data.escalations || []).length) {
+      body.appendChild(el('h3', 'tc-dash-h', 'Severity escalations'));
+      var egrid = el('div', 'tc-cards');
+      data.escalations.forEach(function (e) { egrid.appendChild(escalationCard(e)); });
+      body.appendChild(egrid);
+    }
+  }
+
+  function tile(label, value, sub, status) {
+    var t = el('div', 'tc-tile' + (status ? ' tc-tile-' + status : ''));
+    t.appendChild(el('div', 'tc-tile-label', label));
+    var v = el('div', 'tc-tile-value');
+    if (value instanceof Node) { v.appendChild(value); } else { v.textContent = String(value); }
+    t.appendChild(v);
+    if (sub) {
+      var s = el('div', 'tc-tile-sub');
+      if (sub instanceof Node) { s.appendChild(sub); } else { s.textContent = sub; }
+      t.appendChild(s);
+    }
+    return t;
+  }
+
+  function renderSummary(sum) {
+    var box = qs('#tc-dash-summary');
+    if (!box) { return; }
+    box.innerHTML = '';
+    var chips = el('span', 'tc-chip-row');
+    var bySev = sum.by_severity || {};
+    Object.keys(bySev).sort(function (a, b) { return b - a; }).forEach(function (sev) {
+      chips.appendChild(sevChip(sev, bySev[sev] + ' ' + SEV_LABELS[sev]));
+    });
+    if (!chips.childNodes.length) { chips.textContent = 'all quiet'; }
+    box.appendChild(tile('Correlations firing', (sum.firing || 0) + ' / ' + (sum.correlations || 0), chips, sum.firing ? 'alert' : 'ok'));
+    box.appendChild(tile('Problems raised by escalation', sum.raised || 0,
+      (sum.escalations_active || 0) + ' of ' + (sum.escalations || 0) + ' escalation rule(s) active', sum.raised ? 'alert' : ''));
+    box.appendChild(tile('Source problems involved', sum.source_problems || 0, 'active problems on watched triggers'));
+    var eng = sum.engine || {};
+    box.appendChild(tile('Evaluation', eng.text || 'Unknown', eng.lastclock ? 'last run ' + ago(eng.lastclock) + ' ago' : '',
+      eng.status === 'ok' ? 'ok' : (eng.status === 'fail' ? 'alert' : 'warn')));
+  }
+
+  function memberList(members) {
+    var wrap = el('div', 'tc-members');
+    (members || []).forEach(function (m) {
+      var hostBox = el('div', 'tc-member');
+      var head = el('div', 'tc-member-host');
+      head.appendChild(m.hostid ? problemsLink(m.hostid, m.name) : el('span', '', m.name));
+      var firing = (m.triggers || []).filter(function (t) { return t.problem; }).length;
+      head.appendChild(el('span', 'ai-muted', ' · ' + firing + ' of ' + (m.triggers || []).length + ' in problem'));
+      hostBox.appendChild(head);
+      var ul = el('ul', 'tc-trig-list');
+      (m.triggers || []).forEach(function (t) {
+        var li = el('li', 'tc-trig' + (t.problem ? ' is-problem' : ''));
+        if (t.problem) { li.appendChild(sevChip(t.problem.severity)); }
+        else { li.appendChild(el('span', 'tc-sev tc-sev-ok', t.missing ? 'Missing' : (t.disabled ? 'Disabled' : 'OK'))); }
+        li.appendChild(el('span', 'tc-trig-name', t.description));
+        if (t.problem) {
+          li.appendChild(el('span', 'ai-muted tc-trig-age', ago(t.problem.clock) + (t.problem.acknowledged ? ' · ack' : '')));
+        }
+        ul.appendChild(li);
+      });
+      hostBox.appendChild(ul);
+      wrap.appendChild(hostBox);
+    });
+    return wrap;
+  }
+
+  function editButton(cls, id, text) {
+    var b = el('button', 'btn ' + cls, text);
+    b.type = 'button';
+    b.setAttribute('data-id', id);
+    return b;
+  }
+
+  function correlationCard(c) {
+    var card = el('div', 'tc-card tc-card-sev-' + (c.state || 'ok') + (c.enabled ? '' : ' is-disabled'));
+    var head = el('div', 'tc-card-head');
+    var titles = el('div', 'tc-card-titles');
+    titles.appendChild(el('h4', 'tc-card-title', c.name));
+    var meta = el('div', 'ai-muted tc-card-meta');
+    meta.textContent = c.active + ' of ' + c.total + ' active · ' + c.match + (c.enabled ? '' : ' · disabled');
+    titles.appendChild(meta);
+    head.appendChild(titles);
+    head.appendChild(c.state ? sevChip(c.state) : el('span', 'tc-sev tc-sev-ok', 'OK'));
+    card.appendChild(head);
+
+    card.appendChild(memberList(c.members));
+
+    var foot = el('div', 'tc-card-foot');
+    var info = el('div', 'tc-card-problem');
+    if (c.problem) {
+      info.appendChild(sevChip(c.problem.severity, 'Problem'));
+      info.appendChild(el('span', '', ' ' + c.problem.name + ' · since ' + ago(c.problem.clock) + (c.problem.acknowledged ? ' · acknowledged' : '')));
+    }
+    else if (c.state && c.problem_lookup) {
+      info.appendChild(el('span', 'ai-muted', 'The problem is raised at the next evaluation (within a minute).'));
+    }
+    else if (c.state) {
+      info.appendChild(el('span', 'ai-muted', 'Correlation active — your own trigger on ' + (c.host || 'the output item') + ' raises the problem.'));
+    }
+    else {
+      info.appendChild(el('span', 'ai-muted', 'No correlation problem.'));
+    }
+    foot.appendChild(info);
+    var actions = el('div', 'tc-card-actions');
+    if (c.host) {
+      var hostLink = problemsLink(c.hostid, (c.host_auto ? 'Correlation host: ' : 'Writes to: ') + c.host);
+      hostLink.classList.add('ai-muted');
+      actions.appendChild(hostLink);
+    }
+    actions.appendChild(editButton('tc-edit', c.id, 'Edit'));
+    foot.appendChild(actions);
+    card.appendChild(foot);
+    if (c.last_error) { card.appendChild(el('div', 'tc-error-text tc-card-error', c.last_error)); }
+    return card;
+  }
+
+  function escalationCard(e) {
+    var sev = e.active ? e.severity : 0;
+    var card = el('div', 'tc-card tc-card-sev-' + (sev || 'ok') + (e.enabled ? '' : ' is-disabled'));
+    var head = el('div', 'tc-card-head');
+    var titles = el('div', 'tc-card-titles');
+    titles.appendChild(el('h4', 'tc-card-title', e.name));
+    var targets = (e.targets || []).map(function (t) {
+      return t.trigger + (t.scope === 'all' ? ' (all hosts)' : (t.scope === 'hostgroup' ? ' (in ' + t.group + ')' : ' (' + t.host + ')'));
+    }).join(', ');
+    titles.appendChild(el('div', 'ai-muted tc-card-meta', 'when ' + e.match + ' active → raise ' + targets + ' to ' + SEV_LABELS[e.severity]));
+    head.appendChild(titles);
+    head.appendChild(e.active ? sevChip(e.severity, 'Escalating') : el('span', 'tc-sev tc-sev-ok', 'Idle'));
+    card.appendChild(head);
+    card.appendChild(memberList(e.members));
+
+    if ((e.raised || []).length) {
+      var box = el('div', 'tc-raised');
+      box.appendChild(el('div', 'tc-raised-title', 'Raised now'));
+      var ul = el('ul', 'tc-trig-list');
+      e.raised.forEach(function (r) {
+        var li = el('li', 'tc-trig is-problem');
+        li.appendChild(sevChip(r.from));
+        li.appendChild(el('span', 'tc-arrow', '→'));
+        li.appendChild(sevChip(r.to));
+        li.appendChild(el('span', 'tc-trig-name', (r.host ? r.host + ': ' : '') + r.name));
+        li.appendChild(el('span', 'ai-muted tc-trig-age', ago(r.clock)));
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+      card.appendChild(box);
+    }
+    var foot = el('div', 'tc-card-foot');
+    foot.appendChild(el('div', 'ai-muted', (e.conditions_active || 0) + ' of ' + (e.conditions_total || 0) + ' source trigger(s) active'));
+    var actions = el('div', 'tc-card-actions');
+    actions.appendChild(editButton('sev-edit', e.id, 'Edit'));
+    foot.appendChild(actions);
+    card.appendChild(foot);
+    if (e.last_error) { card.appendChild(el('div', 'tc-error-text tc-card-error', e.last_error)); }
+    return card;
+  }
+
+  function renderHosts(body, hosts) {
+    body.appendChild(el('h3', 'tc-dash-h', 'Hosts in correlations'));
+    var grid = el('div', 'tc-cards');
+    hosts.forEach(function (h) {
+      var hot = h.has_problem || h.worst > 0;
+      var card = el('div', 'tc-card tc-card-sev-' + (hot ? h.worst : 'ok'));
+      var head = el('div', 'tc-card-head');
+      var titles = el('div', 'tc-card-titles');
+      var title = el('h4', 'tc-card-title');
+      title.appendChild(problemsLink(h.hostid, h.name));
+      titles.appendChild(title);
+      var firing = (h.triggers || []).filter(function (t) { return t.problem; }).length;
+      titles.appendChild(el('div', 'ai-muted tc-card-meta', firing + ' of ' + (h.triggers || []).length + ' watched trigger(s) in problem'));
+      head.appendChild(titles);
+      head.appendChild(hot ? sevChip(h.worst) : el('span', 'tc-sev tc-sev-ok', 'OK'));
+      card.appendChild(head);
+
+      card.appendChild(memberList([{hostid: '', name: 'Watched triggers', triggers: h.triggers}]));
+
+      var feeds = el('div', 'tc-feeds');
+      feeds.appendChild(el('span', 'ai-muted', 'Feeds: '));
+      (h.correlations || []).forEach(function (c) {
+        var chip = c.state ? sevChip(c.state, c.name) : el('span', 'tc-sev tc-sev-ok', c.name);
+        chip.title = 'Correlation';
+        feeds.appendChild(chip);
+      });
+      (h.escalations || []).forEach(function (e) {
+        var chip = el('span', 'tc-sev ' + (e.active ? 'tc-sev-esc' : 'tc-sev-ok'), '↑ ' + e.name);
+        chip.title = 'Severity escalation';
+        feeds.appendChild(chip);
+      });
+      card.appendChild(feeds);
+      grid.appendChild(card);
+    });
+    body.appendChild(grid);
+  }
+
+  root.addEventListener('click', function (e) {
+    var seg = e.target.closest('.tc-seg-btn');
+    if (seg) {
+      e.preventDefault();
+      dash.view = seg.getAttribute('data-dash-view') === 'hosts' ? 'hosts' : 'correlations';
+      try { window.sessionStorage.setItem('tcDashView', dash.view); } catch (err) {}
+      renderDashboard();
+    }
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden && root.getAttribute('data-active-tab') === 'dashboard') { loadDashboard(); scheduleDashboard(); }
+  });
+
   // ── wiring ──────────────────────────────────────────────────────────────
   root.addEventListener('click', function (e) {
     var editBtn = e.target.closest('.tc-edit');
@@ -756,7 +1287,7 @@
       var id = editBtn.getAttribute('data-id');
       var rule = rulesData.filter(function (r) { return String(r.id) === String(id); })[0];
       loadRule(rule ? JSON.parse(JSON.stringify(rule)) : {});
-      root.setAttribute('data-active-tab', 'rules');
+      if (activateTab) { activateTab('rules', false); } else { root.setAttribute('data-active-tab', 'rules'); }
       var ed = qs('#tc-rule-editor');
       if (ed && ed.scrollIntoView) { ed.scrollIntoView({block: 'nearest'}); }
       return;
@@ -772,7 +1303,7 @@
       var sid = sevEditBtn.getAttribute('data-id');
       var srule = severityRulesData.filter(function (r) { return String(r.id) === String(sid); })[0];
       loadSeverityRule(srule ? JSON.parse(JSON.stringify(srule)) : {});
-      root.setAttribute('data-active-tab', 'severity');
+      if (activateTab) { activateTab('severity', false); } else { root.setAttribute('data-active-tab', 'severity'); }
       var sed = qs('#tc-sev-editor');
       if (sed && sed.scrollIntoView) { sed.scrollIntoView({block: 'nearest'}); }
       return;
@@ -789,7 +1320,7 @@
       var list = box && box.closest('.ai-repeat-list');
       if (box && list) {
         var minCond = (list.id === 'tc-sev-conditions') ? 1 : 2;
-        if (list.querySelectorAll('.tc-condition').length > minCond) { box.remove(); }
+        if (list.querySelectorAll('.tc-condition').length > minCond) { box.remove(); updateAutoHostLabel(); }
         else { setStatus('A rule needs at least ' + minCond + ' source condition' + (minCond > 1 ? 's' : '') + '.', true); }
       }
       return;
@@ -803,6 +1334,12 @@
       else { setStatus('A severity rule needs at least one target.', true); }
       return;
     }
+    var gaBtn = e.target.closest('.tc-group-add-btn');
+    if (gaBtn) {
+      e.preventDefault();
+      addFromGroup(gaBtn.closest('.tc-group-add'));
+      return;
+    }
     var rmTier = e.target.closest('.tc-remove-tier');
     if (rmTier) {
       e.preventDefault();
@@ -813,7 +1350,16 @@
   });
 
   on('#tc-test-api', 'click', function () { testApi(); });
+  on('#tc-dash-refresh', 'click', function () { loadDashboard(); scheduleDashboard(); });
+  on('#tc-cluster-preset', 'click', function () { applyClusterPreset(); });
+  on('#tc-dash-auto', 'change', function () { scheduleDashboard(); });
   on('#tc-selfcheck-btn', 'click', function () { runSelfCheck(); });
+  on('#tc-repair-btn', 'click', function () { runSetup('repair', 'Repairing the automatic setup…'); });
+  on('#tc-cleanup-btn', 'click', function () {
+    runSetup('cleanup', 'Deleting unused correlation hosts…',
+      'Delete every automatic correlation host that no rule uses? Their problem history is deleted with them.');
+  });
+  on('#tc-detect-api-btn', 'click', function () { runSetup('detect_api', 'Looking for the Zabbix API…'); });
   on('#tc-run-all', 'click', function () { runEvaluation(''); });
   on('#tc-add-condition', 'click', function () {
     var list = qs('#tc-conditions');
@@ -850,7 +1396,10 @@
       fetch(settingsForm.action, {method: 'POST', credentials: 'same-origin', body: new FormData(settingsForm)})
         .then(parseResponse)
         .then(function (data) {
-          if (data.ok) { window.location.reload(); }
+          if (data.ok) {
+            flashNotes('Settings saved.', data.notes);
+            window.location.reload();
+          }
           else { setStatus(data.error || 'Save failed.', true); }
         })
         .catch(function (e2) { setStatus('Save failed: ' + e2.message, true); })
@@ -864,12 +1413,13 @@
   }
 
   // ── init ────────────────────────────────────────────────────────────────
-  setupTabs();
+  activateTab = setupTabs();
   updateOutputMode();
   updateMatchMode();
   updateSevMatchMode();
   bindTypeaheads();
   bindSeverityTargets();
+  bindGroupAdd();
 
   // Surface a one-shot message left by a "Run evaluation" reload.
   try {

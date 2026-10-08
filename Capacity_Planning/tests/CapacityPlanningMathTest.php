@@ -106,6 +106,7 @@ final class CapacityPlanningMathTest {
 		$this->testDownsampleSeriesTimestamps();
 		$this->testMissingResourceItemsRemainVisible();
 		$this->testInventoryFacetsAreCompactAndSorted();
+		$this->testCpuWarningDefaultsToReviewLevelBelowTemplateAlarm();
 
 		echo "CapacityPlanningMathTest: {$this->assertions} assertions passed.\n";
 	}
@@ -1712,6 +1713,69 @@ final class CapacityPlanningMathTest {
 			'Missing CPU and memory collection must be explicit instead of disappearing from the report.');
 		$this->assertSame([false, false], array_column($result, 'expected_gap'),
 			'Maintenance must not be claimed as the cause of missing item configuration.');
+	}
+
+	private function testCpuWarningDefaultsToReviewLevelBelowTemplateAlarm(): void {
+		$now = 2000000000;
+		$items = ['h1' => [
+			$this->item('1', 'system.cpu.util', 40.0, $now - 60),
+			$this->item('2', 'vm.memory.utilization', 50.0, $now - 60)
+		]];
+		// Host h1 inherits from template t1, which (like the stock 7.0 Linux template) only
+		// defines {$CPU.UTIL.CRIT}=90. Extra host-level macros are added per case.
+		$index = function (array $host_macros): array {
+			$parse = fn (string $raw, string $value, string $entity): array =>
+				$this->call('parseMacro', [$raw, $value, 0, $entity]);
+			return [
+				'by_entity' => [
+					'h1' => array_map(fn (array $m): array => $parse($m[0], $m[1], 'h1'), $host_macros),
+					't1' => [$parse('{$CPU.UTIL.CRIT}', '90', 't1')]
+				],
+				'levels' => ['h1' => [['t1']]],
+				'global' => []
+			];
+		};
+		$cpu_issues = fn (): array => array_values(array_map(
+			static fn (array $issue): string => $issue['issue'],
+			array_filter($this->qualityIssues(), static fn (array $issue): bool => $issue['resource'] === 'CPU')
+		));
+		$run = function (string $os, array $host_macros) use ($now, $items, $index): array {
+			$this->resetQuality();
+			$result = $this->call('buildResourceFindings',
+				[['h1' => $this->host($os)], $items, $index($host_macros), $now]);
+			return $result[0]['warn'];
+		};
+
+		$warn = $run('Linux', []);
+		$this->assertAlmost(80.0, (float) $warn['v'], 0.001,
+			'Without a warning macro the CPU review level must sit 10 pp below the template alarm.');
+		$this->assertSame([], $cpu_issues(),
+			'A template that only carries CPU.UTIL.CRIT is the normal case, not a data-quality issue.');
+
+		$warn = $run('Linux', [['{$CPU.UTIL.WARN}', '75']]);
+		$this->assertAlmost(75.0, (float) $warn['v'], 0.001, 'A valid warning macro must be used as configured.');
+		$this->assertSame([], $cpu_issues(), 'A valid warning macro must not raise quality issues.');
+
+		$warn = $run('Linux', [['{$CPU.UTIL.WARN}', '95']]);
+		$this->assertAlmost(85.0, (float) $warn['v'], 0.001,
+			'A configured warning at or above critical must fall back below critical.');
+		$this->assertSame(['Invalid CPU threshold order', 'Threshold fallback used'], $cpu_issues(),
+			'A configured warning at or above critical must still be flagged.');
+
+		$warn = $run('Linux', [['{$CPU.UTIL.WARN}', 'abc'], ['{$CPU.UTIL.WARNING}', '70']]);
+		$this->assertAlmost(70.0, (float) $warn['v'], 0.001,
+			'An unusable CPU.UTIL.WARN must not hide a valid legacy CPU.UTIL.WARNING.');
+
+		$warn = $run('Linux', [['{$CPU.UTIL.WARN}', 'abc']]);
+		$this->assertAlmost(80.0, (float) $warn['v'], 0.001,
+			'An unusable warning macro must fall back to the review level.');
+		$this->assertSame(['Threshold fallback used'], $cpu_issues(),
+			'An unusable configured warning macro must be reported.');
+
+		$warn = $run('Windows', [['{$CPU.UTIL.WARN}', '50']]);
+		$this->assertAlmost(80.0, (float) $warn['v'], 0.001,
+			'Windows keeps the analytic review level regardless of a CPU.UTIL.WARN macro.');
+		$this->assertSame([], $cpu_issues(), 'The Windows review level must not raise quality issues.');
 	}
 
 	private function testInventoryFacetsAreCompactAndSorted(): void {

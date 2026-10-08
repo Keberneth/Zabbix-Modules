@@ -4,16 +4,24 @@ zabbix_export:
     - uuid: 84458918c2134930af402f117a019fe2
       name: Templates/Trigger Correlation
   templates:
-    - uuid: 56132d2c3c054faf85975bade380a233
-      template: 'Template Trigger Correlation Receiver'
-      name: 'Template Trigger Correlation Receiver'
+    - uuid: 1b1a5c4abd234a05b307df4b5fd7ce0c
+      template: 'Template Trigger Correlation Auto Receiver'
+      name: 'Template Trigger Correlation Auto Receiver'
       vendor:
         name: Keberneth
         version: '7.0.0.0'
       groups:
         - name: Templates/Trigger Correlation
       description: |
-        Receiver template for the Trigger Correlation frontend module.
+        Receiver template for the correlation hosts that the Trigger Correlation module creates AUTOMATICALLY
+        (one host per set of source hosts, e.g. "Correlation: db01 + web01").
+
+        You normally never link this yourself: the module imports it and links it when you save a rule with
+        Output = "Automatic correlation host".
+
+        It holds only the discovery rule and the item/trigger prototypes. It deliberately has NO evaluator
+        heartbeat item — the single engine host ("Template Trigger Correlation Receiver") calls eval.php once a
+        minute for every rule, so the automatic hosts must not each call it again.
 
         The module pushes LLD discovery JSON to trigger.correlation.discovery and pushes state/context values with history.push.
         State values:
@@ -23,50 +31,8 @@ zabbix_export:
         3 = Average
         4 = High
         5 = Critical/Disaster
-
-        Configure the host macros {$TRIGGER.CORRELATION.URL} and {$TRIGGER.CORRELATION.TOKEN} if you want Zabbix to run the evaluator from an HTTP agent item.
-      macros:
-        - macro: '{$TRIGGER.CORRELATION.URL}'
-          value: 'https://zabbix.example.com/modules/TriggerCorrelation/eval.php'
-          description: 'URL of the standalone module evaluation endpoint (modules/TriggerCorrelation/eval.php), reachable FROM the Zabbix server/proxy. Use this eval.php path — it works even when anonymous frontend access is disabled. (The older zabbix.php?action=triggercorrelation.eval works only if guest access is enabled.) Set to your real frontend URL.'
-        - macro: '{$TRIGGER.CORRELATION.TOKEN}'
-          value: 'set-the-evaluation-shared-secret-here'
-          type: SECRET_TEXT
-          description: 'Evaluation shared secret. Must equal the value set in Monitoring → Trigger Correlation → Settings → Evaluation shared secret. Sent only in the X-Trigger-Correlation-Token header.'
-      items:
-        - uuid: 364635228e054e0391e3bfd6953d36c4
-          name: 'Trigger correlation evaluator heartbeat'
-          type: HTTP_AGENT
-          key: trigger.correlation.eval
-          delay: 1m
-          history: 30d
-          trends: '0'
-          value_type: TEXT
-          description: |
-            Heartbeat / driver. Every minute this HTTP-agent item calls the Trigger Correlation module evaluation endpoint ({$TRIGGER.CORRELATION.URL}, authenticated with the {$TRIGGER.CORRELATION.TOKEN} header) so all rules are evaluated automatically. "No data" here means the module is not being reached (check the URL, token, API token and frontend availability) — see the dependent no-data trigger.
-          url: '{$TRIGGER.CORRELATION.URL}'
-          timeout: 30s
-          headers:
-            - name: X-Trigger-Correlation-Token
-              value: '{$TRIGGER.CORRELATION.TOKEN}'
-            - name: User-Agent
-              value: 'Zabbix Trigger Correlation heartbeat'
-          tags:
-            - tag: component
-              value: correlation
-            - tag: scope
-              value: trigger-correlation
-          triggers:
-            - uuid: 6a712077c5514623a2476621d0f038bc
-              expression: 'nodata(/Template Trigger Correlation Receiver/trigger.correlation.eval,7m)=1'
-              name: 'Trigger correlation evaluator has no data'
-              priority: WARNING
-              description: 'The receiver host has not received evaluator heartbeat data. Check the module URL, token, API token and frontend availability. The 7m window tolerates one slow evaluation run.'
-              tags:
-                - tag: component
-                  value: correlation
       discovery_rules:
-        - uuid: 9ffdd27aa57f49de9ca7c297daa86652
+        - uuid: 4285f8c5878f4fc09046a1da29688364
           name: 'Trigger correlation discovery'
           type: TRAP
           key: trigger.correlation.discovery
@@ -75,7 +41,7 @@ zabbix_export:
           enabled_lifetime_type: DISABLE_NEVER
           description: 'LLD data is pushed by the Trigger Correlation module.'
           item_prototypes:
-            - uuid: dcccde1085e74dbaa8f1a9a0a4596320
+            - uuid: b239e70e5a904c80a1693ae2f9908afe
               name: 'Correlation state: {#CORRELATION.NAME}'
               type: TRAP
               key: 'trigger.correlation.state[{#CORRELATION.ID}]'
@@ -94,7 +60,7 @@ zabbix_export:
                   value: trigger-correlation
                 - tag: correlation.id
                   value: '{#CORRELATION.ID}'
-            - uuid: a7bc0570c561417dac21f99510fd465f
+            - uuid: b86e1d983c17425dbf55a76f22fd166d
               name: 'Correlation context: {#CORRELATION.NAME}'
               type: TRAP
               key: 'trigger.correlation.context[{#CORRELATION.ID}]'
@@ -111,8 +77,8 @@ zabbix_export:
                 - tag: correlation.id
                   value: '{#CORRELATION.ID}'
           trigger_prototypes:
-            - uuid: d59c0e61e71346968eac7e62b20eeeb6
-              expression: 'last(/Template Trigger Correlation Receiver/trigger.correlation.state[{#CORRELATION.ID}])=1'
+            - uuid: 66b3411c9ce94cccb45e0c710f962353
+              expression: 'last(/Template Trigger Correlation Auto Receiver/trigger.correlation.state[{#CORRELATION.ID}])=1'
               name: 'Correlation INFORMATION: {#CORRELATION.NAME}'
               priority: INFO
               description: '{#CORRELATION.DESCRIPTION}'
@@ -123,8 +89,8 @@ zabbix_export:
                   value: trigger-correlation
                 - tag: correlation.id
                   value: '{#CORRELATION.ID}'
-            - uuid: ad854ced129e42f2b045057becd9933c
-              expression: 'last(/Template Trigger Correlation Receiver/trigger.correlation.state[{#CORRELATION.ID}])=2'
+            - uuid: f068ad002e104f28ae4ceeec15ab0779
+              expression: 'last(/Template Trigger Correlation Auto Receiver/trigger.correlation.state[{#CORRELATION.ID}])=2'
               name: 'Correlation WARNING: {#CORRELATION.NAME}'
               priority: WARNING
               description: '{#CORRELATION.DESCRIPTION}'
@@ -135,8 +101,8 @@ zabbix_export:
                   value: trigger-correlation
                 - tag: correlation.id
                   value: '{#CORRELATION.ID}'
-            - uuid: a7583190855341fe91120b810eda597f
-              expression: 'last(/Template Trigger Correlation Receiver/trigger.correlation.state[{#CORRELATION.ID}])=3'
+            - uuid: 381185444d314ab29e6e403128d1741d
+              expression: 'last(/Template Trigger Correlation Auto Receiver/trigger.correlation.state[{#CORRELATION.ID}])=3'
               name: 'Correlation AVERAGE: {#CORRELATION.NAME}'
               priority: AVERAGE
               description: '{#CORRELATION.DESCRIPTION}'
@@ -147,8 +113,8 @@ zabbix_export:
                   value: trigger-correlation
                 - tag: correlation.id
                   value: '{#CORRELATION.ID}'
-            - uuid: 90181df60fda4cac930a095abfa10dae
-              expression: 'last(/Template Trigger Correlation Receiver/trigger.correlation.state[{#CORRELATION.ID}])=4'
+            - uuid: 213b3289b51d46ac83f0bf3f790c208d
+              expression: 'last(/Template Trigger Correlation Auto Receiver/trigger.correlation.state[{#CORRELATION.ID}])=4'
               name: 'Correlation HIGH: {#CORRELATION.NAME}'
               priority: HIGH
               description: '{#CORRELATION.DESCRIPTION}'
@@ -159,8 +125,8 @@ zabbix_export:
                   value: trigger-correlation
                 - tag: correlation.id
                   value: '{#CORRELATION.ID}'
-            - uuid: 56b1d58b4edb4ba7b8a9fa42eef59a22
-              expression: 'last(/Template Trigger Correlation Receiver/trigger.correlation.state[{#CORRELATION.ID}])=5'
+            - uuid: 214ec1cba53042c8891f18241745671a
+              expression: 'last(/Template Trigger Correlation Auto Receiver/trigger.correlation.state[{#CORRELATION.ID}])=5'
               name: 'Correlation CRITICAL: {#CORRELATION.NAME}'
               priority: DISASTER
               description: '{#CORRELATION.DESCRIPTION}'
@@ -172,7 +138,7 @@ zabbix_export:
                 - tag: correlation.id
                   value: '{#CORRELATION.ID}'
       valuemaps:
-        - uuid: a4ca5ad752d74874ad1a29adeb23b0b9
+        - uuid: c387ca89406b4ba5aa3832681132132d
           name: 'Correlation state'
           mappings:
             - value: '0'

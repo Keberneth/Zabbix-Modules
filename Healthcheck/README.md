@@ -150,6 +150,18 @@ An example line is included in:
 The **Settings → Scheduler integration** section can generate ready-to-paste cron and
 systemd commands for the web-server user of your choice.
 
+### Docker
+
+Schedule the runner on the Docker host and execute it inside the web container:
+
+    docker exec <zabbix-web-container> php /usr/share/zabbix/modules/Healthcheck/bin/healthcheck-runner.php --json
+
+The official images generate `zabbix.conf.php` from `DB_SERVER_*` variables that only
+php-fpm receives. When that file yields no database name, the runner derives the same
+settings from the container's `MYSQL_*` / `POSTGRES_*` variables (including `*_FILE`
+secrets) and `DB_SERVER_HOST` / `DB_SERVER_PORT`, exactly like the image entrypoint does.
+To use a different configuration file instead, set `ZABBIX_WEB_CONFIG` to its path.
+
 ## Troubleshooting
 
 - **`Permission denied` reading `zabbix.conf.php` from the runner.** The config file is

@@ -7,9 +7,12 @@ namespace Modules\TriggerCorrelation\Actions;
 use CController;
 use Modules\TriggerCorrelation\Lib\CorrelationStore;
 use Modules\TriggerCorrelation\Lib\JsonResponse;
+use Modules\TriggerCorrelation\Lib\ReceiverProvisioner;
+use Modules\TriggerCorrelation\Lib\Util;
 
 require_once dirname(__DIR__).'/lib/CorrelationStore.php';
 require_once dirname(__DIR__).'/lib/JsonResponse.php';
+require_once dirname(__DIR__).'/lib/ReceiverProvisioner.php';
 
 /**
  * Create/update one severity-escalation rule (the new "Severity escalation" tab).
@@ -31,40 +34,60 @@ class SeverityRuleSave extends CController {
     protected function doAction(): void {
         try {
             $rule = $this->normalizeRule($this->postJsonField('rule'));
-
             $store = new CorrelationStore();
-            $config = $store->load();
-            $rules = array_values((array) ($config['severity_rules'] ?? []));
-            $found = false;
+            $notes = [];
+            ReceiverProvisioner::prepareForSave($store);
 
-            foreach ($rules as $i => $existing) {
-                if ((string) ($existing['id'] ?? '') === $rule['id']) {
-                    $runtime = [];
-                    foreach (['last_state', 'last_error', 'last_evaluated', 'last_evaluated_iso',
-                        'applied', 'last_comment_sig', 'last_targets_count'] as $key) {
-                        if (array_key_exists($key, $existing)) {
-                            $runtime[$key] = $existing[$key];
+            CorrelationStore::transaction(function () use ($store, $rule, &$notes): void {
+                $config = $store->load();
+                $rules = array_values((array) ($config['severity_rules'] ?? []));
+                $found = false;
+
+                foreach ($rules as $i => $existing) {
+                    if ((string) ($existing['id'] ?? '') === $rule['id']) {
+                        $runtime = [];
+                        foreach (['last_state', 'last_error', 'last_evaluated', 'last_evaluated_iso',
+                            'applied', 'last_comment_sig', 'last_targets_count'] as $key) {
+                            if (array_key_exists($key, $existing)) {
+                                $runtime[$key] = $existing[$key];
+                            }
                         }
+                        $rules[$i] = array_merge($rule, $runtime);
+                        $found = true;
+                        break;
                     }
-                    $rules[$i] = array_merge($rule, $runtime);
-                    $found = true;
-                    break;
                 }
-            }
 
-            if (!$found) {
-                $rules[] = $rule;
-            }
+                if (!$found) {
+                    $rules[] = $rule;
+                }
 
-            $config['severity_rules'] = $rules;
-            $store->save($config);
+                // Severity escalation needs no receiver host, but it is driven by
+                // the same once-a-minute heartbeat, so make sure the engine exists.
+                $settings = (array) ($config['settings'] ?? []);
+                try {
+                    $provisioner = ReceiverProvisioner::forFrontend($settings, $store);
+                    if ($provisioner !== null) {
+                        $notes = $provisioner->ensureEngineAndSecret($store, $settings);
+                        $config['settings'] = $provisioner->settings();
+                    }
+                }
+                catch (\Throwable $e) {
+                    error_log('[TriggerCorrelation] engine host setup failed: '.$e->getMessage());
+                    $notes[] = 'The engine host could not be set up automatically: '.Util::truncate($e->getMessage(), 200);
+                }
 
-            $this->jsonResponse(['ok' => true] + $store->publicConfig());
+                $config['severity_rules'] = $rules;
+                $store->save($config);
+            });
+
+            $this->jsonResponse(['ok' => true, 'notes' => $notes] + $store->publicConfig());
         }
         catch (\InvalidArgumentException $e) {
             $this->jsonResponse(['ok' => false, 'error' => $e->getMessage()], 400);
         }
         catch (\Throwable $e) {
+            error_log('[TriggerCorrelation] severity rule save failed: '.$e->getMessage());
             $this->jsonResponse(['ok' => false, 'error' => 'Failed to save the severity rule.'], 500);
         }
     }
@@ -103,6 +126,9 @@ class SeverityRuleSave extends CController {
         }
         if (count($conditions) < 1) {
             throw new \InvalidArgumentException('At least one source trigger condition is required.');
+        }
+        if (count($conditions) > 100) {
+            throw new \InvalidArgumentException('A rule can have at most 100 source triggers (this one has '.count($conditions).').');
         }
 
         $matchMode = (string) ($rule['match_mode'] ?? 'all');

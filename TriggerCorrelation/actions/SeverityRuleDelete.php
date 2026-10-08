@@ -33,32 +33,37 @@ class SeverityRuleDelete extends CController {
             }
 
             $store = new CorrelationStore();
-            $config = $store->load();
-            $rules = array_values((array) ($config['severity_rules'] ?? []));
             $removed = null;
-            $kept = [];
-            foreach ($rules as $rule) {
-                if ((string) ($rule['id'] ?? '') === $id) {
-                    $removed = $rule;
-                }
-                else {
-                    $kept[] = $rule;
-                }
-            }
 
-            // Restore any severities this rule had raised before forgetting it, so
-            // problems do not stay stuck at the escalated severity.
+            // Under the module-row lock, so this whole-config save cannot undo a
+            // concurrent change (e.g. a secret rotation) made on another node.
+            CorrelationStore::transaction(function () use ($store, $id, &$removed): void {
+                $config = $store->load();
+                $kept = [];
+                foreach (array_values((array) ($config['severity_rules'] ?? [])) as $rule) {
+                    if ((string) ($rule['id'] ?? '') === $id) {
+                        $removed = $rule;
+                    }
+                    else {
+                        $kept[] = $rule;
+                    }
+                }
+                $config['severity_rules'] = $kept;
+                $store->save($config);
+            });
+
+            // Then restore every severity the rule had raised, so problems do not
+            // stay stuck at the escalated severity. Best effort: anything left
+            // behind is found again by "Repair automatic setup" (it carries the
+            // [TC severity] marker).
             if ($removed !== null) {
                 try {
                     (new SeverityEvaluator($store))->revertRule($removed);
                 }
                 catch (\Throwable $e) {
-                    // best effort — never block the delete
+                    // never block the delete
                 }
             }
-
-            $config['severity_rules'] = $kept;
-            $store->save($config);
 
             $this->jsonResponse(['ok' => true, 'deleted' => $removed !== null ? 1 : 0] + $store->publicConfig());
         }

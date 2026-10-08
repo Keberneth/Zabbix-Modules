@@ -182,9 +182,12 @@ final class SeverityEvaluator {
                     $needsChange = $onlyRaise ? ($current < $severity) : ($current !== $severity);
 
                     if ($needsChange) {
+                        // Always carry the [TC severity] marker — even with comments off —
+                        // so a raise can be recognised and restored if the rule's own
+                        // record of it is ever lost (Repair automatic setup).
                         $message = $commentTarget
                             ? '[TC severity] Raised to '.self::sevText($severity).' by escalation "'.$name.'" because: '.$sourceLabel
-                            : '';
+                            : '[TC severity]';
                         try {
                             $this->api->setEventSeverity($eventid, $severity, $message);
                             $escalated++;

@@ -37,7 +37,8 @@ class SearchTriggers extends CController {
                 $this->inputString('q'),
                 $this->inputString('hostid'),
                 $this->inputString('host_q'),
-                $this->inputInt('limit', 50)
+                $this->inputInt('limit', 50),
+                $this->inputString('groupid')
             );
             $this->jsonResponse(['ok' => true, 'items' => $items]);
         }

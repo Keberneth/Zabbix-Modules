@@ -221,22 +221,39 @@ final class ZabbixApiClient {
         }, (array) $hosts);
     }
 
-    public function searchTriggers(string $q, string $hostid = '', string $hostQ = '', int $limit = 50): array {
+    public function searchTriggers(string $q, string $hostid = '', string $hostQ = '', int $limit = 50, string $groupid = ''): array {
         $q = trim($q);
         $hostid = trim($hostid);
         $hostQ = trim($hostQ);
-        $limit = max(1, min(100, $limit));
+        $groupid = trim($groupid);
+        $limit = max(1, min(500, $limit));
 
         $params = [
             'output' => ['triggerid', 'description', 'priority', 'status', 'value', 'expression'],
             'selectHosts' => ['hostid', 'host', 'name', 'status'],
             'expandDescription' => true,
+            // Only triggers on real hosts can raise problems; a template's own
+            // trigger would never fire as a source condition.
+            'templated' => false,
             'sortfield' => 'description',
             'limit' => $limit
         ];
 
         if ($hostid !== '') {
             $params['hostids'] = [$hostid];
+        }
+        elseif ($groupid !== '') {
+            // "Add from group": only triggers that can actually fire (enabled
+            // trigger, item and host), matched below on the name AS DISPLAYED —
+            // the API's search sees the raw "… on {HOST.NAME}" description.
+            $params['groupids'] = [$groupid];
+            $params['monitored'] = true;
+            $params['limit'] = 5000;
+            $all = (array) $this->call('trigger.get', $params);
+            $needle = mb_strtolower($q);
+            $matched = array_values(array_filter($all, static fn(array $t): bool =>
+                $needle === '' || mb_strpos(mb_strtolower((string) ($t['description'] ?? '')), $needle) !== false));
+            return array_map([self::class, 'triggerRow'], array_slice($matched, 0, $limit));
         }
         elseif ($hostQ !== '') {
             $hosts = $this->searchHosts($hostQ, '', 30);
@@ -252,23 +269,25 @@ final class ZabbixApiClient {
         }
 
         $triggers = $this->call('trigger.get', $params);
-        return array_map(static function (array $trigger): array {
-            $hosts = array_values((array) ($trigger['hosts'] ?? []));
-            $host_labels = array_map(static function (array $host): string {
-                return (string) (($host['name'] ?? '') ?: ($host['host'] ?? '') ?: ($host['hostid'] ?? ''));
-            }, $hosts);
-            $description = (string) (($trigger['description'] ?? '') ?: ($trigger['triggerid'] ?? ''));
-            return [
-                'triggerid' => (string) ($trigger['triggerid'] ?? ''),
-                'description' => $description,
-                'priority' => (string) ($trigger['priority'] ?? ''),
-                'status' => (string) ($trigger['status'] ?? ''),
-                'value' => (string) ($trigger['value'] ?? ''),
-                'expression' => (string) ($trigger['expression'] ?? ''),
-                'hosts' => $hosts,
-                'label' => $description.' — '.implode(', ', $host_labels)
-            ];
-        }, (array) $triggers);
+        return array_map([self::class, 'triggerRow'], (array) $triggers);
+    }
+
+    private static function triggerRow(array $trigger): array {
+        $hosts = array_values((array) ($trigger['hosts'] ?? []));
+        $host_labels = array_map(static function (array $host): string {
+            return (string) (($host['name'] ?? '') ?: ($host['host'] ?? '') ?: ($host['hostid'] ?? ''));
+        }, $hosts);
+        $description = (string) (($trigger['description'] ?? '') ?: ($trigger['triggerid'] ?? ''));
+        return [
+            'triggerid' => (string) ($trigger['triggerid'] ?? ''),
+            'description' => $description,
+            'priority' => (string) ($trigger['priority'] ?? ''),
+            'status' => (string) ($trigger['status'] ?? ''),
+            'value' => (string) ($trigger['value'] ?? ''),
+            'expression' => (string) ($trigger['expression'] ?? ''),
+            'hosts' => $hosts,
+            'label' => $description.' — '.implode(', ', $host_labels)
+        ];
     }
 
     public function searchItems(string $q, string $hostid = '', bool $trapperOnly = true, int $limit = 50): array {
@@ -367,9 +386,8 @@ final class ZabbixApiClient {
         if ($rows === []) {
             return ['response' => 'success', 'data' => []];
         }
-        if ($this->transport === 'frontend') {
-            throw new \RuntimeException('history.push requires the token HTTP transport.');
-        }
+        // Works over both transports: the unattended evaluator uses the token,
+        // the Super Admin save actions push in-process under their session.
         return (array) $this->call('history.push', $rows);
     }
 
@@ -669,11 +687,21 @@ final class ZabbixApiClient {
     private static function frontendServiceName(string $api_object): string {
         static $map = [
             'apiinfo' => 'APIInfo',
+            'configuration' => 'Configuration',
+            'discoveryrule' => 'DiscoveryRule',
+            'event' => 'Event',
+            'history' => 'History',
             'host' => 'Host',
             'hostgroup' => 'HostGroup',
             'item' => 'Item',
             'problem' => 'Problem',
-            'trigger' => 'Trigger'
+            'settings' => 'Settings',
+            'task' => 'Task',
+            'template' => 'Template',
+            'templategroup' => 'TemplateGroup',
+            'trigger' => 'Trigger',
+            'usergroup' => 'UserGroup',
+            'usermacro' => 'UserMacro'
         ];
         return $map[strtolower(trim($api_object))] ?? '';
     }
@@ -698,6 +726,27 @@ final class ZabbixApiClient {
             throw new \RuntimeException(Util::truncate($method.' failed: '.$e->getMessage(), 400), 0, $e);
         }
 
+        // The frontend API wrapper does not throw: on an API error it pushes the
+        // message onto the frontend message stack and returns false. Surface it
+        // as an exception (and clear the stack so it is not rendered later).
+        if ($result === false) {
+            throw new \RuntimeException(Util::truncate($method.' failed: '.self::takeFrontendError(), 400));
+        }
+
         return $result;
+    }
+
+    private static function takeFrontendError(): string {
+        $text = [];
+        if (class_exists('\CMessageHelper')) {
+            foreach ((array) \CMessageHelper::getMessages() as $message) {
+                $line = trim((string) ($message['message'] ?? ''));
+                if ($line !== '') {
+                    $text[] = $line;
+                }
+            }
+            \CMessageHelper::clear();
+        }
+        return $text !== [] ? implode('; ', $text) : 'unknown API error';
     }
 }

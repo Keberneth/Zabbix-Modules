@@ -12,8 +12,11 @@ Quick recap of the two features:
 | **Correlation** | Correlation rules | Raises a **new** synthetic problem when a set of source triggers are active together. |
 | **Severity escalation** | Severity escalation | **Raises the severity of existing problems** while a source condition holds, then restores it when it clears. |
 
-Both are driven by the same once-a-minute receiver-template heartbeat (`eval.php`),
-so once the API URL + token (Settings tab) are set, everything runs automatically.
+Both are driven by the same once-a-minute heartbeat of the engine host (`eval.php`).
+Once the API URL + token (Settings tab) are set and a rule is saved, the module
+sets up the engine host, the evaluation secret and — for correlation rules — a
+shared correlation host per set of source hosts by itself, so everything runs
+automatically. Follow it all live on the **Dashboard** tab.
 
 ---
 
@@ -33,8 +36,7 @@ Source triggers:
   Host: sccm01    Trigger: SSMS service is down
   Host: web01     Trigger: Current month CU not installed
 Match mode:       All conditions active
-Output mode:      Receiver LLD template
-Receiver host:    Zabbix Correlation Engine     (has "Template Trigger Correlation Receiver" linked)
+Output mode:      Automatic correlation host   (→ "Correlation: sccm01 + web01", created on save)
 Correlation ID:   windows_update_web01_current_cu
 Severity:         4 - High
 Comments:         (leave both on)
@@ -156,8 +158,7 @@ Source triggers:
   Host: db01      Trigger: MySQL backend unhealthy
   Host: web-a     Trigger: Database read errors
 Match mode:       All conditions active
-Output mode:      Receiver LLD template
-Receiver host:    Zabbix Correlation Engine
+Output mode:      Automatic correlation host
 Correlation ID:   db_backend_critical_incident
 Severity:         5 - Critical/Disaster
 ```
@@ -189,6 +190,51 @@ blast radius is visible at a glance. Both clear themselves when `db01` recovers.
 
 ---
 
+## Use case 3 — Cluster availability: one node down is High, both down is Disaster
+
+**Goal:** a two-node cluster. Losing one node is serious (no redundancy left) but
+the service still runs; losing both is an outage. Operators should see **one**
+problem whose severity tracks the cluster's state — not two unrelated node alarms.
+
+`Correlation rules` tab → Rule editor:
+
+1. **Add the same trigger from every host in a group** → host group = the cluster
+   (here *Demo Cluster*), trigger name = *Cluster node is down* → **Add from group**.
+   One condition per node is added (the exact name is preferred; with no exact
+   match, names that contain the text are used).
+2. **Cluster preset** → *Escalate by active count*, tiers **≥1 → High**,
+   **≥2 → Disaster** (the top tier is "every node").
+3. Output: **Automatic correlation host**. Save → *Created the correlation host
+   “Correlation: demo-cluster-node01 + demo-cluster-node02”*.
+
+```text
+Rule name:     Demo cluster availability
+Conditions:    demo-cluster-node01 → Cluster node is down
+               demo-cluster-node02 → Cluster node is down
+Match mode:    Escalate by active count   ≥1 → High, ≥2 → Disaster
+Output:        Automatic correlation host
+```
+
+| Nodes down | Result |
+|---|---|
+| none | no correlation problem |
+| one | `Correlation HIGH: Demo cluster availability` |
+| both | `Correlation CRITICAL: Demo cluster availability` (the High one resolves) |
+
+For a three-node cluster the preset gives ≥1 → High, ≥3 → Disaster; add a
+≥2 → Average/High tier in between if a two-node loss deserves its own step.
+
+The demo nodes in the local test install are plain trapper flags, so you can play
+it through by hand:
+
+```bash
+# node01 down → HIGH; add node02 → CRITICAL; set both to 0 → clears
+zabbix_sender -z <server> -s demo-cluster-node01 -k demo.cluster.node.down -o 1
+zabbix_sender -z <server> -s demo-cluster-node02 -k demo.cluster.node.down -o 1
+```
+
+---
+
 ## Modelling cheat-sheet
 
 | You want… | Feature / setting |
@@ -198,6 +244,7 @@ blast radius is visible at a glance. Both clear themselves when `db01` recovers.
 | **A and B and C** | Correlation/Severity, `Match mode: All` |
 | **A or B** | `Match mode: Any` (Severity), or an `or` in a Zabbix trigger expression (Correlation) |
 | **The more that break, the worse it gets** | Correlation `Escalate by active count` with tiers (e.g. ≥2 → High, ≥3 → Disaster) |
+| **Cluster: one node → High, all nodes → Disaster** | *Add the same trigger from every host in a group* + **Cluster preset** |
 | **(A or B) and C** | Composite Zabbix trigger for `A or B`, then a `Match: All` rule with C |
 | Raise **one specific** problem | Severity target `Apply to: This host only` |
 | Raise the problem **everywhere it is firing** | Severity target `Apply to: A host group` / `All hosts with this problem` |

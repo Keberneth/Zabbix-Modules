@@ -86,6 +86,35 @@ $render_condition = static function (array $condition = []) use ($h): string {
     return ob_get_clean();
 };
 
+// "Add the same trigger from every host in a group" — the quick way to build a
+// rule over a cluster or a farm (e.g. "is unreachable" on every node).
+$render_group_add = static function (string $target) use ($h): string {
+    ob_start();
+    ?>
+    <div class="tc-group-add" data-target="<?= $h($target) ?>">
+        <div class="tc-group-add-title"><?= $h(_('Add the same trigger from every host in a group')) ?></div>
+        <div class="ai-repeat-grid ai-settings-grid">
+            <div class="ai-span-2">
+                <label class="ai-label"><?= $h(_('Host group')) ?></label>
+                <div class="tc-typeahead ai-searchable-dropdown" data-typeahead="ga-group">
+                    <input class="ai-input ga-group" type="text" autocomplete="off" placeholder="<?= $h(_('Start typing a host group, e.g. a cluster')) ?>">
+                    <input type="hidden" class="ga-groupid">
+                    <div class="ai-dropdown-list ai-hidden"></div>
+                </div>
+            </div>
+            <div class="ai-span-2">
+                <label class="ai-label"><?= $h(_('Trigger name')) ?></label>
+                <input class="ai-input ga-trigger" type="text" autocomplete="off" placeholder="<?= $h(_('e.g. is unreachable (ICMP ping)')) ?>">
+            </div>
+            <div class="tc-group-add-action">
+                <button type="button" class="btn tc-group-add-btn"><?= $h(_('Add from group')) ?></button>
+            </div>
+        </div>
+    </div>
+    <?php
+    return ob_get_clean();
+};
+
 $render_tier = static function () use ($h, $severity_options): string {
     ob_start();
     ?>
@@ -163,7 +192,7 @@ $render_starget = static function () use ($h): string {
 
 ob_start();
 ?>
-<div id="tc-root" class="ai-page tc-page" data-ai-theme="<?= $h($ai_theme) ?>" data-active-tab="rules"
+<div id="tc-root" class="ai-page tc-page" data-ai-theme="<?= $h($ai_theme) ?>" data-active-tab="dashboard"
     data-csrf-field-name="<?= $h($csrf_field) ?>"
     data-url-rules-get="<?= $h($url('triggercorrelation.rules.get')) ?>"
     data-url-rule-save="<?= $h($url('triggercorrelation.rule.save')) ?>"
@@ -178,6 +207,10 @@ ob_start();
     data-url-run="<?= $h($url('triggercorrelation.run')) ?>"
     data-url-api-test="<?= $h($url('triggercorrelation.api.test')) ?>"
     data-url-selfcheck="<?= $h($url('triggercorrelation.selfcheck')) ?>"
+    data-url-setup="<?= $h($url('triggercorrelation.setup')) ?>"
+    data-url-dashboard="<?= $h($url('triggercorrelation.dashboard.data')) ?>"
+    data-url-problems="<?= $h((new CUrl('zabbix.php'))->setArgument('action', 'problem.view')->setArgument('filter_set', 1)->getUrl()) ?>"
+    data-csrf-setup="<?= $h(CCsrfTokenHelper::get('triggercorrelation.setup')) ?>"
     data-csrf-rule-save="<?= $h(CCsrfTokenHelper::get('triggercorrelation.rule.save')) ?>"
     data-csrf-rule-delete="<?= $h(CCsrfTokenHelper::get('triggercorrelation.rule.delete')) ?>"
     data-csrf-severity-rule-save="<?= $h(CCsrfTokenHelper::get('triggercorrelation.severity.rule.save')) ?>"
@@ -188,7 +221,7 @@ ob_start();
     <div class="ai-header">
         <div>
             <h1><?= $h($data['title'] ?? _('Trigger Correlation')) ?></h1>
-            <p class="ai-muted"><?= $h(_('Raise a new, higher-severity Zabbix problem when two or more selected trigger problems are active at the same time.')) ?></p>
+            <p class="ai-muted"><?= $h(_('Correlate trigger problems across hosts: raise one combined problem when related triggers fire together, or escalate existing problems while a condition holds.')) ?></p>
         </div>
         <div class="ai-header-actions">
             <button type="button" class="btn" id="tc-test-api"><?= $h(_('Test API')) ?></button>
@@ -199,7 +232,8 @@ ob_start();
     <div id="tc-status" class="ai-status ai-hidden" role="status" aria-live="polite"></div>
 
     <nav class="ai-settings-tabs" role="tablist" aria-label="<?= $h(_('Sections')) ?>">
-        <button type="button" role="tab" class="ai-settings-tab is-active" data-tab="rules" aria-selected="true" tabindex="0"><?= $h(_('Correlation rules')) ?></button>
+        <button type="button" role="tab" class="ai-settings-tab is-active" data-tab="dashboard" aria-selected="true" tabindex="0"><?= $h(_('Dashboard')) ?></button>
+        <button type="button" role="tab" class="ai-settings-tab" data-tab="rules" aria-selected="false" tabindex="-1"><?= $h(_('Correlation rules')) ?></button>
         <button type="button" role="tab" class="ai-settings-tab" data-tab="severity" aria-selected="false" tabindex="-1"><?= $h(_('Severity escalation')) ?></button>
         <button type="button" role="tab" class="ai-settings-tab" data-tab="settings" aria-selected="false" tabindex="-1"><?= $h(_('Settings')) ?></button>
         <button type="button" role="tab" class="ai-settings-tab" data-tab="help" aria-selected="false" tabindex="-1"><?= $h(_('Help')) ?></button>
@@ -207,6 +241,30 @@ ob_start();
     <noscript>
         <style>.ai-settings-tabs{display:none!important}.ai-tab-section{display:block!important}</style>
     </noscript>
+
+    <!-- ── DASHBOARD ─────────────────────────────────────────────────── -->
+    <section class="ai-card ai-tab-section tc-dash" data-tab="dashboard">
+        <div class="ai-section-header tc-dash-header">
+            <h2><?= $h(_('Live overview')) ?>
+                <button type="button" class="ai-faq-toggle" data-faq-target="faq-dashboard" title="<?= $h(_('Help')) ?>">?</button>
+            </h2>
+            <div class="tc-dash-controls">
+                <div class="tc-seg" role="group" aria-label="<?= $h(_('Group by')) ?>">
+                    <button type="button" class="tc-seg-btn is-active" data-dash-view="correlations" aria-pressed="true"><?= $h(_('By correlation')) ?></button>
+                    <button type="button" class="tc-seg-btn" data-dash-view="hosts" aria-pressed="false"><?= $h(_('By host')) ?></button>
+                </div>
+                <label class="ai-checkbox"><input type="checkbox" id="tc-dash-auto" checked> <?= $h(_('Auto-refresh')) ?></label>
+                <button type="button" class="btn" id="tc-dash-refresh"><?= $h(_('Refresh')) ?></button>
+                <span class="ai-muted" id="tc-dash-updated" aria-live="polite"></span>
+            </div>
+        </div>
+        <div id="faq-dashboard" class="ai-faq-box">
+            <p><?= $h(_('Every correlation with the source triggers it watches, grouped per host, and the problem it raised; every severity escalation with the problems it is currently holding at a higher severity. “By host” turns it around: each host with its triggers that take part in a rule and which correlations they feed.')) ?></p>
+            <p><?= $h(_('The severity shown is computed live from the current problems; the problem itself is raised by the next evaluation (once a minute). Refreshes every 30 seconds while this tab is open.')) ?></p>
+        </div>
+        <div id="tc-dash-summary" class="tc-tiles"></div>
+        <div id="tc-dash-body" class="tc-dash-body"><div class="ai-muted"><?= $h(_('Loading…')) ?></div></div>
+    </section>
 
     <!-- ── RULES ─────────────────────────────────────────────────────── -->
     <section class="ai-card ai-tab-section" data-tab="rules">
@@ -239,6 +297,10 @@ ob_start();
                             $rid = (string) ($rule['id'] ?? '');
                             $state = (int) ($rule['last_state'] ?? 0);
                             $corr = (string) (($rule['output']['correlation_id'] ?? '') ?: $rid);
+                            $out_mode = (string) ($rule['output']['mode'] ?? 'receiver_lld');
+                            $out_host = $out_mode === 'existing_item'
+                                ? (string) ($rule['output']['host'] ?? '')
+                                : (string) (($rule['output']['receiver_host_name'] ?? '') ?: ($rule['output']['receiver_host'] ?? '') ?: ($settings['receiver_host'] ?? ''));
                             $last_err = (string) ($rule['last_error'] ?? '');
                             ?>
                             <tr>
@@ -246,6 +308,9 @@ ob_start();
                                 <td>
                                     <strong><?= $h($rule['name'] ?? $rid) ?></strong>
                                     <div class="ai-muted"><?= $h($corr) ?></div>
+                                    <?php if ($out_host !== ''): ?>
+                                        <div class="ai-muted"><?= $h(sprintf(_('on %s'), $out_host)) ?><?= !empty($rule['output']['receiver_auto']) ? ' '.$h(_('(automatic)')) : '' ?></div>
+                                    <?php endif; ?>
                                 </td>
                                 <td>
                                     <?php foreach ((array) ($rule['conditions'] ?? []) as $c): ?>
@@ -298,6 +363,7 @@ ob_start();
             <div id="faq-conditions" class="ai-faq-box">
                 <p><strong><?= $h(_('What is this?')) ?></strong> <?= $h(_('Pick the existing host triggers that, when in problem together, mean a bigger correlated incident — add a host then its trigger, and click “Add another source trigger” for each related one (e.g. a frontend down, its database offline, and an app that depends on that database). A rule needs at least two.')) ?></p>
                 <p><?= $h(_('Type a host then pick its trigger from the dropdown, or type the trigger first and the host is filled in. The selection (a hidden id) is what gets stored, so re-pick from the dropdown if you edit the text afterwards.')) ?></p>
+                <p><strong><?= $h(_('Clusters and farms')) ?></strong> — <?= $h(_('use “Add the same trigger from every host in a group”: pick the group (e.g. your cluster) and the trigger name (e.g. “is unreachable”), and one source trigger per host is added. Then the “Cluster preset” sets “1 node → High, all nodes → Disaster”.')) ?></p>
             </div>
             <div id="tc-conditions" class="ai-repeat-list">
                 <?= $render_condition() ?>
@@ -306,6 +372,7 @@ ob_start();
             <div class="ai-section-actions">
                 <button type="button" class="btn" id="tc-add-condition"><?= $h(_('Add another source trigger')) ?></button>
             </div>
+            <?= $render_group_add('tc-conditions') ?>
 
             <h3><?= $h(_('Output & severity')) ?></h3>
             <div class="ai-repeat-grid ai-settings-grid">
@@ -315,8 +382,9 @@ ob_start();
                         <button type="button" class="ai-faq-toggle" data-faq-target="faq-output-mode" title="<?= $h(_('Help')) ?>">?</button>
                     </label>
                     <select class="ai-input" id="tc-output-mode">
-                        <option value="receiver_lld"><?= $h(_('Receiver LLD template')) ?></option>
-                        <option value="existing_item"><?= $h(_('Existing trapper item')) ?></option>
+                        <option value="auto"><?= $h(_('Automatic correlation host (recommended)')) ?></option>
+                        <option value="receiver_lld"><?= $h(_('Advanced: a receiver host I manage')) ?></option>
+                        <option value="existing_item"><?= $h(_('Advanced: my own trapper item')) ?></option>
                     </select>
                 </div>
                 <div>
@@ -330,6 +398,10 @@ ob_start();
                         <option value="count"><?= $h(_('Escalate by active count')) ?></option>
                     </select>
                 </div>
+                <div class="tc-preset-wrap">
+                    <label class="ai-label"><?= $h(_('Quick setup')) ?></label>
+                    <button type="button" class="btn" id="tc-cluster-preset" title="<?= $h(_('One source host in problem → High; every source host in problem → Disaster')) ?>"><?= $h(_('Cluster preset')) ?></button>
+                </div>
                 <div id="tc-match-value-wrap">
                     <label class="ai-label"><?= $h(_('Severity when it fires')) ?></label>
                     <select class="ai-input" id="tc-match-value">
@@ -340,12 +412,14 @@ ob_start();
                 </div>
             </div>
             <div id="faq-output-mode" class="ai-faq-box">
-                <p><strong><?= $h(_('Receiver LLD template')) ?></strong> — <?= $h(_('recommended. The module auto-creates the result item and trigger on a “receiver host” via low-level discovery. That host MUST have the “Template Trigger Correlation Receiver” linked (import templates/trigger_correlation_receiver_zabbix_7.yaml). You only provide a Receiver host and a Correlation ID.')) ?></p>
-                <p><strong><?= $h(_('Existing trapper item')) ?></strong> — <?= $h(_('point the rule at a Zabbix trapper item you already created (on any host) that has its own trigger. The module just writes the severity number to that item. Use this when you want full control of the item and trigger, e.g. from your own template.')) ?></p>
+                <p><strong><?= $h(_('Automatic correlation host')) ?></strong> — <?= $h(_('recommended, nothing to set up. When you save, the module creates a correlation host for this set of source hosts (e.g. “Correlation: db01 + web01”), links the receiver template to it and keeps everything wired. Every rule over the same hosts reuses that host, and it is removed again when no rule uses it.')) ?></p>
+                <p><strong><?= $h(_('A receiver host I manage')) ?></strong> — <?= $h(_('write to a host you manage yourself. That host must have “Template Trigger Correlation Receiver” (or the Auto Receiver template) linked; you provide its name and a Correlation ID.')) ?></p>
+                <p><strong><?= $h(_('My own trapper item')) ?></strong> — <?= $h(_('point the rule at a Zabbix trapper item you already created (on any host) that has its own trigger. The module just writes the severity number to that item. Use this when you want full control of the item and trigger, e.g. from your own template.')) ?></p>
             </div>
             <div id="faq-match-mode" class="ai-faq-box">
                 <p><strong><?= $h(_('All / Any')) ?></strong> — <?= $h(_('fire the chosen severity when all (or any) of the source triggers are in problem.')) ?></p>
                 <p><strong><?= $h(_('Escalate by active count')) ?></strong> — <?= $h(_('raise the severity as more related triggers go into problem. Define tiers like “≥2 active → High, ≥3 → Disaster”. Below the lowest tier the correlation clears.')) ?></p>
+                <p><strong><?= $h(_('Cluster preset')) ?></strong> — <?= $h(_('one click for the classic cluster case: one node down → High, every node down → Disaster (tiers ≥1 → High, ≥ number of source hosts → Disaster).')) ?></p>
             </div>
             <div id="tc-tiers-wrap" class="ai-hidden">
                 <label class="ai-label"><?= $h(_('Severity tiers (minimum active count → severity)')) ?></label>
@@ -355,8 +429,12 @@ ob_start();
                 </div>
             </div>
 
+            <div id="tc-output-auto" class="ai-note-box">
+                <strong><?= $h(_('Correlation host')) ?>:</strong>
+                <span id="tc-auto-host-label"><?= $h(_('created (or reused) automatically for these source hosts when you save')) ?></span>
+            </div>
             <div id="tc-output-receiver" class="ai-repeat-grid ai-settings-grid">
-                <div class="ai-span-2">
+                <div class="ai-span-2" id="tc-receiver-host-wrap">
                     <label class="ai-label">
                         <?= $h(_('Receiver host')) ?>
                         <button type="button" class="ai-faq-toggle" data-faq-target="faq-receiver" title="<?= $h(_('Help')) ?>">?</button>
@@ -372,11 +450,11 @@ ob_start();
                 </div>
             </div>
             <div id="faq-receiver" class="ai-faq-box">
-                <p><strong><?= $h(_('Receiver host')) ?></strong> — <?= $h(_('the Zabbix host that holds the generated correlation item and problem. For the automatic path it MUST have the “Template Trigger Correlation Receiver” linked (that template provides the discovery rule and the severity-1–5 trigger prototypes). Use the default “Zabbix Correlation Engine” host, or a host of your own that represents this integration/flow — just link that template to it. This is the host’s name, not a template name.')) ?></p>
+                <p><strong><?= $h(_('Receiver host')) ?></strong> — <?= $h(_('the Zabbix host (technical name) that holds the generated correlation item and problem. It MUST have “Template Trigger Correlation Receiver” or “Template Trigger Correlation Auto Receiver” linked (they provide the discovery rule and the severity-1–5 trigger prototypes). Use a host of your own that represents this integration/flow. This is the host’s name, not a template name. Prefer “Automatic correlation host” unless you need a specific host.')) ?></p>
             </div>
             <div id="faq-correlation-id" class="ai-faq-box">
                 <p><strong><?= $h(_('Correlation ID')) ?></strong> — <?= $h(_('a short unique id YOU choose for this one correlation, e.g. public_web_app_integration_flow. It is NOT an item name and NOT a template name.')) ?></p>
-                <p><?= $h(_('The module discovers an item trigger.correlation.state[<your id>] on the receiver host and writes the severity to it; the template’s trigger prototypes then raise the problem. Use letters, digits, _ . - (it is lower-cased automatically).')) ?></p>
+                <p><?= $h(_('The module discovers an item trigger.correlation.state[<your id>] on the correlation/receiver host and writes the severity to it; the template’s trigger prototypes then raise the problem. Use letters, digits, _ . - (it is lower-cased automatically). Leave it empty to derive it from the rule name.')) ?></p>
             </div>
 
             <div id="tc-output-existing" class="ai-repeat-grid ai-settings-grid ai-hidden">
@@ -423,7 +501,7 @@ ob_start();
             <p class="ai-muted"><?= $h(_('The module writes 0 when the correlation is no longer true, so the Zabbix trigger resolves automatically.')) ?></p>
             <div class="ai-section-actions">
                 <button type="button" class="btn" id="tc-save-rule"><?= $h(_('Save rule')) ?></button>
-                <button type="button" class="btn" id="tc-reset-rule"><?= $h(_('New escalation rule')) ?></button>
+                <button type="button" class="btn" id="tc-reset-rule"><?= $h(_('New correlation rule')) ?></button>
             </div>
         </div>
     </section>
@@ -538,6 +616,7 @@ ob_start();
             <div class="ai-section-actions">
                 <button type="button" class="btn" id="tc-sev-add-condition"><?= $h(_('Add another source trigger')) ?></button>
             </div>
+            <?= $render_group_add('tc-sev-conditions') ?>
 
             <h3><?= $h(_('Match mode')) ?></h3>
             <div class="ai-repeat-grid ai-settings-grid">
@@ -613,10 +692,14 @@ ob_start();
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-selfcheck" title="<?= $h(_('Help')) ?>">?</button>
             </div>
             <div id="faq-selfcheck" class="ai-faq-box">
-                <p><?= $h(_('Checks everything automatic evaluation needs and tells you what is missing or wrong: the API URL/token, the evaluation shared secret, whether the Zabbix API is reachable on the token path the eval endpoint uses, and whether eval.php is deployed and reachable.')) ?></p>
+                <p><?= $h(_('Checks everything automatic evaluation needs and tells you what is missing or wrong: the API URL/token, the evaluation shared secret, whether the Zabbix API is reachable on the token path the eval endpoint uses, whether eval.php is deployed and reachable, and — from the Zabbix server’s own point of view — whether the engine host’s heartbeat gets through.')) ?></p>
+                <p><strong><?= $h(_('Repair automatic setup')) ?></strong> — <?= $h(_('imports missing templates, creates the engine host if there is none, gives a refused heartbeat a new evaluation secret, points an unreachable heartbeat at an address the Zabbix server has verified, recreates deleted correlation hosts and asks the server to run the heartbeat right away.')) ?></p>
+                <p><strong><?= $h(_('Delete unused correlation hosts')) ?></strong> — <?= $h(_('removes automatic correlation hosts no rule uses any more, together with their problem history. Hosts with an open problem are kept.')) ?></p>
             </div>
             <div class="ai-section-actions">
                 <button type="button" class="btn" id="tc-selfcheck-btn"><?= $h(_('Run self-check')) ?></button>
+                <button type="button" class="btn" id="tc-repair-btn"><?= $h(_('Repair automatic setup')) ?></button>
+                <button type="button" class="btn" id="tc-cleanup-btn"><?= $h(_('Delete unused correlation hosts')) ?></button>
             </div>
             <div id="tc-selfcheck-results" class="tc-checks"></div>
         </section>
@@ -645,7 +728,10 @@ ob_start();
             <div class="ai-repeat-grid ai-settings-grid">
                 <div class="ai-span-3">
                     <label class="ai-label"><?= $h(_('API URL')) ?></label>
-                    <input class="ai-input" type="text" name="api_url" value="<?= $h($settings['api_url'] ?? '') ?>" placeholder="https://zabbix.example.com/api_jsonrpc.php">
+                    <div class="tc-input-with-button">
+                        <input class="ai-input" type="text" name="api_url" value="<?= $h($settings['api_url'] ?? '') ?>" placeholder="https://zabbix.example.com/api_jsonrpc.php">
+                        <button type="button" class="btn" id="tc-detect-api-btn"><?= $h(_('Detect')) ?></button>
+                    </div>
                 </div>
                 <div class="ai-span-2">
                     <label class="ai-label"><?= $h(_('API token')) ?></label>
@@ -684,9 +770,9 @@ ob_start();
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-eval" title="<?= $h(_('Help')) ?>">?</button>
             </div>
             <div id="faq-eval" class="ai-faq-box">
-                <p><strong><?= $h(_('Evaluation shared secret')) ?></strong> <?= $h(_('authenticates the receiver template HTTP-agent item that drives automatic evaluation. REQUIRED: while it is blank the evaluation endpoint rejects every call with “Access denied”.')) ?></p>
-                <p><?= $h(_('Type any long random string here and set the SAME value in the receiver host macro {$TRIGGER.CORRELATION.TOKEN}. They must match. The secret is sent only via the X-Trigger-Correlation-Token header and is stored as a one-way hash.')) ?></p>
-                <p><?= $h(_('Docker / split installs: this is enough — the hash lives in the shared Zabbix database, so every frontend container uses it; no per-container setup is needed. The “Evaluation token env var” is an optional alternative (provide the secret via an environment variable instead of storing it) — you do not need it.')) ?></p>
+                <p><strong><?= $h(_('Evaluation shared secret')) ?></strong> <?= $h(_('authenticates the engine host’s heartbeat (the HTTP-agent item that runs the evaluation). You normally leave this empty: the module generates the secret, stores only a one-way hash and writes the secret into the engine host’s {$TRIGGER.CORRELATION.TOKEN} macro itself.')) ?></p>
+                <p><?= $h(_('Typing a value here replaces the secret and updates the engine host macro too (unless that macro comes from a secret vault, or the secret is supplied by the environment variable below, which then takes precedence). A secret you type is never rotated automatically — use it when an external cron/curl caller needs to know it.')) ?></p>
+                <p><?= $h(_('The secret is sent only in the X-Trigger-Correlation-Token header. Docker / split installs need nothing extra: the hash lives in the shared Zabbix database.')) ?></p>
             </div>
             <div class="ai-repeat-grid ai-settings-grid">
                 <div class="ai-span-2">
@@ -706,13 +792,52 @@ ob_start();
 
         <section class="ai-card ai-tab-section" data-tab="settings">
             <div class="ai-section-header">
-                <h2><?= $h(_('Receiver')) ?></h2>
+                <h2><?= $h(_('Automatic setup')) ?></h2>
+                <button type="button" class="ai-faq-toggle" data-faq-target="faq-auto-setup" title="<?= $h(_('Help')) ?>">?</button>
+            </div>
+            <div id="faq-auto-setup" class="ai-faq-box">
+                <p><strong><?= $h(_('What is this?')) ?></strong> <?= $h(_('You do not import templates, create hosts or set macros yourself. When you save a rule the module imports its templates, creates the engine host (its heartbeat item runs every evaluation once a minute) with both macros filled in, and — for rules using “Automatic correlation host” — one correlation host per set of source hosts, reused by every rule over the same hosts.')) ?></p>
+                <p><strong><?= $h(_('Evaluation URL')) ?></strong> — <?= $h(_('the address the Zabbix SERVER (not your browser) uses to reach this module’s eval.php. Leave empty to derive it from the API URL. In Docker set it to the web container’s service name, e.g. http://zabbix-web:8080/modules/TriggerCorrelation/eval.php. Changing it updates the engine host macro.')) ?></p>
+                <p><strong><?= $h(_('Engine host')) ?></strong> — <?= $h(_('name used when the module has to create the engine host. Any host that already has the “Trigger correlation evaluator heartbeat” item is used as-is. Rules using “Receiver host I manage” fall back to this host when their receiver field is empty.')) ?></p>
+                <p><strong><?= $h(_('Evaluation driver')) ?></strong> — <?= $h(_('choose “I call eval.php myself” only if you run the evaluation from cron/curl instead; the module then never creates an engine host or changes the evaluation secret.')) ?></p>
+                <p><strong><?= $h(_('Host group')) ?></strong> — <?= $h(_('empty = the engine host’s group. The API token user needs at least Read on it, and operators only see (and are notified about) correlation problems in groups they have rights to — a new top-level group grants nobody access. The self-check shows who can see it.')) ?></p>
             </div>
             <div class="ai-repeat-grid ai-settings-grid">
-                <div class="ai-span-2">
-                    <label class="ai-label"><?= $h(_('Default receiver host')) ?></label>
+                <div class="ai-span-3">
+                    <label class="ai-label"><?= $h(_('Evaluation URL (as the Zabbix server reaches it)')) ?></label>
+                    <input class="ai-input" type="text" name="eval_url" value="<?= $h($settings['eval_url'] ?? '') ?>" placeholder="<?= $h($settings['eval_url_effective'] ?? '') ?>">
+                </div>
+                <div>
+                    <label class="ai-label"><?= $h(_('Evaluation driver')) ?></label>
+                    <select class="ai-input" name="eval_driver">
+                        <option value="auto" <?= (($settings['eval_driver'] ?? 'auto') !== 'external') ? 'selected' : '' ?>><?= $h(_('Engine host heartbeat (automatic)')) ?></option>
+                        <option value="external" <?= (($settings['eval_driver'] ?? 'auto') === 'external') ? 'selected' : '' ?>><?= $h(_('I call eval.php myself (cron/curl)')) ?></option>
+                    </select>
+                </div>
+                <div>
+                    <label class="ai-label"><?= $h(_('Engine host')) ?></label>
                     <input class="ai-input" type="text" name="receiver_host" value="<?= $h($settings['receiver_host'] ?? '') ?>" placeholder="Zabbix Correlation Engine">
                 </div>
+                <div>
+                    <label class="ai-label"><?= $h(_('Host group for created hosts')) ?></label>
+                    <input class="ai-input" type="text" name="auto_host_group" value="<?= $h($settings['auto_host_group'] ?? '') ?>" placeholder="<?= $h(_('Same as the engine host')) ?>">
+                </div>
+                <div class="ai-span-3">
+                    <label class="ai-label"><?= $h(_('Unused correlation hosts')) ?></label>
+                    <label class="ai-checkbox"><input type="checkbox" name="auto_delete_hosts" value="1" <?= !empty($settings['auto_delete_hosts']) ? 'checked' : '' ?>> <?= $h(_('Delete automatic correlation hosts that no rule has used for a day (their problem history is deleted with them; hosts with an open problem are kept)')) ?></label>
+                </div>
+            </div>
+        </section>
+
+        <section class="ai-card ai-tab-section" data-tab="settings">
+            <div class="ai-section-header">
+                <h2><?= $h(_('Custom receiver keys')) ?></h2>
+                <button type="button" class="ai-faq-toggle" data-faq-target="faq-receiver-keys" title="<?= $h(_('Help')) ?>">?</button>
+            </div>
+            <div id="faq-receiver-keys" class="ai-faq-box">
+                <p><?= $h(_('Only for “a receiver host I manage” rules whose host uses a template you built yourself with different item keys. Automatic correlation hosts always use the standard keys.')) ?></p>
+            </div>
+            <div class="ai-repeat-grid ai-settings-grid">
                 <div>
                     <label class="ai-label"><?= $h(_('Discovery key')) ?></label>
                     <input class="ai-input" type="text" name="receiver_discovery_key" value="<?= $h($settings['receiver_discovery_key'] ?? '') ?>" placeholder="trigger.correlation.discovery">
@@ -777,10 +902,11 @@ ob_start();
             <p><strong><?= $h(_('Pipeline')) ?>:</strong> <?= $h(_('Zabbix trigger problems → this module evaluates each rule → history.push writes a severity number (0–5) to a trapper item → a normal Zabbix trigger on that item raises/clears the correlation problem. Optionally the module then comments the problems with the related triggers.')) ?></p>
             <p><strong><?= $h(_('One-time setup')) ?>:</strong></p>
             <ul>
-                <li><?= $h(_('Settings tab: set the Zabbix API URL, an API token, and an evaluation shared secret.')) ?></li>
-                <li><?= $h(_('Import templates/trigger_correlation_receiver_zabbix_7.yaml (for receiver-LLD rules).')) ?></li>
-                <li><?= $h(_('On the receiver host set macros {$TRIGGER.CORRELATION.URL} (frontend URL reachable from the Zabbix server) and {$TRIGGER.CORRELATION.TOKEN} (the same shared secret).')) ?></li>
+                <li><?= $h(_('Settings → Zabbix API: click “Detect” next to API URL (or type it) and paste an API token. That is all you configure by hand.')) ?></li>
+                <li><?= $h(_('Save your first rule. The module imports its templates, creates the engine host (its heartbeat runs the evaluation every minute), generates the evaluation secret and copies it into the engine host, and picks an evaluation URL the Zabbix server has proven it can reach.')) ?></li>
+                <li><?= $h(_('Run the self-check (Settings). If something is red, “Repair automatic setup” fixes most of it.')) ?></li>
             </ul>
+            <p><strong><?= $h(_('Correlation hosts')) ?>:</strong> <?= $h(_('a rule with “Automatic correlation host” writes to a host the module creates for its exact set of source hosts, e.g. “Correlation: db01 + web01”. Every rule over the same hosts reuses it, so the Problems view shows which hosts a correlation is about. It lands in the engine host’s group unless you choose another in Settings → Automatic setup, and it is kept (with its history) when no rule uses it any more — delete such hosts from Settings, or let the module do it after a day.')) ?></p>
             <p><strong><?= $h(_('Split / Docker')) ?>:</strong> <?= $h(_('All configuration and rules live in the Zabbix database, so every frontend node/container shares the same state and nothing is lost on restart.')) ?></p>
         </div>
     </section>
@@ -808,9 +934,11 @@ ob_start();
             <p><strong><?= $h(_('2. Severity')) ?></strong> — <?= $h(_('choose a Match mode: All / Any → a fixed severity; or Escalate by active count → tiers like “≥2 active → High, ≥3 → Disaster”.')) ?></p>
             <p><strong><?= $h(_('3. Output')) ?></strong> — <?= $h(_('pick where the correlation problem is raised:')) ?></p>
             <ul>
-                <li><strong><?= $h(_('Receiver LLD template (recommended)')) ?></strong> — <?= $h(_('set Receiver host to a host that has “Template Trigger Correlation Receiver” linked (the default “Zabbix Correlation Engine”, or your own flow host with that template linked). Set Correlation ID to a short unique id you choose, e.g. public_web_app_integration_flow. The module discovers trigger.correlation.state[public_web_app_integration_flow] there and the template raises the problem. The Correlation ID is NOT an item or template name.')) ?></li>
-                <li><strong><?= $h(_('Existing trapper item')) ?></strong> — <?= $h(_('create your own “Zabbix trapper” item + trigger (see templates/trigger_correlation_manual_item_zabbix_7.yaml) and select that host + item here. The module writes the severity to it; your trigger raises the problem.')) ?></li>
+                <li><strong><?= $h(_('Automatic correlation host (recommended)')) ?></strong> — <?= $h(_('nothing to prepare. On save the module creates (or reuses) the correlation host for these source hosts and wires it up. The Correlation ID is filled from the rule name; change it only if you want a specific item key.')) ?></li>
+                <li><strong><?= $h(_('Advanced: a receiver host I manage')) ?></strong> — <?= $h(_('set Receiver host to a host that has “Template Trigger Correlation Receiver” (or the Auto Receiver template) linked, and a short unique Correlation ID, e.g. public_web_app_integration_flow. The module discovers trigger.correlation.state[public_web_app_integration_flow] there and the template raises the problem.')) ?></li>
+                <li><strong><?= $h(_('Advanced: my own trapper item')) ?></strong> — <?= $h(_('create your own “Zabbix trapper” item + trigger (see templates/trigger_correlation_manual_item_zabbix_7.yaml) and select that host + item here. The module writes the severity to it; your trigger raises the problem.')) ?></li>
             </ul>
+            <p><strong><?= $h(_('Clusters')) ?></strong> — <?= $h(_('“one node down is High, all nodes down is Disaster”: use “Add the same trigger from every host in a group” with the cluster’s host group and the node-down trigger, then “Cluster preset”.')) ?></p>
             <p><strong><?= $h(_('4. Comments (optional)')) ?></strong> — <?= $h(_('tick to annotate the correlation problem and/or the source problems with the related triggers in problem.')) ?></p>
             <p><strong><?= $h(_('5. Save')) ?></strong>, <?= $h(_('then “Run evaluation now” to test. Add as many rules as you need — one per integration/escalation.')) ?></p>
             <p class="ai-muted"><?= $h(_('A full step-by-step walkthrough for both modes is in SETUP_RULES.md.')) ?></p>
@@ -820,8 +948,9 @@ ob_start();
     <section class="ai-card ai-tab-section" data-tab="help">
         <div class="ai-section-header"><h2><?= $h(_('Where the correlation item comes from')) ?></h2></div>
         <div class="ai-faq-box ai-faq-visible">
-            <p><?= $h(_('In Receiver-LLD mode the module writes the severity (0–5) to the item key trigger.correlation.state[<your Correlation ID>] on the receiver host, by host + key. You get that item in one of three ways:')) ?></p>
-            <p><strong><?= $h(_('A) Automatic — the shipped receiver template')) ?></strong> — <?= $h(_('link “Template Trigger Correlation Receiver” to the host. It has three parts: an HTTP-agent item (trigger.correlation.eval) that calls the module every minute to run evaluations; a discovery rule (trigger.correlation.discovery); and item/trigger PROTOTYPES with the LLD macro trigger.correlation.state[{#CORRELATION.ID}]. On each run the module pushes a discovery row with your Correlation ID, Zabbix creates trigger.correlation.state[<id>] automatically, and the prototype triggers raise the problem. Do NOT replace {#CORRELATION.ID} with a fixed id — that macro is exactly what makes discovery work.')) ?></p>
+            <p><?= $h(_('The module writes the severity (0–5) to the item key trigger.correlation.state[<your Correlation ID>] on the correlation/receiver host, by host + key. You get that item in one of four ways:')) ?></p>
+            <p><strong><?= $h(_('Automatic (default)')) ?></strong> — <?= $h(_('the module creates the correlation host and links “Template Trigger Correlation Auto Receiver” (discovery rule + item/trigger prototypes, no heartbeat). Nothing to do.')) ?></p>
+            <p><strong><?= $h(_('A) The shipped receiver template on a host you manage')) ?></strong> — <?= $h(_('link “Template Trigger Correlation Receiver” to the host. It has three parts: an HTTP-agent item (trigger.correlation.eval) that calls the module every minute to run evaluations; a discovery rule (trigger.correlation.discovery); and item/trigger PROTOTYPES with the LLD macro trigger.correlation.state[{#CORRELATION.ID}]. On each run the module pushes a discovery row with your Correlation ID, Zabbix creates trigger.correlation.state[<id>] automatically, and the prototype triggers raise the problem. Keep only ONE host with the heartbeat item; for more receiver hosts use the Auto Receiver template, which has no heartbeat.')) ?></p>
             <p><strong><?= $h(_('B) Your own template for the flow (no discovery)')) ?></strong> — <?= $h(_('create a template for the flow host with a plain “Zabbix trapper” item whose key is exactly trigger.correlation.state[<your Correlation ID>] (e.g. trigger.correlation.state[public_web_app_integration_flow]) plus value-based triggers, and link it to the host. Because the module pushes by host + key, it lands on your item — no discovery needed. You may untick “Push LLD discovery every evaluation” in Settings to avoid a harmless discovery error. Prefer a key like correlation.escalation[%s] instead? Set Settings → State key template to it and name your item to match (correlation.escalation[<your Correlation ID>]).')) ?></p>
             <p><strong><?= $h(_('C) Existing trapper item mode')) ?></strong> — <?= $h(_('or create any trapper item + trigger (see the “Template Trigger Correlation Manual Item” example), switch the rule’s Output mode to “Existing trapper item”, and pick that host + item. Here you select the item directly, so the key can be anything and the Correlation ID field is not used.')) ?></p>
         </div>
@@ -830,10 +959,13 @@ ob_start();
     <section class="ai-card ai-tab-section" data-tab="help">
         <div class="ai-section-header"><h2><?= $h(_('Troubleshooting')) ?></h2></div>
         <div class="ai-faq-box ai-faq-visible">
-            <p><strong><?= $h(_('Eval endpoint: “Access denied”')) ?></strong> — <?= $h(_('the Evaluation shared secret is not set, or the receiver host macro {$TRIGGER.CORRELATION.TOKEN} does not match it. Set the secret in Settings and the same value in the macro. (Opening the eval URL in a browser always shows Access denied — there is no token header — use “Run evaluation now” to test from the UI.)')) ?></p>
+            <p><strong><?= $h(_('Eval endpoint: “Invalid evaluation token” / heartbeat unsupported')) ?></strong> — <?= $h(_('the engine host’s {$TRIGGER.CORRELATION.TOKEN} does not match the stored secret (typically after the module configuration was lost). Click “Repair automatic setup” in Settings: it sets a new secret on both sides. (Opening the eval URL in a browser always shows this — there is no token header — use “Run evaluation now” to test from the UI.)')) ?></p>
+            <p><strong><?= $h(_('Heartbeat “cannot reach” / “could not resolve host”')) ?></strong> — <?= $h(_('the Zabbix server cannot reach the evaluation URL. “Repair automatic setup” lets the server test candidate addresses and keeps the first one that works; otherwise set Settings → Automatic setup → Evaluation URL (in Docker the web container’s service name, e.g. http://zabbix-web:8080/modules/TriggerCorrelation/eval.php).')) ?></p>
+            <p><strong><?= $h(_('Problems stuck after the configuration was lost')) ?></strong> — <?= $h(_('“Repair automatic setup” also clears correlation states no rule owns any more and restores severities that a no-longer-existing escalation rule had raised.')) ?></p>
             <p><strong><?= $h(_('Eval endpoint: “Page not found”')) ?></strong> — <?= $h(_('the module is not enabled, or it was renamed/upgraded and needs Administration → General → Modules → Scan directory, then Enable “Trigger Correlation”.')) ?></p>
-            <p><strong><?= $h(_('“Discovery pending”')) ?></strong> — <?= $h(_('receiver-LLD mode creates the state item by discovery; the first run may report this until Zabbix processes the LLD. Run evaluation again after a minute.')) ?></p>
-            <p><strong><?= $h(_('No correlation problem appears')) ?></strong> — <?= $h(_('confirm the receiver host has “Template Trigger Correlation Receiver” linked, the API URL + token are set (Test API), and the source triggers are actually in problem. Check Latest data on the receiver host for trigger.correlation.state[...].')) ?></p>
+            <p><strong><?= $h(_('“Setting up — Zabbix is still creating the correlation item”')) ?></strong> — <?= $h(_('the state item is created by low-level discovery on the correlation host. Right after a rule (or a new correlation host) is saved this takes one or two heartbeat runs; it clears by itself. If it persists for more than a few minutes, run the self-check.')) ?></p>
+            <p><strong><?= $h(_('“The API token user has no read permission on the receiver host”')) ?></strong> — <?= $h(_('the item exists but the user behind the API token cannot see that host. Give its user group at least Read on the correlation host group (Settings → Automatic setup).')) ?></p>
+            <p><strong><?= $h(_('No correlation problem appears')) ?></strong> — <?= $h(_('run the self-check: it shows whether the Zabbix server reaches eval.php, whether the API token’s user can see the correlation hosts, and whether operators can see their host group. Also confirm the source triggers are actually in problem (the Dashboard tab shows it live) and check Latest data on the correlation host for trigger.correlation.state[...].')) ?></p>
             <p><strong><?= $h(_('No comments posted')) ?></strong> — <?= $h(_('the API token user needs “add problem update” permission on those hosts; comments are throttled (re-posted only when the active trigger set or severity changes).')) ?></p>
             <p><strong><?= $h(_('API token never sent')) ?></strong> — <?= $h(_('set an explicit API URL in Settings; for safety the token is never sent to a URL derived from the request host.')) ?></p>
         </div>

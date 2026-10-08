@@ -3,9 +3,9 @@
   "id": "trigger_correlation",
   "name": "Trigger Correlation",
   "namespace": "TriggerCorrelation",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "author": "Keberneth",
-  "description": "Correlates active Zabbix trigger problems across specific hosts/triggers and writes synthetic correlation states through history.push. Stores its configuration in the Zabbix database so it works on single-server, split and Docker installs.",
+  "description": "Correlates active Zabbix trigger problems across hosts: raises a combined correlation problem on an automatically created correlation host, or escalates the severity of existing problems, with a live dashboard. Sets up its own templates, hosts and evaluation secret, and stores its configuration in the Zabbix database so it works on single-server, split and Docker installs.",
   "actions": {
     "triggercorrelation": {
       "class": "CorrelationView",
@@ -65,6 +65,14 @@
     },
     "triggercorrelation.selfcheck": {
       "class": "SelfCheck",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.setup": {
+      "class": "SetupRepair",
+      "layout": "layout.json"
+    },
+    "triggercorrelation.dashboard.data": {
+      "class": "DashboardData",
       "layout": "layout.json"
     }
   },
