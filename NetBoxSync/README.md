@@ -27,6 +27,16 @@ This frontend module adds a configurable NetBox sync page under **Monitoring →
   - relation lookup
   - ensure device type
 
+## Screenshots
+
+**Settings**: NetBox and Zabbix API connections, runner and scheduling.
+
+![NetBox Sync settings](docs/images/01-settings.jpg)
+
+**Built-in sync catalogue**: each sync with its Zabbix source, NetBox target and optional interval override.
+
+![Built-in sync catalogue](docs/images/02-sync-catalogue.jpg)
+
 ## Module structure
 
 - `manifest.json`

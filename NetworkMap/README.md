@@ -17,12 +17,14 @@ This package is the **Zabbix-only** variant:
 
 The map renders the **established TCP connections** between hosts monitored by
 Zabbix. Every monitored host is a node, and every observed connection is a
-**directional edge labelled with the service port**. Endpoints that resolve to a
+**directional edge labelled with the service port**. There is one edge per
+source, destination and service port: client (ephemeral) ports are ignored, and a
+connection reported by both monitored ends is drawn once. Endpoints that resolve to a
 Zabbix host (by interface IP) are drawn as monitored nodes; anything else is
 shown as a private or external endpoint. Node size scales with the number of
 connections, so busy hubs stand out at a glance.
 
-![Network map overview](docs/images/01-network-map-overview.jpg)
+![Network map scoped to the load balancer: clients on 443, web servers on 80](docs/images/01-network-map-overview.jpg)
 
 ### Node colors
 
@@ -57,13 +59,17 @@ Full screen uses the browser's Fullscreen API. The whole Network Map module take
 - Click a node and the traffic summary opens beside the graph, or below it on screens narrower than 1400 px.
 - The graph refits whenever full screen is entered or left.
 
+![The whole estate in full screen](docs/images/03-network-map-fullscreen.jpg)
+
 Leave full screen with **Exit full screen** or <kbd>Esc</kbd>. If a filter's suggestion list is open, the first <kbd>Esc</kbd> only closes the list. Filter values are kept when you switch between the normal page and full screen.
 
 Some browsers don't allow element full screen, for example iPhone Safari, older Safari versions, or a Zabbix page embedded in an `<iframe>` without `allowfullscreen`. There the same button pins the module over the whole browser window instead, with the same filters and controls, and <kbd>Esc</kbd> still returns to the normal page.
 
-The view follows the active Zabbix theme, including dark mode:
+The view follows the active Zabbix theme, including dark mode. Below, the map scoped to one
+host with its node selected, so the traffic summary lists every incoming and outgoing
+connection:
 
-![Network map in dark theme](docs/images/02-network-map-dark.jpg)
+![Network map in dark theme with the traffic summary open](docs/images/02-network-map-dark.jpg)
 
 ## Requirements
 

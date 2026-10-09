@@ -27,6 +27,17 @@ Overview page (Monitoring -> Today's Reminder):
 - **Today's maintenance windows** and **upcoming windows later this week**, expanded from one-time,
   daily, weekly, and monthly recurring maintenance periods.
 
+![Today's Reminder overview page](docs/images/01-overview.jpg)
+
+The lower half of the overview: recently resolved problems with MTTR, monitoring health, and
+today's and this week's maintenance windows.
+
+![Recently resolved, monitoring health and maintenance](docs/images/02-details.jpg)
+
+The banner expanded on top of the Problems page:
+
+![Today's Reminder banner](docs/images/03-banner.jpg)
+
 ## Behavior
 
 - The banner is injected automatically on frontend pages after login.

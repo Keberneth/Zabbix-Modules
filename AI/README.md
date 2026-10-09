@@ -15,6 +15,31 @@ A self-contained Zabbix frontend module that adds:
 - **Per-provider temperature and max token controls** for fine-grained model tuning
 - **Local JSONL audit logging** with retention and archive support
 - **Optional NetBox enrichment** for VM/device/service context
+- **AI assistant on item, trigger and discovery rule forms** (and their prototypes) that suggests a configuration or reviews the one being edited
+
+## Screenshots
+
+**Chat** (Monitoring → AI → Chat): session context on the left, the answer in Markdown on the right.
+
+![AI chat](docs/images/01-chat.jpg)
+
+**Webhook answer posted to the problem**: the troubleshooting guide is added to the event as a problem update.
+
+![AI webhook answer as a problem update](docs/images/04-webhook-response.jpg)
+
+**Form assistant**: on a new trigger prototype the assistant suggests name, severity, expression and description with copy buttons. On an existing trigger it gets the full configuration as context and can review or change it.
+
+![AI Trigger Assistant on a new trigger prototype](docs/images/05-trigger-assistant-new.jpg)
+
+![Suggested trigger copied into the form](docs/images/06-trigger-assistant-suggestion.jpg)
+
+![Assistant reviewing an existing trigger](docs/images/07-trigger-assistant-edit.jpg)
+
+**Settings**: providers, instruction blocks and reference links.
+
+![AI providers](docs/images/02-providers.jpg)
+
+![Instruction blocks and reference links](docs/images/03-instructions-and-references.jpg)
 
 ## What this module does
 

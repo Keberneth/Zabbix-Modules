@@ -427,11 +427,11 @@
 }
 
 /* No traffic summary open: give the whole width to the graph. */
-#network-map-root.knm-fullscreen .knm-main:has(#knm-summary[hidden]) {
+#network-map-root .knm-main:has(#knm-summary[hidden]) {
   grid-template-columns: minmax(0, 1fr);
 }
 
-#network-map-root.knm-fullscreen .knm-main:has(#knm-summary[hidden]) .knm-sidebar {
+#network-map-root .knm-main:has(#knm-summary[hidden]) .knm-sidebar {
   display: none;
 }
 

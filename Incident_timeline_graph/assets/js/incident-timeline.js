@@ -1548,7 +1548,9 @@
 			else if (rawStep / magnitude > 1) { step = 2 * magnitude; }
 			step = Math.max(1, Math.round(step));
 			const ticks = [0];
-			for (let v = step; v < maxValue; v += step) { ticks.push(v); }
+			// Skip a round tick that sits so close to the max that the two labels
+			// would overlap (e.g. 1500 next to 1561).
+			for (let v = step; v < maxValue * 0.9; v += step) { ticks.push(v); }
 			ticks.push(maxValue);
 			return Array.from(new Set(ticks));
 		}

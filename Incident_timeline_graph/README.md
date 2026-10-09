@@ -13,19 +13,20 @@ Built and tested on **Zabbix 7.0**.
 **Timeline** — daily/weekly/monthly incident volume by severity, with an at‑a‑glance severity
 breakdown and trend lines. Drag on the chart to zoom, click a bar to drill into that period.
 
-![Incident timeline overview](docs/images/01-timeline-overview.png)
+![Incident timeline overview](docs/images/01-timeline-overview.jpg)
 
 **Top triggers** — every trigger ranked by problem count, with **average firing frequency**
 (auto‑scaled per second/minute/hour/day/week/month), **mean time to resolve**, last occurrence and
 share of total. With no filter it shows the top 100; with a filter it shows *every* matching trigger.
 
-![Top triggers](docs/images/02-top-triggers.png)
+![Top triggers](docs/images/02-top-triggers.jpg)
 
 **Filtered** — the same filters apply to both tabs, so you can answer questions like *"all MSSQL
 incidents on db01"* or *"all Kubernetes incidents in this cluster"*. Incident‑name matching supports
-substrings or full regular expressions.
+substrings or full regular expressions. Below, one customer's host group with the regular expression
+`restarted|unreachable|not running`.
 
-![Top triggers filtered to one host + name](docs/images/03-top-triggers-filtered.png)
+![Top triggers filtered to a host group and a regular expression](docs/images/03-top-triggers-filtered.jpg)
 
 ---
 

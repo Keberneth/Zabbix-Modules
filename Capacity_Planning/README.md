@@ -136,15 +136,15 @@ The **Overview** tab: scope cards, the capacity-runway chart (days until each fi
 
 ![Filesystem forecast table](docs/images/02-filesystems.jpg)
 
-The **Filesystems** tab: per-filesystem growth, warning/critical/full ETAs and confidence. Note the context-aware thresholds — `/var` warns at its host-macro override, the remote NFS share uses the stricter remote defaults.
+The **Filesystems** tab: per-filesystem growth, warning/critical/full ETAs and confidence. Thresholds are context-aware: a host-macro override wins, and remote shares such as `nas01:/backup` use the stricter remote defaults.
 
 ![Filesystem usage chart with projection](docs/images/03-filesystem-detail.jpg)
 
 Clicking a row opens the usage chart in a modal window: daily min–max band, average line, the projected growth crossing the host's own warning/critical threshold lines, with crossing markers and dates. Drag across historical data to zoom into a smaller range.
 
-![CPU and memory baselines](docs/images/04-resources.jpg)
+![CPU capacity evidence](docs/images/04-resources.jpg)
 
-The separate **CPU** and **RAM** tabs: sustained utilization against each host's alarm thresholds — average, p95 and time-above-threshold, with a drill-down chart per metric.
+The separate **CPU** and **RAM** tabs: sustained utilization against each host's alarm thresholds — current value, p95 and average, peak exposure, confirmed saturation episodes with their longest and total duration, and the baseline and saturation verdicts behind the risk. Each row opens a drill-down chart.
 
 ## Features
 

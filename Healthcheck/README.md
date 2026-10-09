@@ -189,11 +189,14 @@ To use a different configuration file instead, set `ZABBIX_WEB_CONFIG` to its pa
 
 ## Screenshots
 
-**Healthchecks**
-![Healthchecks example](../Example%20Pictures/Healtchecks.png)
+**Heartbeat**: current status of every check, the latest run step by step, and recent runs.
 
-**Healthchecks settings**
-![Healthchecks settings example](../Example%20Pictures/Healtchecks_settings.png)
+![Healthcheck heartbeat](docs/images/01-heartbeat.jpg)
 
-**Healthchecks history**
-![Healthchecks history example](../Example%20Pictures/Healtchecks_history.png)
+**History**: success rate, failed runs, average duration and ping latency for the period, with the recent failures listed.
+
+![Healthcheck history](docs/images/02-history.jpg)
+
+**Settings**: one card per check with its own interval, freshness limit, ping URL and API token.
+
+![Healthcheck settings](docs/images/03-settings.jpg)

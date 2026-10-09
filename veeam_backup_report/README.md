@@ -35,7 +35,9 @@ different version of the truth.
 Headline figures, backup volume per day stacked by server, what is being backed up, job
 results, repository capacity, and a prioritised "needs attention" list.
 
-![Overview breakdown, capacity and attention list](docs/images/02-overview-detail.jpg)
+![Backup volume per day, workload breakdown and job results](docs/images/02-overview-detail.jpg)
+
+![Repository capacity and the needs-attention list](docs/images/02-overview-attention.jpg)
 
 ### Backup jobs
 

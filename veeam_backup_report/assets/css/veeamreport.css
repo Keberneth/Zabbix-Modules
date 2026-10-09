@@ -539,16 +539,19 @@
     align-items: start;
 }
 
+/* Donut beside its table. The table drops below the donut only when it does
+   not fit next to it (a half-width panel on a ~1400 px screen), instead of
+   scrolling sideways inside the panel. */
 .vr-split {
-    display: grid;
-    grid-template-columns: 260px 1fr;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
     gap: 20px;
     align-items: center;
 }
 
-@media (max-width: 700px) {
-    .vr-split { grid-template-columns: 1fr; }
-}
+.vr-split > :first-child { flex: 0 0 260px; }
+.vr-split > .vr-table-wrap { flex: 1 1 auto; min-width: 0; }
 
 /* ---------------------------------------------------------------- charts */
 

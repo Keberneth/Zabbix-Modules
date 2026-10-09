@@ -167,7 +167,9 @@ html[theme="hc-dark"] .nbs-page,
 .nbs-settings-grid,
 .nbs-repeat-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(180px, 1fr));
+    /* At most 4 columns, fewer when the card itself is narrow (the two
+       connection cards sit side by side), so fields never overflow the card. */
+    grid-template-columns: repeat(auto-fit, minmax(max(180px, calc(25% - 12px)), 1fr));
     gap: 14px 16px;
 }
 

@@ -3,7 +3,7 @@
   "id": "custom_netbox_sync",
   "name": "NetBox Sync",
   "namespace": "NetBoxSync",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "Keberneth",
   "description": "Zabbix 7 frontend module for configurable NetBox synchronization, including built-in VM/service sync and extensible custom mappings.",
   "actions": {

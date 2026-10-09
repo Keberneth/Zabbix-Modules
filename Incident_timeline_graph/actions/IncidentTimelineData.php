@@ -559,6 +559,8 @@ final class IncidentTimelineData extends CController {
 				'output' => ['triggerid', 'description'],
 				'triggerids' => $chunk,
 				'selectHosts' => ['name'],
+				// Show "High CPU utilization on db01", not "... on {HOST.NAME}".
+				'expandDescription' => true,
 				'preservekeys' => true
 			]);
 			if (is_array($trigs)) {

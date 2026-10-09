@@ -1,11 +1,32 @@
 # Zabbix-Modules
-Modules for Zabbix to extend the capabilities 
+Frontend modules that extend Zabbix 7.0. Each module lives in its own folder with its own README and screenshots.
+
+## Modules
+
+| Module | Menu | Description |
+|---|---|---|
+| [AI](./AI/README.md) | Monitoring → AI | AI chat and webhook troubleshooting assistant with redaction and audit logging. |
+| [Branding](./Branding/README.md) | Administration → Branding | Custom logos for the login page, sidebar and browser favicon. |
+| [Capacity Planning](./Capacity_Planning/README.md) | Reports → Capacity Planning | Disk, CPU and RAM forecasting with risk levels, runway chart and saturation episodes. |
+| [Healthcheck](./Healthcheck/README.md) | Monitoring → Healthcheck | Scheduled checks of Zabbix itself, with heartbeat ping and run history. |
+| [Incident Timeline](./Incident_timeline_graph/README.md) | Reports → Incident Timeline | Multi-month incident timeline and top-triggers report. |
+| [NetBox Sync](./NetBoxSync/README.md) | Monitoring → NetBox Sync | Syncs Zabbix hosts, disks, interfaces and services to NetBox. |
+| [Network Map](./NetworkMap/README.md) | Monitoring → Network map | Interactive map of observed TCP connections between hosts, with full-screen view. |
+| [SLA & Uptime Report](./sla_uptime_report/README.md) | Reports → SLA & Uptime Report | SLA heatmaps, error budgets and host availability with downtime charts. |
+| [Today's Reminder](./Todays_Reminder/README.md) | Monitoring → Today's Reminder | Top banner and overview of open High/Critical problems, monitoring health and maintenance. |
+| [Trigger Correlation](./TriggerCorrelation/README.md) | Monitoring → Trigger Correlation | Combines related problems across hosts into one correlation problem or escalates their severity. |
+| [Veeam Backup Report](./veeam_backup_report/README.md) | Reports → Veeam Backup Report | Backup jobs, repositories, protected objects and growth forecast from the Veeam v13 template. |
+
+The HANA Dashboard module is maintained in [Zabbix-HANA-Monitoring](https://github.com/Keberneth/Zabbix-HANA-Monitoring).
 
 ## Simple Installation Guide
 Download the module folder to the Zabbix Web frontend Server and place in:
 /usr/share/zabbix/modules/
 
-### Branding and Healthcheck have seprate installation instruction in it's own readme
+Then enable it in **Administration → General → Modules → Scan directory**.
+
+### Some modules have extra setup steps in their own docs
+Branding and Healthcheck (README), AI and NetBox Sync (INSTALL.md), Trigger Correlation (SETUP.md).
 
 ## Set permissions
 ### Folders and Files Permissions
@@ -17,60 +38,3 @@ sudo find /usr/share/zabbix/modules/MODULE_FOLDER_NAME -type f -exec chmod 644 {
 sudo semanage fcontext -a -t httpd_sys_content_t '/usr/share/zabbix/modules/MODULE_FOLDER_NAME(/.*)?'<br>
 sudo restorecon -Rv /usr/share/zabbix/modules/MODULE_FOLDER_NAME<br>
 sudo setsebool -P httpd_can_network_connect on
-
-
-## Example Pictures
-
-<details>
-<summary>Click to expand example screenshots</summary>
-
-### AI features
-
-**AI providers**  
-![AI providers example](./Example%20Pictures/AI-providers.png)
-
-**Instructions and reference**  
-![Instructions and reference example](./Example%20Pictures/Instructions_and_reference.png)
-
-**AI chat**  
-![AI chat example](./Example%20Pictures/ai_chat.png)
-
-**AI webhook response**  
-![AI webhook response example](./Example%20Pictures/ai_webhook_response.png)
-
-### Branding and UI
-
-**Branding**  
-![Branding example](./Example%20Pictures/branding.png)
-
-**Branding login page**  
-![Branding login page example](./Example%20Pictures/branding_loginpage.png)
-
-**Branding menu bar**  
-![Branding menu bar example](./Example%20Pictures/branding_menubar.png)
-
-**Today's reminder top bar**  
-![Today's reminder top bar example](./Example%20Pictures/todays_reminder_topbar.png)
-
-### Healthchecks
-
-**Healthchecks**
-![Healthchecks example](./Example%20Pictures/Healtchecks.png)
-
-**Healthchecks settings**
-![Healthchecks settings example](./Example%20Pictures/Healtchecks_settings.png)
-
-**Healthchecks history**
-![Healthchecks history example](./Example%20Pictures/Healtchecks_history.png)
-
-### Incident Timeline
-
-Trigger problem events over time with severity charts, multi-month ranges, host/group/template/name
-filtering and a Top triggers report. See [`Incident_timeline_graph/README.md`](./Incident_timeline_graph/README.md).
-
-**Incident timeline**  
-![Incident timeline example](./Example%20Pictures/incident_timeline.png)
-
-**Top triggers (avg frequency, MTTR, share)**  
-![Incident timeline top triggers example](./Example%20Pictures/incident_timeline_top_triggers.png)
-</details>

@@ -38,6 +38,16 @@ change the **problem (event) severity** — never the trigger's configured prior
 — so it is fully reversible and adds the same explanatory comments. See
 **Severity escalation rules** below.
 
+![Problems list with a correlation problem and escalated problems](docs/images/01-problems.png)
+
+A severity escalation in real time: both `Database read errors` problems go from Warning to
+Disaster while the MySQL backend is saturated, and back when it recovers.
+
+![Real-time severity escalation: Warning to Disaster and back](docs/images/escalation-severity.gif)
+
+[SETUP.md](SETUP.md) walks through the rule editors, the settings self-check and the resulting
+problems with screenshots of every step.
+
 The module does **not** use `zabbix_sender` and does **not** write directly to the Zabbix database. It uses the Zabbix API:
 
 - `problem.get` to read active trigger problems.

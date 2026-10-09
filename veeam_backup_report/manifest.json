@@ -3,7 +3,7 @@
     "id": "veeam_backup_report",
     "name": "Veeam Backup Report",
     "description": "Backup reporting for the Veeam Backup and Replication by HTTP v13 template: overview, jobs, repositories, protected objects and growth forecasting, with a presentation-ready export. Runs on single-server, multi-server (HA) and Docker Zabbix frontends.",
-    "version": "2.0.0",
+    "version": "2.0.1",
     "namespace": "VeeamBackupReport",
     "author": "Keberneth",
     "url": "",

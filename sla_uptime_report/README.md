@@ -29,7 +29,7 @@ Headline figures, the daily downtime chart, availability by host group, SLA comp
 glance, and a prioritised "needs attention" list — services below SLO first, then hosts below
 the availability target, worst first.
 
-![Overview: groups, compliance and attention list](docs/images/02-overview-detail.jpg)
+![Overview: downtime per day, availability by host group and SLA compliance](docs/images/02-overview-detail.jpg)
 
 ### SLA compliance
 

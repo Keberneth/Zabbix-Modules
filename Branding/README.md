@@ -13,6 +13,16 @@ The module provides a UI under **Administration → Branding** where a Zabbix Su
 
 The module uses Zabbix's built-in branding support for logos, footer text and the help URL. The browser favicon is handled separately through a filesystem symlink because Zabbix does not expose the favicon through the same branding configuration.
 
+## Screenshots
+
+**Administration → Branding**
+
+![Branding settings](docs/images/01-settings.png)
+
+**Login page and sidebar with a custom logo**
+
+<img src="docs/images/02-login-page.png" alt="Login page with a custom logo" width="400"> <img src="docs/images/03-sidebar.png" alt="Sidebar with a custom logo" width="170">
+
 ## Storage layout
 
 The module uses three locations:

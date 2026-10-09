@@ -230,16 +230,24 @@ final class MapBuilder {
                         $this->registerNode($nodes_index, $dst_node, $dst_ip);
 
                         $is_public = Helpers::isPublicIp($remote_ip);
+                        // One edge per service connection. The client's ephemeral port is
+                        // left out of the key: it changes with every connection, and a
+                        // connection between two monitored hosts is reported by both ends
+                        // with local/remote ports swapped, which would draw it twice.
                         $edge_key = implode('|', [
                             $src_node['id'],
                             $dst_node['id'],
                             $service_port,
-                            $local_port,
-                            $remote_port,
-                            $is_public ? '1' : '0',
                             $src_ip,
                             $dst_ip
                         ]);
+
+                        if (isset($edge_index[$edge_key])) {
+                            if ($is_public) {
+                                $edge_index[$edge_key]['isPublic'] = true;
+                            }
+                            continue;
+                        }
 
                         $edge_index[$edge_key] = [
                             'source' => (string) $src_node['id'],
