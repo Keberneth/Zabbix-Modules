@@ -6,12 +6,13 @@ Frontend modules that extend Zabbix 7.0. Each module lives in its own folder wit
 | Module | Menu | Description |
 |---|---|---|
 | [AI](./AI/README.md) | Monitoring → AI | AI chat and webhook troubleshooting assistant with redaction and audit logging. |
-| [Branding](./Branding/README.md) | Administration → Branding | Custom logos for the login page, sidebar and browser favicon. |
+| [Branding](./Branding/README.md) | Administration → Branding | Custom logos for the login page, sidebar and browser favicon, and a custom or hidden server name under the sidebar logo. |
 | [Capacity Planning](./Capacity_Planning/README.md) | Reports → Capacity Planning | Disk, CPU and RAM forecasting with risk levels, runway chart and saturation episodes. |
 | [Healthcheck](./Healthcheck/README.md) | Monitoring → Healthcheck | Scheduled checks of Zabbix itself, with heartbeat ping and run history. |
 | [Incident Timeline](./Incident_timeline_graph/README.md) | Reports → Incident Timeline | Multi-month incident timeline and top-triggers report. |
 | [NetBox Sync](./NetBoxSync/README.md) | Monitoring → NetBox Sync | Syncs Zabbix hosts, disks, interfaces and services to NetBox. |
 | [Network Map](./NetworkMap/README.md) | Monitoring → Network map | Interactive map of observed TCP connections between hosts, with full-screen view. |
+| [Patch Calendar](./Patch_Calendar/README.md) | Dashboard widget | Calendar of maintenance (patch) windows, and a template that alarms the day before and on the day of a host's patch window. |
 | [SLA & Uptime Report](./sla_uptime_report/README.md) | Reports → SLA & Uptime Report | SLA heatmaps, error budgets and host availability with downtime charts. |
 | [Today's Reminder](./Todays_Reminder/README.md) | Monitoring → Today's Reminder | Top banner and overview of open High/Critical problems, monitoring health and maintenance. |
 | [Trigger Correlation](./TriggerCorrelation/README.md) | Monitoring → Trigger Correlation | Combines related problems across hosts into one correlation problem or escalates their severity. |
@@ -26,7 +27,7 @@ Download the module folder to the Zabbix Web frontend Server and place in:
 Then enable it in **Administration → General → Modules → Scan directory**.
 
 ### Some modules have extra setup steps in their own docs
-Branding and Healthcheck (README), AI and NetBox Sync (INSTALL.md), Trigger Correlation (SETUP.md).
+Branding, Healthcheck and Patch Calendar (README), AI and NetBox Sync (INSTALL.md), Trigger Correlation (SETUP.md).
 
 ## Set permissions
 ### Folders and Files Permissions

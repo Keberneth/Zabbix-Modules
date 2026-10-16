@@ -1,0 +1,36 @@
+{
+	"manifest_version": 2.0,
+	"id": "patch_calendar",
+	"type": "widget",
+	"name": "Patch calendar",
+	"namespace": "PatchCalendar",
+	"version": "1.0.0",
+	"author": "Keberneth",
+	"url": "https://github.com/Keberneth/Zabbix-Modules",
+	"description": "Dashboard widget that shows maintenance (patch) windows as a month, week or agenda calendar.",
+	"widget": {
+		"js_class": "CWidgetPatchCalendar",
+		"size": {
+			"width": 36,
+			"height": 7
+		},
+		"refresh_rate": 120,
+		"in": {
+			"hostids": {
+				"type": "_hostids"
+			},
+			"groupids": {
+				"type": "_hostgroupids"
+			}
+		}
+	},
+	"actions": {
+		"widget.patch_calendar.view": {
+			"class": "WidgetView"
+		}
+	},
+	"assets": {
+		"css": ["widget.css"],
+		"js": ["class.widget.js"]
+	}
+}

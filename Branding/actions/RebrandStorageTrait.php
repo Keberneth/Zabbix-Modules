@@ -2,6 +2,8 @@
 
 namespace Modules\Rebrand\Actions;
 
+use Modules\Rebrand\Lib\ServerNameOverride;
+
 trait RebrandStorageTrait {
 
 	private function getModuleDir(): string {
@@ -60,14 +62,30 @@ trait RebrandStorageTrait {
 		return ($filename !== '') ? $filename : null;
 	}
 
+	/**
+	 * Settings are also read on every page (see ServerNameOverride), so a
+	 * hand-edited config.json with a wrong value type must not raise warnings.
+	 */
+	private function normalizeText(mixed $value): string {
+		return is_scalar($value) ? trim((string) $value) : '';
+	}
+
 	private function normalizeConfig(array $config): array {
+		$server_name_mode = $config['server_name_mode'] ?? null;
+
 		return [
 			'logo_main' => $this->normalizeLogoName($config['logo_main'] ?? null),
 			'logo_sidebar' => $this->normalizeLogoName($config['logo_sidebar'] ?? null),
 			'logo_compact' => $this->normalizeLogoName($config['logo_compact'] ?? null),
 			'favicon' => $this->normalizeLogoName($config['favicon'] ?? null),
-			'brand_footer' => isset($config['brand_footer']) ? trim((string) $config['brand_footer']) : '',
-			'brand_help_url' => isset($config['brand_help_url']) ? trim((string) $config['brand_help_url']) : ''
+			'brand_footer' => $this->normalizeText($config['brand_footer'] ?? ''),
+			'brand_help_url' => $this->normalizeText($config['brand_help_url'] ?? ''),
+			'server_name_mode' => in_array($server_name_mode, ServerNameOverride::MODES, true)
+				? $server_name_mode
+				: ServerNameOverride::MODE_DEFAULT,
+			'server_name' => mb_substr($this->normalizeText($config['server_name'] ?? ''), 0,
+				ServerNameOverride::MAX_LENGTH
+			)
 		];
 	}
 
@@ -86,6 +104,19 @@ trait RebrandStorageTrait {
 		$config = json_decode($json, true);
 
 		return is_array($config) ? $this->normalizeConfig($config) : $this->normalizeConfig([]);
+	}
+
+	/**
+	 * Load the saved settings from the primary store, falling back to the legacy
+	 * config.json in the serving directory for installs that predate local/conf.
+	 */
+	private function loadStoredConfig(string $config_storage_dir, string $logo_storage_dir): array {
+		if (!is_file($this->getConfigFilePath($config_storage_dir))
+				&& is_file($this->getConfigFilePath($logo_storage_dir))) {
+			return $this->loadConfigFromDir($logo_storage_dir);
+		}
+
+		return $this->loadConfigFromDir($config_storage_dir);
 	}
 
 	private function getExistingLogoName(array $config, string $logo_key, string $storage_dir): ?string {

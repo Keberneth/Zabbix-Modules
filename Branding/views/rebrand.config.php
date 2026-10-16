@@ -7,6 +7,8 @@
  * @var array $data
  */
 
+use Modules\Rebrand\Lib\ServerNameOverride;
+
 $user_theme = getUserTheme(CWebUser::$data);
 $is_dark_theme = in_array($user_theme, ['dark-theme', 'hc-dark'], true);
 
@@ -103,12 +105,44 @@ $favicon_fields = $build_logo_fields(
 	'max-height: 32px; max-width: 32px;', true
 );
 
+// --- Server name (the text under the sidebar logo) ---
+
+$zabbix_server_name = $data['zabbix_server_name'];
+
+$server_name_fields = [
+	(new CRadioButtonList('server_name_mode', $data['server_name_mode']))
+		->addValue(_('Default'), ServerNameOverride::MODE_DEFAULT)
+		->addValue(_('Custom'), ServerNameOverride::MODE_CUSTOM)
+		->addValue(_('Hidden'), ServerNameOverride::MODE_HIDDEN)
+		->setModern(),
+	(new CDiv(
+		(new CTextBox('server_name', $data['server_name'], false, ServerNameOverride::MAX_LENGTH))
+			->setWidth(ZBX_TEXTAREA_STANDARD_WIDTH)
+			->setAttribute('placeholder', _('e.g. Production monitoring'))
+			->setEnabled($data['server_name_mode'] === ServerNameOverride::MODE_CUSTOM)
+	))->setAttribute('style', 'margin-top: 6px;'),
+	(new CTag('div', true, [
+		_('Shown under the sidebar logo and before the page title in the browser tab.'),
+		BR(),
+		($zabbix_server_name !== '')
+			? _s('Default is the Zabbix server name, currently "%1$s" (ZBX_SERVER_NAME in Docker, $ZBX_SERVER_NAME in zabbix.conf.php).',
+				$zabbix_server_name
+			)
+			: _('Default is the Zabbix server name, which is not set (ZBX_SERVER_NAME in Docker, $ZBX_SERVER_NAME in zabbix.conf.php).'),
+		BR(),
+		_('The sign-in page always shows the default, because Zabbix loads modules only after sign-in.')
+	]))
+		->addClass(ZBX_STYLE_GREY)
+		->setAttribute('style', 'margin-top: 4px;')
+];
+
 // --- Build form list ---
 
 $form_list = (new CFormList())
 	->addRow(_('Login page logo'), $logo_main_fields)
 	->addRow(_('Sidebar logo'), $logo_sidebar_fields)
 	->addRow(_('Compact sidebar icon'), $logo_compact_fields)
+	->addRow(_('Server name'), $server_name_fields)
 	->addRow(_('Browser favicon'), $favicon_fields)
 	->addRow(_('Footer text'),
 		(new CTextBox('brand_footer', $data['brand_footer'], false, 128))
@@ -153,3 +187,5 @@ $page_wrapper = (new CDiv($form))
 
 $html_page->addItem($page_wrapper);
 $html_page->show();
+
+$this->includeJsFile('rebrand.config.js.php');

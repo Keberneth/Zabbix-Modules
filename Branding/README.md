@@ -7,11 +7,12 @@ The module provides a UI under **Administration → Branding** where a Zabbix Su
 - Login-page logo
 - Sidebar logo
 - Compact sidebar icon
+- Server name (the text under the sidebar logo)
 - Browser favicon
 - Footer text
 - Help URL
 
-The module uses Zabbix's built-in branding support for logos, footer text and the help URL. The browser favicon is handled separately through a filesystem symlink because Zabbix does not expose the favicon through the same branding configuration.
+The module uses Zabbix's built-in branding support for logos, footer text and the help URL. The browser favicon is handled separately through a filesystem symlink because Zabbix does not expose the favicon through the same branding configuration. The server name is replaced by the module itself while each page is drawn; see [Server name](#server-name).
 
 ## Screenshots
 
@@ -78,6 +79,7 @@ No Zabbix core PHP files are patched.
 | Login page logo | Zabbix login screen | 114 × 30 px |
 | Sidebar logo | Top of the expanded sidebar | 91 × 24 px |
 | Compact sidebar icon | Top of the collapsed sidebar | 24 × 24 px |
+| Server name | Under the sidebar logo, and before the page title in the browser tab | Up to 128 characters |
 | Browser favicon | Browser tab | 32 × 32 px |
 | Footer text | Bottom of Zabbix pages | — |
 | Help URL | Help link in the user menu | — |
@@ -510,6 +512,36 @@ Ctrl+Shift+R
 ```
 
 An incognito/private browser window can also be useful when testing cached branding assets.
+
+---
+
+# Server name
+
+Zabbix shows its server name under the sidebar logo. It also puts the name in front of the page title in the browser tab, for example `Zabbix docker: Dashboard`.
+
+By default, the name comes from the Zabbix frontend configuration:
+
+| Installation | Where the default comes from |
+| --- | --- |
+| Docker | The `ZBX_SERVER_NAME` environment variable of the web container |
+| Packages | `$ZBX_SERVER_NAME` in `/etc/zabbix/web/zabbix.conf.php`, the "Zabbix server name" field of the setup wizard |
+
+Under **Administration → Branding → Server name**, choose one of:
+
+| Option | Result |
+| --- | --- |
+| Default | Keep the name from the Zabbix configuration |
+| Custom | Show your own text instead, up to 128 characters |
+| Hidden | No text under the sidebar logo and no name before the browser tab title |
+
+The Branding page shows the current default. A custom name is kept while Default or Hidden is selected, so switching back to Custom restores it.
+
+On every page request, the module replaces `$ZBX_SERVER_NAME` in memory before Zabbix draws the page. It does not change `zabbix.conf.php` or write any other file. The setting is saved in `local/conf/rebrand/config.json` together with the other Branding settings.
+
+Limitations:
+
+- **Sign-in page.** Zabbix loads modules only after a user signs in, so the sign-in page always shows the default name. To change the name there as well, set `ZBX_SERVER_NAME` (Docker) or `$ZBX_SERVER_NAME` in `zabbix.conf.php`, or leave it empty to show no name.
+- **User roles.** Zabbix loads a module only for users whose role allows it. New modules are allowed by default, under **Users → User roles → Access to modules**. Users of a role that denies the **Rebrand** module see the default name.
 
 ---
 
@@ -951,6 +983,7 @@ The module validates uploaded files server-side by:
 - Rejecting SVG uploads
 - Normalizing stored filenames
 - Restricting the Help URL to HTTP and HTTPS URLs
+- Limiting the server name to 128 characters; Zabbix escapes it when drawing the page
 - Using Zabbix CSRF protection for configuration changes
 
 The module itself should remain read-only to PHP-FPM except for the specifically required runtime storage locations documented above.
@@ -990,3 +1023,17 @@ These values are written to:
 and consumed by Zabbix's built-in branding functionality.
 
 The browser favicon does not use a Zabbix branding constant. It is provided through the filesystem symlink described above.
+
+The server name is not a branding constant either. The module replaces the frontend's `$ZBX_SERVER_NAME` value, which Zabbix 7.0 reads only after modules are loaded. The Zabbix 8.0 frontend reads it the same way.
+
+---
+
+# Tests
+
+`tests/ServerNameOverrideTest.php` is a command-line regression test for the server name setting. A Zabbix server does not need it, and it refuses to run through the web server. Run it from the module directory:
+
+```bash
+php tests/ServerNameOverrideTest.php
+```
+
+CI runs it on every supported PHP version.

@@ -4,6 +4,7 @@ namespace Modules\Rebrand\Actions;
 
 use CController;
 use CControllerResponseData;
+use Modules\Rebrand\Lib\ServerNameOverride;
 
 class RebrandConfig extends CController {
 
@@ -29,6 +30,9 @@ class RebrandConfig extends CController {
 			'favicon' => null,
 			'brand_footer' => '',
 			'brand_help_url' => '',
+			'server_name_mode' => ServerNameOverride::MODE_DEFAULT,
+			'server_name' => '',
+			'zabbix_server_name' => ServerNameOverride::getZabbixDefault(),
 			'storage_url' => $this->getPrimaryStorageUrl(),
 			'storage_dir' => '',
 			'local_conf_dir' => '',
@@ -46,12 +50,7 @@ class RebrandConfig extends CController {
 			$config_storage_dir = $this->getPrimaryStorageDir($frontend_root);
 			$logo_storage_dir = $this->getLegacyStorageDir($module_dir);
 			$logo_storage_url = $this->getLegacyStorageUrl($module_dir);
-			$config = $this->loadConfigFromDir($config_storage_dir);
-
-			if (!is_file($this->getConfigFilePath($config_storage_dir))
-					&& is_file($this->getConfigFilePath($logo_storage_dir))) {
-				$config = $this->loadConfigFromDir($logo_storage_dir);
-			}
+			$config = $this->loadStoredConfig($config_storage_dir, $logo_storage_dir);
 
 			$this->healLegacyAssets($config, $config_storage_dir, $logo_storage_dir);
 
@@ -62,6 +61,9 @@ class RebrandConfig extends CController {
 				'favicon' => $this->getExistingLogoName($config, 'favicon', $logo_storage_dir),
 				'brand_footer' => $config['brand_footer'] ?? '',
 				'brand_help_url' => $config['brand_help_url'] ?? '',
+				'server_name_mode' => $config['server_name_mode'],
+				'server_name' => $config['server_name'],
+				'zabbix_server_name' => ServerNameOverride::getZabbixDefault(),
 				'storage_url' => $logo_storage_url,
 				'storage_dir' => $logo_storage_dir,
 				'local_conf_dir' => $local_conf_dir,
@@ -77,6 +79,8 @@ class RebrandConfig extends CController {
 			$data['runtime_error'] = 'Failed to initialize branding storage. Review the web server error log for details.';
 		}
 
-		$this->setResponse(new CControllerResponseData($data));
+		$response = new CControllerResponseData($data);
+		$response->setTitle(_('Branding'));
+		$this->setResponse($response);
 	}
 }

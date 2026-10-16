@@ -6,6 +6,7 @@ use CController;
 use CControllerResponseRedirect;
 use CMessageHelper;
 use CUrl;
+use Modules\Rebrand\Lib\ServerNameOverride;
 
 class RebrandConfigUpdate extends CController {
 
@@ -30,6 +31,8 @@ class RebrandConfigUpdate extends CController {
 		$fields = [
 			'brand_footer' => 'string',
 			'brand_help_url' => 'string',
+			'server_name_mode' => 'in '.implode(',', ServerNameOverride::MODES),
+			'server_name' => 'string',
 			'remove_logo_main' => 'in 1',
 			'remove_logo_sidebar' => 'in 1',
 			'remove_logo_compact' => 'in 1',
@@ -40,6 +43,10 @@ class RebrandConfigUpdate extends CController {
 		$ret = $this->validateInput($fields);
 
 		if ($ret && mb_strlen($this->getInput('brand_footer', '')) > self::MAX_FOOTER_LENGTH) {
+			$ret = false;
+		}
+
+		if ($ret && mb_strlen($this->getInput('server_name', '')) > ServerNameOverride::MAX_LENGTH) {
 			$ret = false;
 		}
 
@@ -88,11 +95,7 @@ class RebrandConfigUpdate extends CController {
 				$errors[] = 'Could not create or access '.$logo_storage_dir.'. Grant write access to '.$runtime_user.' and ensure SELinux allows writes.';
 			}
 
-			$config = $this->loadConfigFromDir($config_storage_dir);
-			if (!is_file($this->getConfigFilePath($config_storage_dir))
-					&& is_file($this->getConfigFilePath($logo_storage_dir))) {
-				$config = $this->loadConfigFromDir($logo_storage_dir);
-			}
+			$config = $this->loadStoredConfig($config_storage_dir, $logo_storage_dir);
 			$this->migrateLegacyAssets($config, $config_storage_dir, $logo_storage_dir, $errors);
 			$this->healLegacyAssets($config, $config_storage_dir, $logo_storage_dir);
 
@@ -138,6 +141,25 @@ class RebrandConfigUpdate extends CController {
 				}
 			}
 			$config['brand_help_url'] = $new_help_url;
+
+			if ($this->hasInput('server_name_mode')) {
+				$server_name_mode = $this->getInput('server_name_mode');
+
+				// The name field is disabled (and so not posted) unless Custom is
+				// selected; keep the saved name so switching back restores it.
+				$server_name = $this->hasInput('server_name')
+					? trim($this->getInput('server_name'))
+					: $config['server_name'];
+
+				if ($server_name_mode === ServerNameOverride::MODE_CUSTOM && $server_name === '') {
+					$errors[] = 'Server name: enter a name, or choose Default or Hidden.';
+				}
+				else {
+					$config['server_name_mode'] = $server_name_mode;
+					$config['server_name'] = $server_name;
+				}
+			}
+
 			$config = $this->normalizeConfig($config);
 
 			try {

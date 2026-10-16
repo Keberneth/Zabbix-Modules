@@ -1,0 +1,539 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: 846977d1dfed4968bc5f8bdb363285bc
+      name: Templates/Operating systems
+  templates:
+    - uuid: 4ae808b27b524e5eac9aebee9d98d8f6
+      template: 'Patch window by Zabbix API'
+      name: 'Patch window by Zabbix API'
+      description: |
+        Reminds about upcoming maintenance windows (patch windows) of the host:
+        - "Patch window starts tomorrow" (Information) during the day before a window,
+        - "Patch window starts today" (Warning) on the day of a window, until it starts.
+
+        A Script item reads the maintenances of the host and of its host groups from the Zabbix API every {$PATCH.WINDOW.INTERVAL}. Recurring periods are calculated exactly like Zabbix server does, in the time zone of the Zabbix server (or proxy) that runs the item, which is also the time zone "today" and "tomorrow" refer to.
+
+        Setup:
+        1. Create a user with read permission to all host groups that are used in maintenances ("User role" is enough, frontend access can be disabled) and an API token for it.
+        2. Add global macros (Administration > Macros):
+           {$PATCH.WINDOW.API.URL} - URL of api_jsonrpc.php as reached from Zabbix server/proxy.
+           {$PATCH.WINDOW.API.TOKEN} - the API token, as Secret text.
+        3. Link this template to the OS templates (Linux by Zabbix agent, Windows by Zabbix agent, ...) or to hosts.
+
+        Use {$PATCH.WINDOW.NAME.MATCHES} and {$PATCH.WINDOW.NAME.NOT_MATCHES} (regular expressions, case-insensitive) to choose which maintenances count as patch windows.
+
+        The Patch calendar dashboard widget (Patch_Calendar module) shows the same windows as a calendar.
+      vendor:
+        name: Keberneth
+        version: 7.0-1
+      groups:
+        - name: Templates/Operating systems
+      items:
+        - uuid: 0a4ecf8c57004953be77fdc215b270f9
+          name: 'Patch window: Get schedule'
+          type: SCRIPT
+          key: patch.window.get
+          delay: '{$PATCH.WINDOW.INTERVAL}'
+          history: '0'
+          trends: '0'
+          value_type: TEXT
+          params: |-
+            /*
+             * Patch window by Zabbix API - "Patch window: Get schedule" Script item.
+             *
+             * Reads the maintenances that cover this host (directly or through one of its host groups) from the Zabbix API
+             * and returns the running and the next maintenance window as JSON for the dependent items.
+             *
+             * Recurring periods are expanded exactly like Zabbix server does it (same algorithm as
+             * Patch_Calendar/includes/MaintenanceSchedule.php). The script runs on Zabbix server or proxy, so local time here
+             * is the time zone the server evaluates maintenance periods in, and "today"/"tomorrow" use the server's calendar.
+             *
+             * Parameters: url, token, host, name_matches, name_not_matches, lookahead_days.
+             */
+            var params = JSON.parse(value),
+            	SEC_PER_DAY = 86400,
+            	SEC_PER_WEEK = 604800,
+            	TYPE_ONETIME = 0,
+            	TYPE_DAILY = 2,
+            	TYPE_WEEKLY = 3,
+            	TYPE_MONTHLY = 4;
+
+            function fail(message) {
+            	throw 'Patch window: ' + message;
+            }
+
+            function isMacroSet(macro_value) {
+            	return typeof macro_value === 'string' && macro_value !== '' && !/^\{\$[^}]+\}$/.test(macro_value);
+            }
+
+            function api(method, method_params) {
+            	var request = new HttpRequest(),
+            		response;
+
+            	request.addHeader('Content-Type: application/json-rpc');
+            	request.addHeader('Authorization: Bearer ' + params.token);
+
+            	response = request.post(params.url,
+            		JSON.stringify({jsonrpc: '2.0', method: method, params: method_params, id: 1})
+            	);
+
+            	if (request.getStatus() !== 200) {
+            		fail(method + ' returned HTTP ' + request.getStatus() + ' from ' + params.url);
+            	}
+
+            	try {
+            		response = JSON.parse(response);
+            	}
+            	catch (error) {
+            		fail(method + ' did not return JSON: ' + String(response).substring(0, 200));
+            	}
+
+            	if (typeof response.error !== 'undefined') {
+            		fail(method + ' failed: ' + response.error.message + ' ' + response.error.data);
+            	}
+
+            	return response.result;
+            }
+
+            /*
+             * Calendar helpers. A day number is the local calendar date as days since 1970-01-01.
+             */
+            function getOffset(clock) {
+            	return -new Date(clock * 1000).getTimezoneOffset() * 60;
+            }
+
+            function getDayNumber(clock) {
+            	var date = new Date(clock * 1000);
+
+            	return Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000);
+            }
+
+            function getDate(day_number) {
+            	var date = new Date(day_number * 86400000);
+
+            	return {
+            		year: date.getUTCFullYear(),
+            		month: date.getUTCMonth() + 1,
+            		day: date.getUTCDate(),
+            		days_in_month: new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate()
+            	};
+            }
+
+            // 0 = Monday ... 6 = Sunday (bit number in the "dayofweek" mask).
+            function getWeekday(day_number) {
+            	return ((day_number + 3) % 7 + 7) % 7;
+            }
+
+            // Midnight plus the seconds, corrected by the change of the UTC offset (server's dc_subtract_time()).
+            // Returns null in strict mode if the wall clock time does not exist on that day (DST start).
+            function getLocalTime(day_number, seconds, strict) {
+            	var date = getDate(day_number),
+            		midnight = Math.floor(new Date(date.year, date.month - 1, date.day, 0, 0, 0).getTime() / 1000),
+            		clock = midnight + seconds,
+            		local;
+
+            	clock -= getOffset(clock) - getOffset(midnight);
+
+            	if (strict) {
+            		local = new Date(clock * 1000);
+
+            		if (local.getHours() * 3600 + local.getMinutes() * 60 + local.getSeconds() !== seconds) {
+            			return null;
+            		}
+            	}
+
+            	return clock;
+            }
+
+            function monthlyDayMatches(day_number, month, day, dayofweek, every) {
+            	var date = getDate(day_number);
+
+            	if ((month & (1 << (date.month - 1))) === 0) {
+            		return false;
+            	}
+
+            	if (day !== 0) {
+            		return date.day === day;
+            	}
+
+            	if ((dayofweek & (1 << getWeekday(day_number))) === 0) {
+            		return false;
+            	}
+
+            	return every === 5 ? date.day + 7 > date.days_in_month : Math.floor((date.day - 1) / 7) + 1 === every;
+            }
+
+            function getTimePeriodWindows(timeperiod, active_since, active_till, from, till) {
+            	var type = parseInt(timeperiod.timeperiod_type, 10),
+            		period = parseInt(timeperiod.period, 10),
+            		start_time = parseInt(timeperiod.start_time, 10),
+            		every = Math.max(1, parseInt(timeperiod.every, 10)),
+            		dayofweek = parseInt(timeperiod.dayofweek, 10),
+            		month = parseInt(timeperiod.month, 10),
+            		day = parseInt(timeperiod.day, 10),
+            		windows = [],
+            		since_day, since_midnight, since_monday, first_day, last_day, day_number, start, end;
+
+            	if (type === TYPE_ONETIME) {
+            		start = Math.max(parseInt(timeperiod.start_date, 10), active_since);
+            		end = Math.min(parseInt(timeperiod.start_date, 10) + period, active_till);
+
+            		return (start < end && start < till && end > from) ? [{start: start, end: end}] : [];
+            	}
+
+            	if (type !== TYPE_DAILY && type !== TYPE_WEEKLY && type !== TYPE_MONTHLY) {
+            		return [];
+            	}
+
+            	since_day = getDayNumber(active_since);
+            	since_midnight = getLocalTime(since_day, 0, false);
+            	since_monday = getLocalTime(since_day - getWeekday(since_day), 0, false);
+
+            	// A window that started before "from" can still be running.
+            	first_day = Math.max(since_day, getDayNumber(Math.max(from - period, active_since)) - 1);
+            	last_day = getDayNumber(Math.min(till, active_till));
+
+            	for (day_number = first_day; day_number <= last_day; day_number++) {
+            		if (type === TYPE_WEEKLY && (dayofweek & (1 << getWeekday(day_number))) === 0) {
+            			continue;
+            		}
+
+            		if (type === TYPE_MONTHLY && !monthlyDayMatches(day_number, month, day, dayofweek, every)) {
+            			continue;
+            		}
+
+            		start = getLocalTime(day_number, start_time, true);
+
+            		if (start === null || start < active_since || start >= active_till) {
+            			continue;
+            		}
+
+            		if (type === TYPE_DAILY && Math.floor((start - since_midnight) / SEC_PER_DAY) % every !== 0) {
+            			continue;
+            		}
+
+            		if (type === TYPE_WEEKLY && Math.floor((start - since_monday) / SEC_PER_WEEK) % every !== 0) {
+            			continue;
+            		}
+
+            		end = Math.min(start + period, active_till);
+
+            		if (start < till && end > from) {
+            			windows.push({start: start, end: end});
+            		}
+            	}
+
+            	return windows;
+            }
+
+            function getWindows(maintenance, from, till) {
+            	var active_since = parseInt(maintenance.active_since, 10),
+            		active_till = parseInt(maintenance.active_till, 10),
+            		windows = [],
+            		i;
+
+            	if (Math.max(from, active_since) >= Math.min(till, active_till)) {
+            		return [];
+            	}
+
+            	for (i = 0; i < maintenance.timeperiods.length; i++) {
+            		windows = windows.concat(
+            			getTimePeriodWindows(maintenance.timeperiods[i], active_since, active_till, from, till)
+            		);
+            	}
+
+            	return windows;
+            }
+
+            function coversHost(maintenance, hostid, groupids) {
+            	var i;
+
+            	for (i = 0; i < maintenance.hosts.length; i++) {
+            		if (maintenance.hosts[i].hostid === hostid) {
+            			return true;
+            		}
+            	}
+
+            	for (i = 0; i < maintenance.hostgroups.length; i++) {
+            		if (groupids.indexOf(maintenance.hostgroups[i].groupid) !== -1) {
+            			return true;
+            		}
+            	}
+
+            	return false;
+            }
+
+            function getRegExp(macro_value, default_pattern) {
+            	try {
+            		return new RegExp(isMacroSet(macro_value) ? macro_value : default_pattern, 'i');
+            	}
+            	catch (error) {
+            		fail('invalid regular expression "' + macro_value + '": ' + error);
+            	}
+            }
+
+            if (!isMacroSet(params.url)) {
+            	fail('set the global macro {$PATCH.WINDOW.API.URL} to the Zabbix API URL, '
+            		+ 'for example https://zabbix.example.com/api_jsonrpc.php');
+            }
+
+            if (!isMacroSet(params.token)) {
+            	fail('set the global secret macro {$PATCH.WINDOW.API.TOKEN} to an API token');
+            }
+
+            var now = Math.floor(Date.now() / 1000),
+            	lookahead_days = Math.min(Math.max(parseInt(params.lookahead_days, 10) || 60, 1), 366),
+            	till = now + lookahead_days * SEC_PER_DAY,
+            	name_matches = getRegExp(params.name_matches, '.*'),
+            	name_not_matches = getRegExp(params.name_not_matches, '(?!)'),
+            	hosts = api('host.get', {
+            		output: ['hostid'],
+            		selectHostGroups: ['groupid'],
+            		filter: {host: [params.host]}
+            	}),
+            	hostid, groupids = [], maintenances = [], windows = [], active = null, next = null, busy_until = now, count = 0,
+            	i, j, maintenance, window_list;
+
+            if (hosts.length === 0) {
+            	fail('host "' + params.host + '" is not visible to the user of the API token');
+            }
+
+            hostid = hosts[0].hostid;
+
+            for (i = 0; i < hosts[0].hostgroups.length; i++) {
+            	groupids.push(hosts[0].hostgroups[i].groupid);
+            }
+
+            // Maintenances of the host's groups, or of any host in them (the host itself included).
+            if (groupids.length > 0) {
+            	maintenances = api('maintenance.get', {
+            		output: ['maintenanceid', 'name', 'maintenance_type', 'active_since', 'active_till'],
+            		groupids: groupids,
+            		selectHosts: ['hostid'],
+            		selectHostGroups: ['groupid'],
+            		selectTimeperiods: 'extend'
+            	});
+            }
+
+            for (i = 0; i < maintenances.length; i++) {
+            	maintenance = maintenances[i];
+
+            	if (!coversHost(maintenance, hostid, groupids) || !name_matches.test(maintenance.name)
+            			|| name_not_matches.test(maintenance.name)) {
+            		continue;
+            	}
+
+            	count++;
+            	window_list = getWindows(maintenance, now, till);
+
+            	for (j = 0; j < window_list.length; j++) {
+            		windows.push({
+            			start: window_list[j].start,
+            			end: window_list[j].end,
+            			name: maintenance.name,
+            			maintenanceid: maintenance.maintenanceid,
+            			maintenance_type: parseInt(maintenance.maintenance_type, 10)
+            		});
+            	}
+            }
+
+            windows.sort(function (a, b) {
+            	return (a.start - b.start) || (b.end - a.end) || (a.name < b.name ? -1 : (a.name > b.name ? 1 : 0));
+            });
+
+            // The next window is the first one that starts after the host has left the running maintenance,
+            // so back-to-back windows do not raise a reminder while the host is still in maintenance.
+            for (i = 0; i < windows.length; i++) {
+            	if (windows[i].start <= now) {
+            		if (active === null || windows[i].end > active.end) {
+            			active = windows[i];
+            		}
+
+            		busy_until = Math.max(busy_until, windows[i].end);
+            	}
+            	else if (active !== null && windows[i].start <= busy_until) {
+            		busy_until = Math.max(busy_until, windows[i].end);
+            	}
+            	else {
+            		next = windows[i];
+            		break;
+            	}
+            }
+
+            return JSON.stringify({
+            	clock: now,
+            	maintenances: count,
+            	active: active !== null ? 1 : 0,
+            	active_name: active !== null ? active.name : '',
+            	active_end: active !== null ? busy_until : 0,
+            	next_name: next !== null ? next.name : '',
+            	next_maintenanceid: next !== null ? next.maintenanceid : '',
+            	next_type: next !== null ? next.maintenance_type : -1,
+            	next_start: next !== null ? next.start : 0,
+            	next_end: next !== null ? next.end : 0,
+            	next_days: next !== null ? getDayNumber(next.start) - getDayNumber(now) : -1
+            });
+          timeout: 15s
+          description: 'Running and next maintenance window of the host, read from the Zabbix API (maintenances of the host and of its host groups). JSON for the dependent items.'
+          parameters:
+            - name: url
+              value: '{$PATCH.WINDOW.API.URL}'
+            - name: token
+              value: '{$PATCH.WINDOW.API.TOKEN}'
+            - name: host
+              value: '{HOST.HOST}'
+            - name: name_matches
+              value: '{$PATCH.WINDOW.NAME.MATCHES}'
+            - name: name_not_matches
+              value: '{$PATCH.WINDOW.NAME.NOT_MATCHES}'
+            - name: lookahead_days
+              value: '{$PATCH.WINDOW.LOOKAHEAD}'
+          tags:
+            - tag: component
+              value: patching
+        - uuid: d429489e288044ecabbd7ce4acbe9b50
+          name: 'Patch window: Days until next window'
+          type: DEPENDENT
+          key: patch.window.next.days
+          delay: '0'
+          history: 31d
+          trends: '0'
+          value_type: FLOAT
+          description: 'Calendar days from today to the start of the next patch window, in the time zone of the Zabbix server: 0 = today, 1 = tomorrow, -1 = no window within {$PATCH.WINDOW.LOOKAHEAD} days.'
+          valuemap:
+            name: 'Patch window day'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.next_days'
+          master_item:
+            key: patch.window.get
+          tags:
+            - tag: component
+              value: patching
+        - uuid: 770dd1cf5c774f11a844deca77cb88e2
+          name: 'Patch window: In patch window'
+          type: DEPENDENT
+          key: patch.window.active
+          delay: '0'
+          history: 31d
+          trends: '0'
+          description: 'Whether a patch window of the host is running now.'
+          valuemap:
+            name: 'Patch window state'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.active'
+          master_item:
+            key: patch.window.get
+          tags:
+            - tag: component
+              value: patching
+        - uuid: 1453695fb2bc4233ac9a0eb4484027f5
+          name: 'Patch window: Next window end'
+          type: DEPENDENT
+          key: patch.window.next.end
+          delay: '0'
+          history: 31d
+          trends: '0'
+          units: unixtime
+          description: 'End of the next patch window. 0 if there is none within {$PATCH.WINDOW.LOOKAHEAD} days.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.next_end'
+          master_item:
+            key: patch.window.get
+          tags:
+            - tag: component
+              value: patching
+        - uuid: 24ce866c45244b96ae4057a37d5ea43d
+          name: 'Patch window: Next window name'
+          type: DEPENDENT
+          key: patch.window.next.name
+          delay: '0'
+          history: 31d
+          value_type: CHAR
+          description: 'Name of the maintenance of the next patch window.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.next_name'
+          master_item:
+            key: patch.window.get
+          tags:
+            - tag: component
+              value: patching
+        - uuid: c70ca8e80af54a5ba8d6564ae187eee8
+          name: 'Patch window: Next window start'
+          type: DEPENDENT
+          key: patch.window.next.start
+          delay: '0'
+          history: 31d
+          trends: '0'
+          units: unixtime
+          description: 'Start of the next patch window. 0 if there is none within {$PATCH.WINDOW.LOOKAHEAD} days.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.next_start'
+          master_item:
+            key: patch.window.get
+          tags:
+            - tag: component
+              value: patching
+      macros:
+        - macro: '{$PATCH.WINDOW.INTERVAL}'
+          value: '15m'
+          description: 'How often the maintenance schedule is read from the Zabbix API.'
+        - macro: '{$PATCH.WINDOW.LOOKAHEAD}'
+          value: '60'
+          description: 'How many days ahead to look for the next patch window (1-366).'
+        - macro: '{$PATCH.WINDOW.NAME.MATCHES}'
+          value: '.*'
+          description: 'Regular expression (case-insensitive). Only maintenances with a matching name are patch windows.'
+        - macro: '{$PATCH.WINDOW.NAME.NOT_MATCHES}'
+          value: 'CHANGE_IF_NEEDED'
+          description: 'Regular expression (case-insensitive). Maintenances with a matching name are ignored.'
+      valuemaps:
+        - uuid: 79d5147a99ed4eafb1c1a405c8267d28
+          name: 'Patch window day'
+          mappings:
+            - value: '-1'
+              newvalue: 'No window scheduled'
+            - value: '0'
+              newvalue: Today
+            - value: '1'
+              newvalue: Tomorrow
+        - uuid: b30461843391419aa1a574941275d5b7
+          name: 'Patch window state'
+          mappings:
+            - value: '0'
+              newvalue: 'Not in patch window'
+            - value: '1'
+              newvalue: 'In patch window'
+  triggers:
+    - uuid: 2d113dc0b1764385b4064e376e51ce85
+      expression: 'last(/Patch window by Zabbix API/patch.window.next.days)=1 and last(/Patch window by Zabbix API/patch.window.next.start)>0 and length(last(/Patch window by Zabbix API/patch.window.next.name))>0'
+      name: 'Patch window starts tomorrow'
+      event_name: 'Patch window tomorrow: {ITEM.LASTVALUE3}'
+      opdata: 'Starts {ITEM.LASTVALUE2}'
+      priority: INFO
+      description: 'The next patch window of the host starts tomorrow (calendar of the Zabbix server). Check that planned changes, backups and people are ready. Resolves with the first check after midnight, when "Patch window starts today" takes over.'
+      manual_close: 'YES'
+      tags:
+        - tag: scope
+          value: notice
+    - uuid: 06f8f69ece3d4de4bcc2664d570474c9
+      expression: 'last(/Patch window by Zabbix API/patch.window.next.days)=0 and last(/Patch window by Zabbix API/patch.window.next.start)>now() and length(last(/Patch window by Zabbix API/patch.window.next.name))>0'
+      name: 'Patch window starts today'
+      event_name: 'Patch window today: {ITEM.LASTVALUE3}'
+      opdata: 'Starts {ITEM.LASTVALUE2}'
+      priority: WARNING
+      description: 'The next patch window of the host starts later today. Resolves when the window starts and the host enters maintenance.'
+      manual_close: 'YES'
+      tags:
+        - tag: scope
+          value: notice

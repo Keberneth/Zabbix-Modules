@@ -14,6 +14,7 @@ on:
       - 'Incident_timeline_graph/**'
       - 'NetBoxSync/**'
       - 'NetworkMap/**'
+      - 'Patch_Calendar/**'
       - 'sla_uptime_report/**'
       - 'Todays_Reminder/**'
       - 'TriggerCorrelation/**'
@@ -28,6 +29,7 @@ on:
       - 'Incident_timeline_graph/**'
       - 'NetBoxSync/**'
       - 'NetworkMap/**'
+      - 'Patch_Calendar/**'
       - 'sla_uptime_report/**'
       - 'Todays_Reminder/**'
       - 'TriggerCorrelation/**'
@@ -62,8 +64,8 @@ jobs:
         run: |
           fail=0
           for module in AI Branding Capacity_Planning Healthcheck Incident_timeline_graph \
-              NetBoxSync NetworkMap sla_uptime_report Todays_Reminder TriggerCorrelation \
-              veeam_backup_report; do
+              NetBoxSync NetworkMap Patch_Calendar sla_uptime_report Todays_Reminder \
+              TriggerCorrelation veeam_backup_report; do
             bad=$(find "$module" -name '*.php' -print0 | xargs -0 -n1 php -l 2>&1 \
               | grep -v 'No syntax errors' || true)
             if [ -n "$bad" ]; then
@@ -85,6 +87,10 @@ jobs:
         working-directory: AI
         run: php tests/security_regression.php
 
+      - name: Branding server name regressions
+        working-directory: Branding
+        run: php tests/ServerNameOverrideTest.php
+
       - name: Capacity Planning calculation regressions
         working-directory: Capacity_Planning
         run: php tests/CapacityPlanningMathTest.php
@@ -92,6 +98,23 @@ jobs:
       - name: Capacity Planning cache regressions
         working-directory: Capacity_Planning
         run: php tests/CapacityPlanningCacheTest.php
+
+      - name: Patch Calendar maintenance window regressions
+        working-directory: Patch_Calendar
+        run: php tests/MaintenanceScheduleTest.php
+
+      # The Script item's JavaScript must expand the same windows as the PHP code. One PHP version is enough.
+      - uses: actions/setup-node@v5
+        if: matrix.php == '8.4'
+        with:
+          node-version: '22'
+
+      - name: Patch Calendar Script item regressions
+        if: matrix.php == '8.4'
+        working-directory: Patch_Calendar
+        run: |
+          php tests/export_windows.php > "$RUNNER_TEMP/patch-windows.json"
+          node tests/PatchWindowScriptTest.cjs "$RUNNER_TEMP/patch-windows.json"
 
   ui:
     name: Capacity Planning Chromium UI

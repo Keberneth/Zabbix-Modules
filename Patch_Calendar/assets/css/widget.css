@@ -1,0 +1,615 @@
+/* Patch calendar widget. Light theme values first, dark themes override below. */
+
+.patch-calendar,
+.pc-hint {
+	--pc-border: #dfe4e7;
+	--pc-muted: #768d99;
+	--pc-shade: rgba(0, 0, 0, 0.03);
+	--pc-outside: rgba(0, 0, 0, 0.035);
+	--pc-accent: #0275b8;
+	--pc-accent-text: #ffffff;
+	--pc-alpha: 0.16;
+	--pc-alpha-strong: 0.32;
+	--pc-today-bg: rgba(2, 117, 184, 0.07);
+	--pc-active: #2f9f5f;
+	--pc-upcoming: #4f7cd1;
+	--pc-past: #8a959b;
+	--pc-reminder-today: #f2a33c;
+	--pc-reminder-tomorrow: #7499ff;
+}
+
+html[color-scheme="dark"] .patch-calendar,
+html[color-scheme="dark"] .pc-hint {
+	--pc-border: #383838;
+	--pc-muted: #999999;
+	--pc-shade: rgba(255, 255, 255, 0.025);
+	--pc-outside: rgba(0, 0, 0, 0.18);
+	--pc-accent: #4796c4;
+	--pc-alpha: 0.24;
+	--pc-alpha-strong: 0.42;
+	--pc-today-bg: rgba(71, 150, 196, 0.12);
+	--pc-active: #59db8f;
+	--pc-upcoming: #7499ff;
+	--pc-past: #777777;
+}
+
+/* Maintenance colors: a stable color per maintenance. */
+.pc-color-0 { --pc-rgb: 78, 121, 167; }
+.pc-color-1 { --pc-rgb: 242, 142, 43; }
+.pc-color-2 { --pc-rgb: 225, 87, 89; }
+.pc-color-3 { --pc-rgb: 118, 183, 178; }
+.pc-color-4 { --pc-rgb: 89, 161, 79; }
+.pc-color-5 { --pc-rgb: 237, 201, 72; }
+.pc-color-6 { --pc-rgb: 176, 122, 161; }
+.pc-color-7 { --pc-rgb: 255, 157, 167; }
+.pc-color-8 { --pc-rgb: 156, 117, 95; }
+.pc-color-9 { --pc-rgb: 23, 190, 207; }
+.pc-color-10 { --pc-rgb: 188, 189, 34; }
+.pc-color-11 { --pc-rgb: 110, 120, 225; }
+
+.patch-calendar {
+	container-type: inline-size;
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	min-height: 0;
+}
+
+/* Toolbar */
+
+.pc-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 10px;
+	padding: 2px 0 6px;
+}
+
+.pc-nav {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+}
+
+.pc-heading {
+	flex: 1 1 auto;
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.pc-title {
+	font-size: 14px;
+	font-weight: bold;
+}
+
+.pc-subtitle {
+	margin-left: 8px;
+	color: var(--pc-muted);
+}
+
+.pc-views {
+	display: flex;
+}
+
+.pc-views button {
+	height: 24px;
+	padding: 0 10px;
+	border: 1px solid var(--pc-border);
+	background: transparent;
+	color: inherit;
+	cursor: pointer;
+}
+
+.pc-views button + button {
+	border-left: 0;
+}
+
+.pc-views button:first-child {
+	border-radius: 2px 0 0 2px;
+}
+
+.pc-views button:last-child {
+	border-radius: 0 2px 2px 0;
+}
+
+.pc-views button:hover {
+	background: var(--pc-shade);
+}
+
+.pc-views button.pc-view-selected {
+	background: var(--pc-accent);
+	border-color: var(--pc-accent);
+	color: var(--pc-accent-text);
+	cursor: default;
+}
+
+.pc-body {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: auto;
+}
+
+/* Window elements (chips and entries) */
+
+.pc-chip,
+.pc-entry {
+	position: relative;
+	border-left: 3px solid rgb(var(--pc-rgb));
+	border-radius: 2px;
+	background: rgba(var(--pc-rgb), var(--pc-alpha));
+	cursor: pointer;
+}
+
+.pc-chip:hover,
+.pc-entry:hover {
+	background: rgba(var(--pc-rgb), var(--pc-alpha-strong));
+}
+
+/* Maintenance without data collection: hatched. */
+.pc-chip.pc-nodata,
+.pc-entry.pc-nodata {
+	background-image: repeating-linear-gradient(135deg, rgba(var(--pc-rgb), var(--pc-alpha)) 0 4px,
+		transparent 4px 8px);
+}
+
+.pc-chip.pc-active,
+.pc-entry.pc-active {
+	background-color: rgba(var(--pc-rgb), var(--pc-alpha-strong));
+	box-shadow: inset 0 0 0 1px rgb(var(--pc-rgb));
+}
+
+.pc-chip.pc-past,
+.pc-entry.pc-past {
+	opacity: 0.5;
+}
+
+.pc-chip.pc-continued,
+.pc-entry.pc-continued {
+	border-left-style: dotted;
+}
+
+/* Windows that start today or tomorrow, as raised by the template triggers. */
+.pc-soon::after {
+	content: '';
+	position: absolute;
+	top: 3px;
+	right: 3px;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--pc-reminder-tomorrow);
+}
+
+.pc-soon-today::after {
+	background: var(--pc-reminder-today);
+}
+
+.pc-hidden {
+	display: none !important;
+}
+
+/* Month view */
+
+.pc-month {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	min-height: 0;
+}
+
+.pc-month-row {
+	display: grid;
+	grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.pc-with-week-numbers .pc-month-row {
+	grid-template-columns: 26px repeat(7, minmax(0, 1fr));
+}
+
+.pc-month-head {
+	flex: none;
+	border-bottom: 1px solid var(--pc-border);
+}
+
+.pc-weekday {
+	padding: 2px 4px 3px;
+	color: var(--pc-muted);
+	font-size: 11px;
+	text-transform: uppercase;
+}
+
+.pc-month-weeks {
+	display: flex;
+	flex-direction: column;
+	flex: 1 1 auto;
+	min-height: 0;
+}
+
+.pc-month-weeks .pc-month-row {
+	flex: 1 1 0;
+	min-height: 46px;
+	border-bottom: 1px solid var(--pc-border);
+}
+
+.pc-week-number {
+	padding: 3px 0 0;
+	border-right: 1px solid var(--pc-border);
+	color: var(--pc-muted);
+	font-size: 10px;
+	text-align: center;
+}
+
+.pc-day {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	min-height: 0;
+	padding: 2px 3px 3px;
+	border-right: 1px solid var(--pc-border);
+	overflow: hidden;
+}
+
+.pc-month-row .pc-day:last-child {
+	border-right: 0;
+}
+
+.pc-day.pc-weekend {
+	background: var(--pc-shade);
+}
+
+.pc-day.pc-outside {
+	background: var(--pc-outside);
+}
+
+.pc-day.pc-outside .pc-day-head {
+	opacity: 0.5;
+}
+
+.pc-day.pc-today {
+	background: var(--pc-today-bg);
+}
+
+.pc-day-head {
+	flex: none;
+	height: 18px;
+	line-height: 18px;
+}
+
+.pc-day-number {
+	display: inline-block;
+	min-width: 18px;
+	padding: 0 3px;
+	border-radius: 9px;
+	text-align: center;
+	font-size: 11px;
+}
+
+.pc-today .pc-day-number {
+	background: var(--pc-accent);
+	color: var(--pc-accent-text);
+	font-weight: bold;
+}
+
+.pc-day-entries {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: hidden;
+}
+
+.pc-chip {
+	display: flex;
+	flex: none;
+	gap: 4px;
+	padding: 0 12px 0 3px;
+	font-size: 11px;
+	line-height: 16px;
+	white-space: nowrap;
+	overflow: hidden;
+}
+
+.pc-chip-time {
+	flex: none;
+	font-variant-numeric: tabular-nums;
+	opacity: 0.85;
+}
+
+.pc-active .pc-chip-time {
+	font-weight: bold;
+	opacity: 1;
+}
+
+.pc-chip-name {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.pc-more {
+	flex: none;
+	padding-left: 4px;
+	color: var(--pc-accent);
+	font-size: 11px;
+	line-height: 15px;
+	cursor: pointer;
+}
+
+.pc-more:hover {
+	text-decoration: underline;
+}
+
+/* Week view */
+
+.pc-week {
+	display: grid;
+	grid-template-columns: repeat(7, minmax(0, 1fr));
+	min-height: 100%;
+}
+
+.pc-week-day {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	border-right: 1px solid var(--pc-border);
+}
+
+.pc-week-day:last-child {
+	border-right: 0;
+}
+
+.pc-week-day.pc-weekend {
+	background: var(--pc-shade);
+}
+
+.pc-week-day.pc-today {
+	background: var(--pc-today-bg);
+}
+
+.pc-week-day-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: center;
+	gap: 5px;
+	padding: 3px 0 5px;
+	border-bottom: 1px solid var(--pc-border);
+}
+
+.pc-week-day-name {
+	color: var(--pc-muted);
+	font-size: 11px;
+	text-transform: uppercase;
+}
+
+.pc-week-day-number {
+	font-size: 15px;
+}
+
+.pc-today .pc-week-day-number {
+	color: var(--pc-accent);
+	font-weight: bold;
+}
+
+.pc-week-entries {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 4px;
+}
+
+.pc-week .pc-entry {
+	padding: 3px 12px 4px 5px;
+}
+
+.pc-entry-time {
+	font-size: 11px;
+	font-variant-numeric: tabular-nums;
+	font-weight: bold;
+}
+
+.pc-entry-name {
+	overflow-wrap: anywhere;
+}
+
+.pc-entry-scope {
+	color: var(--pc-muted);
+	font-size: 11px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Agenda view */
+
+.pc-agenda-day {
+	display: grid;
+	grid-template-columns: 96px minmax(0, 1fr);
+	gap: 10px;
+	padding: 6px 0;
+	border-bottom: 1px solid var(--pc-border);
+}
+
+.pc-agenda-day:last-child {
+	border-bottom: 0;
+}
+
+.pc-agenda-weekday {
+	font-weight: bold;
+}
+
+.pc-agenda-day.pc-today .pc-agenda-weekday {
+	color: var(--pc-accent);
+}
+
+.pc-agenda-date {
+	color: var(--pc-muted);
+	font-size: 11px;
+}
+
+.pc-agenda-entries {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.pc-agenda .pc-entry {
+	display: grid;
+	grid-template-columns: minmax(150px, max-content) minmax(0, 1fr) max-content;
+	align-items: center;
+	gap: 12px;
+	padding: 4px 16px 4px 8px;
+}
+
+.pc-entry-main {
+	min-width: 0;
+}
+
+.pc-agenda .pc-entry-name {
+	font-weight: bold;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.pc-entry-status {
+	color: var(--pc-muted);
+	font-size: 11px;
+	white-space: nowrap;
+}
+
+.pc-active .pc-entry-status {
+	color: var(--pc-active);
+	font-weight: bold;
+}
+
+.pc-empty {
+	padding: 24px 0;
+	color: var(--pc-muted);
+	text-align: center;
+}
+
+/* Narrow widgets */
+
+@container (max-width: 560px) {
+	.pc-subtitle {
+		display: none;
+	}
+
+	.pc-chip-time {
+		display: none;
+	}
+
+	.pc-agenda-day {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 4px;
+	}
+
+	.pc-agenda .pc-entry {
+		grid-template-columns: minmax(0, 1fr) max-content;
+	}
+
+	.pc-agenda .pc-entry-time {
+		grid-column: 1 / -1;
+	}
+}
+
+@container (max-width: 380px) {
+	.pc-views button {
+		padding: 0 6px;
+	}
+
+	.pc-with-week-numbers .pc-month-row {
+		grid-template-columns: repeat(7, minmax(0, 1fr));
+	}
+
+	.pc-week-number {
+		display: none;
+	}
+}
+
+/* Hint */
+
+.pc-hint {
+	max-width: 440px;
+	line-height: 1.5;
+}
+
+.pc-hint-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-bottom: 6px;
+}
+
+.pc-hint .pc-hint-name {
+	font-weight: bold;
+}
+
+.pc-swatch {
+	flex: none;
+	width: 10px;
+	height: 10px;
+	border-radius: 2px;
+	background: rgb(var(--pc-rgb));
+}
+
+.pc-badge {
+	padding: 0 6px;
+	border-radius: 8px;
+	color: #ffffff;
+	font-size: 10px;
+	line-height: 16px;
+	white-space: nowrap;
+}
+
+.pc-badge-active {
+	background: var(--pc-active);
+	color: #1f1f1f;
+}
+
+.pc-badge-upcoming {
+	background: var(--pc-upcoming);
+}
+
+.pc-badge-past {
+	background: var(--pc-past);
+}
+
+.pc-hint-rows {
+	display: grid;
+	grid-template-columns: max-content minmax(0, 1fr);
+	gap: 2px 12px;
+}
+
+.pc-hint-label {
+	color: var(--pc-muted);
+	white-space: nowrap;
+}
+
+.pc-hint-value {
+	overflow-wrap: anywhere;
+}
+
+.pc-hint-note {
+	color: var(--pc-muted);
+	font-style: italic;
+}
+
+.pc-hint-footer {
+	margin-top: 8px;
+}
+
+.pc-hint-day-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 220px;
+	margin-top: 4px;
+}
+
+.pc-hint-day-list .pc-chip {
+	cursor: default;
+}
