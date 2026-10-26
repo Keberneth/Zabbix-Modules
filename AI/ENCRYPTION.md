@@ -1,12 +1,15 @@
 # Secret storage, local vault references, and database encryption
 
-The AI module supports three secret-storage modes. Use them in this order of
-preference:
+The AI module supports three secret-storage modes:
 
-1. **Vault/secret reference (recommended):** the Zabbix database stores only an
-   `env:NAME` or `file:NAME` reference. The secret is supplied to PHP at runtime.
-2. **Encrypted inline secret:** the secret is stored as authenticated ciphertext
-   (`enc:v1:...`) in the Zabbix module configuration.
+1. **Encrypted inline secret (simple setup):** run the Linux helper in
+   [INSTALL.md](INSTALL.md), then enter the API key in Settings. The secret is
+   stored as authenticated ciphertext (`enc:v1:...`) in the Zabbix module
+   configuration. The master key stays outside the database and web root at
+   `/etc/zabbix-ai/master.key`, readable by PHP but writable only by root.
+2. **Vault/secret reference:** the Zabbix database stores only an `env:NAME` or
+   `file:NAME` reference. Use this when your deployment already supplies secrets
+   to PHP at runtime; no extra vault service is required.
 3. **Plaintext compatibility mode:** an explicitly warned, development-only
    fallback. It also governs whether pending confirmations, sensitive reads and
    bulk previews can run without an encryption key, and how their identity
@@ -42,7 +45,7 @@ server session ID, of which only a SHA-256 is written to the record. A modified
 record is refused with "The pending action was modified after it was staged."
 That mode is for isolated development systems only.
 
-## Recommended: keep credentials out of the database
+## Optional: keep credentials out of the database
 
 Every secret-reference field in **AI → Settings** accepts:
 
@@ -247,7 +250,26 @@ Configure it for any non-development deployment even when every long-lived
 credential uses a reference, so Read & Write actions, sensitive reads and bulk
 previews are staged as ciphertext.
 
-### Recommended master-key source: a protected runtime file
+### Simple master-key source: a protected durable file
+
+The setup helper creates `/etc/zabbix-ai/master.key` with 32 random bytes
+encoded as hex. Its directory is `root:<PHP-group> 0750`; the file is
+`root:<PHP-group> 0640`. Only this non-secret path goes in PHP-FPM configuration:
+
+```ini
+env[ZABBIX_AI_ENCRYPTION_KEY_FILE] = "/etc/zabbix-ai/master.key"
+```
+
+The helper preserves existing key bytes on every run. Back up the file in a
+protected or encrypted backup separate from database-only backups. Use the
+same file contents on all frontend nodes. It must not be inside the frontend
+document root or `ZABBIX_AI_SECRET_DIR`.
+
+This protects credentials in a database dump; a compromised PHP process or
+root account can still read the key needed for runtime decryption. Encryption
+does not remove plaintext from older database backups.
+
+### Advanced master-key source: materialize from an encrypted source
 
 Generate one long random key:
 
@@ -329,8 +351,8 @@ and enable:
 > Allow inline secrets to be read and saved as plaintext when encryption is
 > unavailable
 
-The first enable requires a separate risk acknowledgment. The page displays a
-permanent danger warning, and the before/after state is included in settings-
+The first enable requires a separate risk acknowledgment. The page displays an
+active-mode warning, and the before/after state is included in settings-
 change audit entries when module audit logging is enabled. It exposes inline
 provider keys/headers, Zabbix and NetBox tokens, and the webhook secret in the
 database, dumps, backups, and configuration exports.

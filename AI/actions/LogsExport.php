@@ -6,6 +6,7 @@ require_once __DIR__.'/../lib/bootstrap.php';
 
 use CController,
     CControllerResponseData,
+    CWebUser,
     Modules\AI\Lib\AuditLogger,
     Modules\AI\Lib\Config,
     Modules\AI\Lib\Util;
@@ -23,7 +24,7 @@ class LogsExport extends CController {
     }
 
     protected function checkPermissions(): bool {
-        return $this->getUserType() == USER_TYPE_SUPER_ADMIN;
+        return $this->getUserType() == USER_TYPE_SUPER_ADMIN && !CWebUser::isGuest();
     }
 
     protected function doAction(): void {

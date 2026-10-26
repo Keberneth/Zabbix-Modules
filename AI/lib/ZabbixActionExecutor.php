@@ -3191,6 +3191,23 @@ class ZabbixActionExecutor {
      *   - 'netbox_client' (NetBoxClient) Optional shared NetBox client. Interactive
      *     NetBox results are intersected with hosts visible through $zabbix_api.
      */
+    /**
+     * Execute a tool at a controller boundary where a returned failure must not
+     * be reported, formatted, or audited as a successful action. The legacy
+     * dispatch API still returns text for the read-tool conversation loop.
+     */
+    public static function executeChecked(string $tool_name, array $params, ZabbixApiClient $zabbix_api, array $context = []): string {
+        $result = self::execute($tool_name, $params, $zabbix_api, $context);
+        // Executors use "Error:" or "Error <operation>:" for rejected calls,
+        // including caught API failures. Only inspect the leading status, never
+        // occurrences inside successful reports or untrusted monitoring data.
+        if (preg_match('/^\s*Error(?:\s|:)/i', $result)) {
+            throw new RuntimeException(trim($result));
+        }
+
+        return $result;
+    }
+
     public static function execute(string $tool_name, array $params, ZabbixApiClient $zabbix_api, array $context = []): string {
         switch ($tool_name) {
             case 'get_problems':

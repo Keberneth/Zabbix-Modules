@@ -3,11 +3,13 @@
 namespace Modules\AI\Actions;
 
 require_once __DIR__.'/../lib/bootstrap.php';
+require_once __DIR__.'/../lib/SetupHealth.php';
 
 use CController,
     CControllerResponseData,
     Modules\AI\Lib\AuditLogger,
     Modules\AI\Lib\Config,
+    Modules\AI\Lib\SetupHealth,
     Modules\AI\Lib\ZabbixActionExecutor;
 
 class SettingsView extends CController {
@@ -25,7 +27,9 @@ class SettingsView extends CController {
     }
 
     protected function doAction(): void {
-        $config = Config::sanitizeForView(Config::get());
+        $raw_config = Config::get();
+        $health = SetupHealth::check($raw_config);
+        $config = Config::sanitizeForView($raw_config);
 
         AuditLogger::log($config, 'user_activity', [
             'event' => 'settings.view',
@@ -36,6 +40,7 @@ class SettingsView extends CController {
         $response = new CControllerResponseData([
             'title' => _('AI settings'),
             'config' => $config,
+            'health' => $health,
             'log_summary' => AuditLogger::summary($config),
             'permission_note' => AuditLogger::permissionNote(),
             'actions_catalog' => ZabbixActionExecutor::allTools()

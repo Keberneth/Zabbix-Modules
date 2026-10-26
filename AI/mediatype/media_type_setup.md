@@ -36,10 +36,16 @@ host/template scope guaranteed to be present for every event using this media
 type). Then choose one Zabbix macro type:
 
 - **Secret text:** enter the actual generated shared-secret value. Zabbix masks
-  it in the frontend and supplies the value to the webhook script.
+  it in the frontend and supplies the value to the webhook script. This is
+  display masking: the value is stored unencrypted in the Zabbix database.
 - **Vault:** enter a reference supported by the vault backend already configured
   for the Zabbix server. Zabbix—not this PHP module—resolves that reference before
   the webhook script runs.
+
+Use **Vault** when the sender-side secret must stay out of the Zabbix database.
+The module's encrypted inline setting protects its own stored copy; it does
+not encrypt a separate Zabbix secret-text macro. Keep the sender macro's vault
+reference and the module's `env:`/`file:` reference syntax separate.
 
 The resolved value sent by `{$AI.WEBHOOK.SECRET}` must exactly match the value
 resolved/stored on the module side. Do not put the module syntax
@@ -53,6 +59,10 @@ Import `mediatype/AI_Troubleshooter_mediatypes.yaml`, or paste
 
 - `ai_webhook_url` to the public/internal HTTPS `/ai-webhook` URL;
 - `shared_secret` to `{$AI.WEBHOOK.SECRET}`.
+
+Re-import the bundled media type when upgrading: its recovery/update macros
+give each delivery a stable identity, so a retry is distinct from a new event
+update. Keep those parameters along with the event parameters.
 
 Keep the supplied event parameters/macros unless your action uses a different
 event source. The script sends the shared secret in the
@@ -70,3 +80,10 @@ in the test dialog if that dialog does not expand the user macro.
 A successful delivery returns structured JSON and reports the number of posted
 comment chunks. Authentication failures indicate that the sender macro and the
 module-side expected secret do not resolve to the same value.
+
+Completed retries are acknowledged without a second AI request or duplicate
+comment. The default deduplication window is 24 hours. If a timeout leaves the
+outcome uncertain, inspect the event/audit log before a later retry; the module
+does not immediately repeat an operation that may already have succeeded.
+For multiple frontend nodes, share the state directory on storage supporting
+`flock`, or route this endpoint consistently to one node.

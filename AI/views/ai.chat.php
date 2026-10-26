@@ -56,6 +56,7 @@ ob_start();
     data-history-limit="<?= $h($data['history_limit'] ?? 12) ?>"
     data-has-zabbix-api="<?= $h(($data['has_zabbix_api'] ?? false) ? '1' : '0') ?>"
     data-can-post-event-comment="<?= $h(($data['can_post_event_comment'] ?? false) ? '1' : '0') ?>"
+    data-can-preview="<?= $h(($data['can_preview'] ?? false) ? '1' : '0') ?>"
     data-hosts-url="<?= $h($hosts_url) ?>"
     data-problems-url="<?= $h($problems_url) ?>"
     data-execute-url="<?= $h($execute_url) ?>"
@@ -71,7 +72,9 @@ ob_start();
             <p class="ai-muted">Conversation history stays in this browser tab. Sensitive values can be masked locally before they are sent to the provider when redaction is enabled.</p>
         </div>
         <div class="ai-header-actions">
-            <a class="btn" href="<?= $h($settings_url) ?>"><?= $h(_('Open settings')) ?></a>
+            <?php if (!empty($data['can_manage_settings'])): ?>
+                <a class="btn" href="<?= $h($settings_url) ?>"><?= $h(_('Open settings')) ?></a>
+            <?php endif; ?>
             <?php if (!empty($data['can_view_logs'])): ?>
                 <a class="btn" href="<?= $h($logs_url) ?>"><?= $h(_('Open logs')) ?></a>
             <?php endif; ?>
@@ -91,7 +94,7 @@ ob_start();
 
             <?php if (!$providers): ?>
                 <div class="ai-warning">
-                    <?= $h(_('No provider is configured yet. Open AI settings and add at least one provider.')) ?>
+                    <?= $h(!empty($data['can_manage_settings']) ? _('No provider is configured yet. Open AI settings and add at least one provider.') : _('No AI provider is configured yet. Contact your Zabbix administrator.')) ?>
                 </div>
             <?php endif; ?>
 
@@ -169,9 +172,15 @@ ob_start();
                 <label class="ai-label" for="ai-message"><?= $h(_('Message')) ?></label>
                 <textarea id="ai-message" class="ai-textarea ai-compose-box" rows="6" placeholder="<?= $h(_('Ask for troubleshooting help, log review guidance, escalation text, or the safest next step.')) ?>"></textarea>
                 <div class="ai-compose-actions">
+                    <?php if (!empty($data['can_preview'])): ?>
+                        <button type="button" class="btn-alt" id="ai-preview-button" <?= $providers ? '' : 'disabled' ?>><?= $h(_('Preview data')) ?></button>
+                    <?php endif; ?>
                     <button type="submit" class="btn" id="ai-send-button" <?= $providers ? '' : 'disabled' ?>><?= $h(_('Send')) ?></button>
                 </div>
             </form>
+            <?php if (!empty($data['can_preview'])): ?>
+                <div id="ai-data-preview" class="ai-data-preview-host" hidden></div>
+            <?php endif; ?>
         </section>
     </div>
 </div>

@@ -9,6 +9,7 @@ use CController,
     CWebUser,
     Modules\AI\Lib\AuditLogger,
     Modules\AI\Lib\Config,
+    Modules\AI\Lib\DataPreview,
     Modules\AI\Lib\NetBoxClient,
     Modules\AI\Lib\PendingActionStore,
     Modules\AI\Lib\PromptBuilder,
@@ -20,6 +21,8 @@ use CController,
 
 class ChatSend extends CController {
 
+    private bool $include_data_sent = false;
+
     protected function checkInput(): bool {
         return true;
     }
@@ -30,9 +33,18 @@ class ChatSend extends CController {
 
     protected function doAction(): void {
         $started_at = microtime(true);
+        DataPreview::start(false);
 
         try {
             $config = Config::get();
+            $preview_only = Util::truthy($_POST['preview_only'] ?? false);
+            $can_view_preview = DataPreview::canView($config, $this->getUserType(), CWebUser::isGuest());
+            if ($preview_only && !$can_view_preview) {
+                $this->respond(['ok' => false, 'error' => 'Data preview is not enabled for your account.'], 403);
+                return;
+            }
+            $this->include_data_sent = $can_view_preview && !$preview_only;
+            DataPreview::start($can_view_preview);
             $post = $_POST;
             $message = Util::cleanMultiline($post['message'] ?? '', 20000);
             $chat_session_id = Util::cleanId($post['chat_session_id'] ?? '', 'chat');
@@ -134,6 +146,7 @@ class ChatSend extends CController {
                     : $context_block;
                 $system_prompt .= "\n\nCurrent chat context:\n".$context_block_safe;
             }
+            DataPreview::setContext($context_block_safe ?? '');
 
             $actions_config = $config['zabbix_actions'] ?? [];
             $actions_enabled = Util::truthy($actions_config['enabled'] ?? false)
@@ -213,6 +226,20 @@ class ChatSend extends CController {
             $outbound_messages = $redactor !== null
                 ? $redactor->redactNonSystemMessages($messages, 'chat')
                 : $messages;
+
+            if ($preview_only) {
+                $snapshot = ProviderClient::previewChat(
+                    $active_provider,
+                    $outbound_messages,
+                    $native_tools,
+                    (float) ($config['chat']['temperature'] ?? 1.0)
+                );
+                if ($redactor !== null) {
+                    $redactor->save();
+                }
+                $this->respond(['ok' => true, 'data_preview' => $snapshot]);
+                return;
+            }
 
             if ($actions_enabled && $native_tools) {
                 $provider_response = ProviderClient::chatWithTools(
@@ -558,6 +585,7 @@ class ChatSend extends CController {
                     }
 
                     // Read tool: execute it for real.
+                    $read_failed = false;
                     try {
                         $tool_result = ZabbixActionExecutor::execute($tool_name, $tool_params, $zabbix_api, [
                             'config' => $config,
@@ -566,8 +594,12 @@ class ChatSend extends CController {
                         ]);
                     }
                     catch (\Throwable $e) {
+                        $read_failed = true;
                         $tool_result = 'Error executing '.$tool_name.': '.$e->getMessage();
                     }
+                    // Preserve failure text in the tool conversation, while
+                    // auditing rejected/caught reads with their actual status.
+                    $read_failed = $read_failed || preg_match('/^\s*Error(?:\s|:)/i', $tool_result) === 1;
 
                     // Tools that produce structured output (download links, embedded
                     // images) opt out of the AI re-formatting pass via a sentinel
@@ -589,9 +621,9 @@ class ChatSend extends CController {
                         }
 
                         AuditLogger::log($config, 'reads', [
-                            'event' => 'zabbix.read.executed',
+                            'event' => $read_failed ? 'zabbix.read.failed' : 'zabbix.read.executed',
                             'source' => 'ai.chat.send',
-                            'status' => 'ok',
+                            'status' => $read_failed ? 'error' : 'ok',
                             'tool' => $tool_name,
                             'provider' => $this->providerInfo($active_provider),
                             'security' => $this->securityInfo($redactor),
@@ -632,9 +664,9 @@ class ChatSend extends CController {
                     ];
 
                     AuditLogger::log($config, 'reads', [
-                        'event' => 'zabbix.read.executed',
+                        'event' => $read_failed ? 'zabbix.read.failed' : 'zabbix.read.executed',
                         'source' => 'ai.chat.send',
-                        'status' => 'ok',
+                        'status' => $read_failed ? 'error' : 'ok',
                         'tool' => $tool_name,
                         'provider' => $this->providerInfo($active_provider),
                         'security' => $this->securityInfo($redactor),
@@ -756,6 +788,9 @@ class ChatSend extends CController {
                 'ok' => false,
                 'error' => $e->getMessage()
             ], 400);
+        }
+        finally {
+            DataPreview::start(false);
         }
     }
 
@@ -893,8 +928,16 @@ class ChatSend extends CController {
     }
 
     private function respond(array $payload, int $http_status = 200): void {
+        if ($this->include_data_sent) {
+            $snapshot = DataPreview::snapshot();
+            if ($snapshot !== null) {
+                $payload['data_sent'] = $snapshot;
+            }
+        }
         http_response_code($http_status);
         header('Content-Type: application/json; charset=UTF-8');
+        header('Cache-Control: no-store, private');
+        header('Pragma: no-cache');
 
         $this->setResponse(
             (new CControllerResponseData([

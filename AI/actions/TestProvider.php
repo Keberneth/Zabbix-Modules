@@ -8,6 +8,7 @@ use CController,
     CControllerResponseData,
     Modules\AI\Lib\Config,
     Modules\AI\Lib\HttpClient,
+    Modules\AI\Lib\ProviderClient,
     Modules\AI\Lib\SecretReference,
     Modules\AI\Lib\Util;
 use RuntimeException;
@@ -32,6 +33,36 @@ class TestProvider extends CController {
             $endpoint = trim((string) ($provider['endpoint'] ?? ''));
             if ($endpoint !== '') {
                 Util::assertSafeProbeUrl($endpoint);
+            }
+
+            $test_mode = (string) ($_POST['test_mode'] ?? 'models');
+            if ($test_mode === 'capabilities') {
+                // Keep fresh inline test values request-local. Stored values
+                // remain subject to the normal encryption/reference policy.
+                $provider['api_key'] = Config::resolveSecret(
+                    $provider['api_key'] ?? '',
+                    $provider['api_key_env'] ?? '',
+                    !empty($provider['_allow_plaintext_secrets']) || !empty($provider['_api_key_is_fresh'])
+                );
+                $provider['headers_json'] = Config::resolveSecret(
+                    $provider['headers_json'] ?? '',
+                    $provider['headers_json_ref'] ?? '',
+                    !empty($provider['_allow_plaintext_secrets']) || !empty($provider['_headers_json_is_fresh'])
+                );
+                $provider['_secrets_resolved'] = true;
+                $capabilities = ProviderClient::testCapabilities($provider);
+                $this->respond([
+                    'ok' => true,
+                    'model' => $provider['model'],
+                    'capabilities' => $capabilities,
+                    'message' => $capabilities['chat']['ok'] && $capabilities['tools']['ok']
+                        ? _('Chat and native tool tests passed.')
+                        : _('Capability test completed. Review the results below.')
+                ]);
+                return;
+            }
+            if ($test_mode !== 'models') {
+                throw new RuntimeException('Unknown provider test mode.');
             }
 
             $type = strtolower(trim((string) ($provider['type'] ?? 'openai_compatible')));
@@ -77,6 +108,7 @@ class TestProvider extends CController {
         $verify_peer = array_key_exists('verify_peer', $post)
             ? Util::truthy($post['verify_peer'])
             : true;
+        $allow_insecure_http = Util::truthy($post['allow_insecure_http'] ?? false);
         $timeout = (int) ($post['timeout'] ?? 60);
         $headers_json = (string) ($post['headers_json'] ?? '');
         $headers_json_ref = trim((string) ($post['headers_json_ref'] ?? ''));
@@ -129,7 +161,8 @@ class TestProvider extends CController {
             && strtolower(trim((string) ($stored_provider['type'] ?? 'openai_compatible')))
                 === strtolower(trim($type))
             && trim((string) ($stored_provider['endpoint'] ?? '')) === trim($endpoint)
-            && Util::truthy($stored_provider['verify_peer'] ?? true) === $verify_peer;
+            && Util::truthy($stored_provider['verify_peer'] ?? true) === $verify_peer
+            && Util::truthy($stored_provider['allow_insecure_http'] ?? false) === $allow_insecure_http;
 
         if ($binding_matches) {
             if (!$api_key_is_fresh) {
@@ -181,9 +214,13 @@ class TestProvider extends CController {
             'id' => $id,
             'type' => $type,
             'endpoint' => $endpoint,
+            'model' => Util::cleanString($post['model'] ?? '', 255),
+            'temperature' => (float) ($post['temperature'] ?? -1),
+            'num_ctx' => max(0, min(262144, (int) ($post['num_ctx'] ?? 0))),
             'api_key' => $api_key,
             'api_key_env' => $api_key_env,
             'verify_peer' => $verify_peer,
+            'allow_insecure_http' => $allow_insecure_http,
             'timeout' => max(5, min(60, $timeout)),
             'headers_json' => $headers_json,
             'headers_json_ref' => $headers_json_ref,
@@ -222,7 +259,8 @@ class TestProvider extends CController {
         $response = HttpClient::expectSuccess('GET', $url, [
             'headers' => $headers,
             'timeout' => (int) $provider['timeout'],
-            'verify_peer' => !empty($provider['verify_peer'])
+            'verify_peer' => !empty($provider['verify_peer']),
+            'allow_insecure_http' => Util::truthy($provider['allow_insecure_http'] ?? false)
         ]);
 
         if (!is_array($response['json'])) {
@@ -260,7 +298,8 @@ class TestProvider extends CController {
         $response = HttpClient::expectSuccess('GET', $url, [
             'headers' => $headers,
             'timeout' => (int) $provider['timeout'],
-            'verify_peer' => !empty($provider['verify_peer'])
+            'verify_peer' => !empty($provider['verify_peer']),
+            'allow_insecure_http' => Util::truthy($provider['allow_insecure_http'] ?? false)
         ]);
 
         if (!is_array($response['json'])) {
@@ -303,7 +342,8 @@ class TestProvider extends CController {
         $response = HttpClient::expectSuccess('GET', $url, [
             'headers' => $headers,
             'timeout' => (int) $provider['timeout'],
-            'verify_peer' => !empty($provider['verify_peer'])
+            'verify_peer' => !empty($provider['verify_peer']),
+            'allow_insecure_http' => Util::truthy($provider['allow_insecure_http'] ?? false)
         ]);
 
         if (!is_array($response['json'])) {

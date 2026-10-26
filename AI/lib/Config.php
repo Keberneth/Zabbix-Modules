@@ -62,13 +62,14 @@ class Config {
                 'token' => '',
                 'token_env' => '',
                 'verify_peer' => true,
+                'allow_insecure_http' => false,
                 'timeout' => 10,
                 // Interactive NetBox records require a sensitive-read
                 // confirmation and are never inserted into the first prompt.
                 'auto_enrich_chat' => false
             ],
             'webhook' => [
-                'enabled' => true,
+                'enabled' => false,
                 'shared_secret' => '',
                 'shared_secret_env' => '',
                 // Secure by default: the webhook rejects calls unless a valid
@@ -82,9 +83,14 @@ class Config {
                 'comment_chunk_size' => 1900,
                 'skip_resolved' => true,
                 'include_netbox' => false,
-                'include_os_hint' => true
+                'include_os_hint' => true,
+                'dedup_ttl_seconds' => 86400,
+                'rate_limit_per_minute' => 30,
+                'max_concurrent_requests' => 2,
+                'max_body_bytes' => 65536
             ],
             'chat' => [
+                'data_preview_visibility' => 'off',
                 'max_history_messages' => 12,
                 'temperature' => 1.0,
                 'item_history_period_hours' => 24,
@@ -97,7 +103,7 @@ class Config {
                 'enabled' => true,
                 'strict_mode' => true,
                 'session_ttl_hours' => 12,
-                'state_path' => '/tmp/zabbix-ai-module/state',
+                'state_path' => '/var/lib/zabbix-ai/state',
                 'apply_to' => [
                     'chat' => true,
                     'webhook' => true,
@@ -106,6 +112,12 @@ class Config {
                     'action_formatting' => true
                 ],
                 'categories' => [
+                    'credentials' => true,
+                    'emails' => true,
+                    'accounts' => false,
+                    'mac_addresses' => false,
+                    'asset_identifiers' => false,
+                    'personal_paths' => false,
                     'zabbix_inventory' => true,
                     'inventory_ttl_seconds' => 300,
                     'hostnames' => false,
@@ -120,9 +132,9 @@ class Config {
                 'custom_rules' => []
             ],
             'logging' => [
-                'enabled' => false,
-                'path' => '/tmp/zabbix-ai-module/logs',
-                'archive_path' => '/tmp/zabbix-ai-module/archive',
+                'enabled' => true,
+                'path' => '/var/log/zabbix-ai',
+                'archive_path' => '/var/log/zabbix-ai/archive',
                 'archive_enabled' => true,
                 'compress_archives' => true,
                 'retention_days' => 30,
@@ -174,7 +186,7 @@ class Config {
                 'enabled' => true,
                 'ttl_seconds' => 3600,
                 'delete_after_download' => false,
-                'directory' => ''
+                'directory' => '/var/lib/zabbix-ai/reports'
             ]
         ];
     }
@@ -350,6 +362,7 @@ class Config {
             $endpoint = Util::cleanUrl($provider['endpoint'] ?? '');
             if ($endpoint !== '') {
                 Util::assertNoEmbeddedUrlCredentials($endpoint);
+                HttpClient::assertTransport($endpoint, Util::truthy($provider['allow_insecure_http'] ?? false));
             }
 
             $new_config['providers'][] = [
@@ -357,6 +370,7 @@ class Config {
                 'name' => Util::cleanString($provider['name'] ?? '', 128),
                 'type' => self::normalizeProviderType($provider['type'] ?? 'openai_compatible'),
                 'endpoint' => $endpoint,
+                'allow_insecure_http' => Util::truthy($provider['allow_insecure_http'] ?? false),
                 'model' => Util::cleanString($provider['model'] ?? '', 256),
                 'api_key' => $api_key,
                 // Retain the historical field name for config compatibility;
@@ -506,6 +520,7 @@ class Config {
             // interactive controller intentionally ignores this legacy flag.
             'auto_enrich_chat' => false,
             'url' => Util::cleanUrl($post['netbox']['url'] ?? ''),
+            'allow_insecure_http' => Util::truthy($post['netbox']['allow_insecure_http'] ?? false),
             'token' => $netbox_token,
             'token_env' => $netbox_token_reference,
             'verify_peer' => Util::truthy($post['netbox']['verify_peer'] ?? false),
@@ -513,6 +528,7 @@ class Config {
         ];
         if ($new_config['netbox']['url'] !== '') {
             Util::assertNoEmbeddedUrlCredentials($new_config['netbox']['url']);
+            HttpClient::assertTransport($new_config['netbox']['url'], $new_config['netbox']['allow_insecure_http']);
         }
 
         $current_webhook = $current_config['webhook'];
@@ -538,10 +554,16 @@ class Config {
             'comment_chunk_size' => Util::cleanInt($post['webhook']['comment_chunk_size'] ?? 1900, 1900, 200, 2000),
             'skip_resolved' => Util::truthy($post['webhook']['skip_resolved'] ?? false),
             'include_netbox' => Util::truthy($post['webhook']['include_netbox'] ?? false),
-            'include_os_hint' => Util::truthy($post['webhook']['include_os_hint'] ?? false)
+            'include_os_hint' => Util::truthy($post['webhook']['include_os_hint'] ?? false),
+            'dedup_ttl_seconds' => Util::cleanInt($post['webhook']['dedup_ttl_seconds'] ?? 86400, 86400, 300, 604800),
+            'rate_limit_per_minute' => Util::cleanInt($post['webhook']['rate_limit_per_minute'] ?? 30, 30, 1, 600),
+            'max_concurrent_requests' => Util::cleanInt($post['webhook']['max_concurrent_requests'] ?? 2, 2, 1, 20),
+            'max_body_bytes' => Util::cleanInt($post['webhook']['max_body_bytes'] ?? 65536, 65536, 4096, 1048576)
         ];
 
+        $preview_visibility = $post['chat']['data_preview_visibility'] ?? 'off';
         $new_config['chat'] = [
+            'data_preview_visibility' => in_array($preview_visibility, ['off', 'super_admin', 'all'], true) ? $preview_visibility : 'off',
             'max_history_messages' => Util::cleanInt($post['chat']['max_history_messages'] ?? 12, 12, 0, 50),
             'temperature' => Util::cleanFloat($post['chat']['temperature'] ?? 1.0, 1.0, 0, 2),
             'item_history_period_hours' => Util::cleanInt($post['chat']['item_history_period_hours'] ?? 24, 24, 1, 720),
@@ -549,7 +571,7 @@ class Config {
         ];
 
         $new_config['problem_inline'] = [
-            'auto_analyze' => Util::truthy($post['problem_inline']['auto_analyze'] ?? true)
+            'auto_analyze' => Util::truthy($post['problem_inline']['auto_analyze'] ?? false)
         ];
 
         $security = $post['security'] ?? [];
@@ -557,7 +579,7 @@ class Config {
             'enabled' => Util::truthy($security['enabled'] ?? false),
             'strict_mode' => Util::truthy($security['strict_mode'] ?? false),
             'session_ttl_hours' => Util::cleanInt($security['session_ttl_hours'] ?? 12, 12, 1, 720),
-            'state_path' => self::normalizePathOrDefault($security['state_path'] ?? '', '/tmp/zabbix-ai-module/state'),
+            'state_path' => self::normalizePathOrDefault($security['state_path'] ?? '', '/var/lib/zabbix-ai/state'),
             'apply_to' => [
                 'chat' => Util::truthy($security['apply_to']['chat'] ?? false),
                 'webhook' => Util::truthy($security['apply_to']['webhook'] ?? false),
@@ -566,6 +588,20 @@ class Config {
                 'action_formatting' => Util::truthy($security['apply_to']['action_formatting'] ?? false)
             ],
             'categories' => [
+                // Missing fields from older clients preserve the saved/default
+                // choice. The current form posts explicit 0 for unchecked boxes.
+                'credentials' => Util::truthy($security['categories']['credentials']
+                    ?? $current_config['security']['categories']['credentials'] ?? true),
+                'emails' => Util::truthy($security['categories']['emails']
+                    ?? $current_config['security']['categories']['emails'] ?? true),
+                'accounts' => Util::truthy($security['categories']['accounts']
+                    ?? $current_config['security']['categories']['accounts'] ?? false),
+                'mac_addresses' => Util::truthy($security['categories']['mac_addresses']
+                    ?? $current_config['security']['categories']['mac_addresses'] ?? false),
+                'asset_identifiers' => Util::truthy($security['categories']['asset_identifiers']
+                    ?? $current_config['security']['categories']['asset_identifiers'] ?? false),
+                'personal_paths' => Util::truthy($security['categories']['personal_paths']
+                    ?? $current_config['security']['categories']['personal_paths'] ?? false),
                 'zabbix_inventory' => Util::truthy($security['categories']['zabbix_inventory'] ?? false),
                 'inventory_ttl_seconds' => Util::cleanInt($security['categories']['inventory_ttl_seconds'] ?? 300, 300, 30, 86400),
                 'hostnames' => Util::truthy($security['categories']['hostnames'] ?? false),
@@ -583,8 +619,8 @@ class Config {
         $logging = $post['logging'] ?? [];
         $new_config['logging'] = [
             'enabled' => Util::truthy($logging['enabled'] ?? false),
-            'path' => self::normalizePathOrDefault($logging['path'] ?? '', '/tmp/zabbix-ai-module/logs'),
-            'archive_path' => self::normalizePathOrDefault($logging['archive_path'] ?? '', '/tmp/zabbix-ai-module/archive'),
+            'path' => self::normalizePathOrDefault($logging['path'] ?? '', '/var/log/zabbix-ai'),
+            'archive_path' => self::normalizePathOrDefault($logging['archive_path'] ?? '', '/var/log/zabbix-ai/archive'),
             'archive_enabled' => Util::truthy($logging['archive_enabled'] ?? false),
             'compress_archives' => Util::truthy($logging['compress_archives'] ?? false),
             'retention_days' => Util::cleanInt($logging['retention_days'] ?? 30, 30, 1, 3650),
@@ -844,6 +880,7 @@ class Config {
             'endpoint' => $endpoint,
             'model' => (string) ($provider['model'] ?? ''),
             'verify_peer' => Util::truthy($provider['verify_peer'] ?? true),
+            'allow_insecure_http' => Util::truthy($provider['allow_insecure_http'] ?? false),
             // Server-only opaque digest: it binds gateway-routing headers and
             // API identity without displaying or persisting their plaintext in
             // the browser/audit preview.

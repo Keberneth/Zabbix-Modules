@@ -584,12 +584,25 @@
             return;
         }
 
+        var testMode = button.getAttribute('data-test-mode') || 'models';
+        var selectedModel = row.querySelector('.ai-provider-model-input');
+        if (testMode === 'capabilities' && (!selectedModel || !selectedModel.value.trim())) {
+            setProviderTestStatus(row, 'Select a model before testing chat and native tools.', 'error');
+            return;
+        }
+
         var originalText = button.textContent;
-        button.disabled = true;
+        var testButtons = row.querySelectorAll('[data-test-provider]');
+        var previousDisabled = [];
+        for (var i = 0; i < testButtons.length; i++) {
+            previousDisabled.push(testButtons[i].disabled);
+            testButtons[i].disabled = true;
+        }
         button.textContent = 'Testing…';
-        setProviderTestStatus(row, 'Connecting…', null);
+        setProviderTestStatus(row, testMode === 'capabilities' ? 'Testing chat and native tools…' : 'Connecting…', null);
 
         var payload = buildProviderTestPayload(row);
+        payload.append('test_mode', testMode);
 
         // Zabbix enforces CSRF on POST endpoints; attach the per-action token
         // exposed by the view via data-* attributes.
@@ -628,6 +641,16 @@
             })
             .then(function (data) {
                 if (data && data.ok) {
+                    if (testMode === 'capabilities') {
+                        var capabilities = data.capabilities || {};
+                        var chat = capabilities.chat || {};
+                        var tools = capabilities.tools || {};
+                        var message = 'Chat: ' + (chat.ok ? 'Passed. ' : 'Failed. ') + (chat.message || '')
+                            + ' | Native tools: ' + (tools.ok ? 'Passed. ' : (tools.skipped ? 'Not tested. ' : 'Not confirmed. '))
+                            + (tools.message || '');
+                        setProviderTestStatus(row, message, chat.ok && tools.ok ? 'ok' : 'warn');
+                        return;
+                    }
                     var models = Array.isArray(data.models) ? data.models : [];
                     populateModelDatalist(row, models);
                     setProviderTestStatus(row, data.message || 'Connection succeeded.', 'ok');
@@ -647,7 +670,9 @@
                 setProviderTestStatus(row, 'Test failed: ' + (msg || 'unknown error'), 'error');
             })
             .finally(function () {
-                button.disabled = false;
+                for (var i = 0; i < testButtons.length; i++) {
+                    testButtons[i].disabled = previousDisabled[i];
+                }
                 button.textContent = originalText;
             });
     }

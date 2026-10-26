@@ -4,7 +4,12 @@ namespace Modules\AI\Lib;
 
 use RuntimeException;
 
+require_once __DIR__.'/CredentialMasker.php';
+require_once __DIR__.'/IdentityMasker.php';
+
 class Redactor {
+
+    private const PRESET_TYPES = ['email', 'account', 'mac', 'asset', 'personal_path'];
 
     private const COMMON_TLDS = [
         'com', 'net', 'org', 'edu', 'gov', 'mil', 'io', 'ai', 'app', 'dev', 'cloud', 'local', 'lan', 'internal',
@@ -168,6 +173,67 @@ class Redactor {
             return $text;
         }
 
+        // Credentials must be removed before any reversible alias can retain them.
+        $text = $this->removeCredentials($text);
+        $protected = [];
+        $originals = [];
+        do {
+            $marker = '__AI_PRESET_'.bin2hex(random_bytes(12)).'_';
+        } while (strpos($text, $marker) !== false);
+        $protect = static function(string $alias, string $original) use (&$protected, &$originals, $marker): string {
+            $token = $marker.count($protected).'__';
+            $protected[$token] = $alias;
+            $originals[$token] = $original;
+            return $token;
+        };
+
+        // Already-rendered aliases must survive another pass through domain,
+        // hostname and custom rules, including aliases loaded from session state.
+        foreach (Util::sortByLengthDesc(array_keys($this->state['reverse'] ?? [])) as $alias) {
+            $original = (string) $this->state['reverse'][$alias];
+            if (in_array($this->state['meta'][$original]['type'] ?? '', self::PRESET_TYPES, true)) {
+                $token = $protect($alias, $original);
+                $text = preg_replace_callback(
+                    '~'.self::BOUNDARY_BEFORE.preg_quote($alias, '~').self::BOUNDARY_AFTER.'~u',
+                    static fn() => $token, $text
+                );
+                if ($text === null) {
+                    throw new RuntimeException('Built-in identity masking could not process this text.');
+                }
+            }
+        }
+        $text = IdentityMasker::redact($text, $this->config['security']['categories'],
+            function(string $original, string $type, string $prefix = '') use ($protect, &$protected, &$originals): string {
+                if (isset($protected[$original])) {
+                    return $original;
+                }
+                $original = strtr($original, $originals);
+                $alias = $this->presetAlias($original, $type, $prefix);
+                $this->bumpStat($type);
+                return $protect($alias, $original);
+            });
+
+        // Keep complete preset aliases atomic. Domain masking must not turn only
+        // the domain of an email alias into another, unrestorable alias.
+        $parts = preg_split('~('.preg_quote($marker, '~').'\d+__)~', $text, -1, PREG_SPLIT_DELIM_CAPTURE);
+        if ($parts === false) {
+            throw new RuntimeException('Built-in identity masking could not process this text.');
+        }
+        foreach ($parts as &$part) {
+            if (isset($protected[$part])) {
+                $part = $protected[$part];
+            }
+            elseif ($part !== '') {
+                $part = $this->redactLegacyText($part);
+            }
+        }
+        unset($part);
+        $text = $this->removeCredentials(implode('', $parts));
+        $this->assertNoKnownLeaks($text);
+        return $text;
+    }
+
+    private function redactLegacyText(string $text): string {
         // Apply any existing mappings first so aliasing stays stable across requests.
         $text = $this->applyExistingForwardMappings($text);
 
@@ -184,10 +250,74 @@ class Redactor {
         $text = $this->applyHostnameRedaction($text);
         $text = $this->applyFqdnRedaction($text);
 
-        $this->assertNoKnownLeaks($text);
         $this->assertCustomRulesApplied();
 
         return $text;
+    }
+
+    private function presetAlias(string $original, string $type, string $prefix): string {
+        if ($this->isAliasValue($original)) {
+            return $original;
+        }
+        if (isset($this->state['forward'][$original])) {
+            return (string) $this->state['forward'][$original];
+        }
+        if ($type === 'mac') {
+            $canonical = strtolower(str_replace([':', '-', '.'], '', $original));
+            foreach ($this->state['meta'] ?? [] as $value => $meta) {
+                if (($meta['type'] ?? '') === 'mac'
+                        && strtolower(str_replace([':', '-', '.'], '', (string) $value)) === $canonical) {
+                    return (string) $meta['alias'];
+                }
+            }
+        }
+        $formats = [
+            'email' => ['ai-person-', '@example.invalid'],
+            'account' => ['ai-account-', ''],
+            'mac' => ['ai-mac-', ''],
+            'asset' => ['ai-asset-', ''],
+            'personal_path' => ['ai-user-', '']
+        ];
+        [$alias_prefix, $suffix] = $formats[$type];
+        return $this->registerMapping($original,
+            $prefix.$this->generateSequentialAlias($type, $alias_prefix, $suffix), $type, $suffix);
+    }
+
+    private function removeCredentials(string $text): string {
+        if (!Util::truthy($this->config['security']['categories']['credentials'] ?? true)) {
+            return $text;
+        }
+        $result = CredentialMasker::redact($text);
+        $this->stats['credentials'] = ($this->stats['credentials'] ?? 0) + $result['count'];
+        $this->stats['total'] += $result['count'];
+        $secrets = array_values(array_filter($result['secrets'], static fn($value) => $value !== '' && $value !== '[REDACTED]'));
+        if ($secrets) {
+            // Remove repeated standalone copies learned from credential fields,
+            // too. Protect the marker itself and preserve unrelated word parts.
+            $pattern = '~(?<![\pL\pN_])(?:'.implode('|', array_map(
+                static fn($value) => preg_quote($value, '~'), Util::sortByLengthDesc(array_unique($secrets))
+            )).')(?![\pL\pN_])~u';
+            $parts = explode('[REDACTED]', $result['text']);
+            foreach ($parts as &$part) {
+                $part = preg_replace_callback($pattern, static fn() => '[REDACTED]', $part);
+                if ($part === null) {
+                    throw new RuntimeException('Built-in credential masking could not process this text.');
+                }
+            }
+            unset($part);
+            $result['text'] = implode('[REDACTED]', $parts);
+            // An older session/custom rule may already have mapped a credential.
+            // Forget it rather than restoring it in a later answer or log export.
+            foreach ($this->state['forward'] ?? [] as $original => $alias) {
+                foreach ($secrets as $secret) {
+                    if (strpos((string) $original, $secret) !== false) {
+                        unset($this->state['forward'][$original], $this->state['reverse'][$alias], $this->state['meta'][$original]);
+                        break;
+                    }
+                }
+            }
+        }
+        return $result['text'];
     }
 
     /**
@@ -728,6 +858,12 @@ class Redactor {
             }
 
             $type = $this->state['meta'][$original]['type'] ?? '';
+
+            // These detectors are contextual (a username/path/serial label).
+            // Global replacement would also mask ordinary words and error codes.
+            if (in_array($type, self::PRESET_TYPES, true)) {
+                continue;
+            }
 
             // Custom rules are substring-matched by their own pass, so their
             // re-application keeps the same substring semantics.
@@ -1577,6 +1713,13 @@ class Redactor {
             }
 
             $type = $this->state['meta'][$original]['type'] ?? '';
+
+            // Presets re-check their own formats and labelled fields on every
+            // pass and fail closed on detector errors. A bare "root" elsewhere
+            // is not a missed username merely because username=root was masked.
+            if (in_array($type, self::PRESET_TYPES, true)) {
+                continue;
+            }
 
             if ($type === 'hostname' || $type === 'hostname_partial' || $type === 'service') {
                 // Hostname and service tokens are matched with the same

@@ -3,8 +3,8 @@
 A self-contained Zabbix frontend module that adds:
 
 - **Monitoring > AI > Chat** for operator chat inside Zabbix
-- **Monitoring > AI > Settings** for provider, instruction, secret, privacy, logging and integration management
-- **Monitoring > AI > Logs** for local audit log review
+- **Monitoring > AI > Settings** for provider, instruction, secret, privacy, logging and integration management (Super Admin only)
+- **Monitoring > AI > Logs** for local audit log review (Super Admin only)
 - **Inline AI buttons on the Problems page** with a side-drawer chat for instant problem analysis
 - **AI-powered Zabbix actions** via natural language (query problems, create maintenance, modify triggers, manage host groups, etc.)
 - **`/ai-webhook`** as a standalone webhook endpoint for problem enrichment and AI-generated guidance
@@ -67,11 +67,51 @@ A self-contained Zabbix frontend module that adds:
 - **AI-powered Zabbix actions**: ask questions or give commands in natural language
 - Full conversation transfer from the problem drawer via localStorage bridge
 
+### AI data preview
+
+An optional preview shows a filtered view of provider data after outbound redaction, before
+the initial AI request. Preparing it does not call the model or execute AI
+tools. After sending, the chat can show the request bodies captured for that
+turn, including later tool-result requests. The initial preview cannot predict
+those later requests.
+
+A Super Admin controls **Data preview visibility** under **AI Settings > Chat**:
+off (default), Super Admin only, or all authenticated
+users with module access. Provider credentials, HTTP headers, administrator
+system instructions, private reference links and tool definitions are excluded.
+The display is a filtered view of the data, with masked runtime context shown
+separately. Preview access does not grant access to additional Zabbix objects
+or tools.
+
+Preview snapshots stay in the current page's memory and are not added to chat
+history, browser storage, reports or preview files. Existing audit-log settings
+continue to govern logging of actual requests independently. Request status
+distinguishes a prepared preview or attempted send from a completed send;
+oversized snapshots are explicitly marked as truncated.
+
 ### Chat and AI Security
 - **Replaces sensitive values (hostnames, IPs, domains, URLs, OS names) with safe aliases before sending data to the AI provider. When the AI responds, aliases are restored locally so you see the real values.**
 - Example: prd-web-001 becomes ai-host-001 outbound. The AI works with the alias. When the reply comes back, ai-host-001 is replaced with prd-web-001 before you see it.
 - An FQDN that belongs to a known host keeps the correlation: prd-web-001.corp.example.net becomes ai-host-001.example (same alias number as the host), while unrelated domains become ai-domain-001.example.
 - More information and setup is found in Security / redaction settings in the module
+
+The **Replace these categories before send** settings also include:
+
+| Category | Default | Example |
+|---|---|---|
+| Passwords and tokens | On | Recognized credentials become `[REDACTED]` |
+| Email addresses | On | `alice@example.com` → `ai-person-001@example.invalid` |
+| User and account names | Off | `user=alice` → `user=ai-account-001` |
+| MAC addresses | Off | `00:11:22:33:44:55` → `ai-mac-001` |
+| Serial numbers and asset tags | Off | Recognized identifier fields → `ai-asset-001` |
+| Personal folder names | Off | `/home/alice/logs` → `/home/ai-user-001/logs` |
+
+Passwords and tokens are removed without storing their values in alias state
+or restoring them in replies. The other categories use consistent, locally
+restorable aliases. These controls follow the enabled redaction channels;
+recognition is pattern-based, so custom rules remain useful for site-specific
+formats. Previously saved choices are preserved when an older settings client
+omits the new fields.
 
 ### AI-powered Zabbix actions
 
@@ -170,18 +210,23 @@ You can add/remove/manage:
 
 ## Installation
 
-See `INSTALL.md` for detailed step-by-step instructions.
+See [INSTALL.md](INSTALL.md) for the setup helper and platform details.
 
 Quick summary:
 
 1. Copy the `AI` directory into your Zabbix modules folder (e.g. `/usr/share/zabbix/modules/`)
-2. Set ownership and permissions
-3. Configure SELinux if applicable
-4. **Create writable directories** for redaction state and logging (see `INSTALL.md` section 6)
-5. Configure vault/secret references. Basic chat can run with `env:NAME`/`file:NAME` credentials alone; set `ZABBIX_AI_ENCRYPTION_KEY_FILE` (or the legacy direct key) on every PHP frontend node for any production deployment, so inline secrets and staged confirmations are encrypted at rest. For isolated development, the warned **Allow inline secrets…** option in AI Settings (or `ZABBIX_AI_ALLOW_PLAINTEXT_SECRETS=1`) runs the module with no key — see `ENCRYPTION.md`
-6. In Zabbix frontend: Administration > General > Modules > Scan directory > Enable AI
-7. Open Monitoring > AI > Settings and configure at least one provider
-8. **Enable logging** in Settings > Logging if you want audit logs (disabled by default; payload bodies are also off by default)
+2. Run `sudo bash AI/bin/setup.sh --fpm-pool-config <your-pool.conf> --apply-fpm` from the parent directory. It creates runtime directories and a protected `/etc/zabbix-ai/master.key`, without replacing an existing key. Use `--dry-run` first to review the plan.
+3. Apply SELinux labels if needed, validate the PHP-FPM configuration and reload the serving pool.
+4. In Zabbix: Administration > General > Modules > Scan directory > Enable AI.
+5. As Super Admin, open Monitoring > AI > Settings, add a provider/key and save. Reopen Settings for automatic setup checks.
+6. Use **Test connection** and, for actions, **Test model and tools**. Start in Read only mode; interactive chat uses the signed-in user's permissions without a separate service token.
+
+The master key protects inline credentials and pending confirmations at rest.
+Back it up securely and use the same key on every frontend node. Optional
+`env:NAME`/`file:NAME` references and explicitly approved plaintext compatibility
+mode remain supported; see [ENCRYPTION.md](ENCRYPTION.md). New installations
+enable audit metadata with message payloads/mappings off; existing settings are
+preserved.
 
 ## Recommended initial configuration
 
@@ -192,10 +237,12 @@ For OpenAI-compatible APIs:
 - **Type:** `openai_compatible`
 - **Endpoint:** Leave blank for `https://api.openai.com/v1` (or set a custom endpoint)
 - **Model:** e.g. `gpt-4.1-mini`
-- **API key:** preferably use an `env:NAME` or `file:NAME` vault/secret reference; inline values are encrypted in the database
+- **API key:** enter the key after running setup; it is encrypted in the database. An `env:NAME` or `file:NAME` secret reference is an optional alternative.
 - **Temperature:** Leave blank to use global default, or set per-provider (0-2)
 - **Max tokens:** Leave blank for provider default, or set a specific limit
 - **Test connection:** Click the button on each provider row to verify connectivity. On success, the model field becomes an autocomplete populated with the provider's available models. Picking a model that requires the default temperature (e.g. GPT-5, o1/o3/o4 series) auto-sets temperature to 1.
+- **Test model and tools:** sends two small synthetic requests to verify chat and native tool calling for the selected model. Listing models alone does not verify these capabilities.
+- **HTTP exception:** HTTPS is the default. A Super Admin can allow HTTP per provider or for NetBox when an internal endpoint requires it; that connection is unencrypted.
 
 For Ollama:
 
@@ -209,7 +256,7 @@ For Anthropic (Claude):
 - **Type:** `anthropic`
 - **Endpoint:** Leave blank for `https://api.anthropic.com` (or set a custom URL)
 - **Model:** e.g. `claude-sonnet-4-20250514`
-- **API key:** preferably use an `env:NAME` or `file:NAME` vault/secret reference
+- **API key:** enter the key for encrypted database storage, or use an `env:NAME` or `file:NAME` reference
 - **Max tokens:** defaults to 4096 if not set
 
 ### 2. Zabbix API
@@ -279,6 +326,12 @@ https://your-zabbix-frontend/ai-webhook
 
 Configure the web-server mapping in `INSTALL.md` before importing the media type. The endpoint does not need a Zabbix frontend session and must be protected with the shared secret (required by default). Do not enable the Zabbix Guest user or grant Guest access to this module for webhook delivery.
 
+Webhook handling is opt-in for new installations; existing settings are
+preserved. Delivery deduplication, rate/concurrency limits and bounded request
+sizes protect automated calls. Re-import the bundled media type on upgrade
+for recovery/update delivery identities. See the installation guide for
+uncertain failures and multi-frontend storage requirements.
+
 ## Suggested media type wiring
 
 An example Zabbix webhook script is included in:
@@ -308,7 +361,7 @@ The module accepts either:
 
 ## Security notes
 
-- Prefer **`env:NAME` or confined `file:NAME` vault/secret references** over storing credentials in module config. Inline values are encrypted with the deployment key; the warned plaintext setting is for isolated development only. That setting now also covers keyless confirmations, pending writes, sensitive reads and bulk previews.
+- Inline credentials are encrypted with the deployment key. Optional **`env:NAME` or confined `file:NAME` secret references** keep values out of the database. Explicit plaintext compatibility mode also supports keyless confirmations, pending writes, sensitive reads and bulk previews, without encryption at rest.
 - Enable TLS verification unless you have a specific internal reason not to.
 - The webhook endpoint does **not** require a logged-in Zabbix UI session, so use a shared secret if you expose it beyond localhost/internal networks.
 - Write actions are protected by multiple layers: settings mode, per-category permissions, user role checks, server-side pending action storage (encrypted when a key is configured), deterministic target/value previews, and mandatory user confirmation. Generic AI-authored trigger-expression creation or editing is intentionally unavailable; use Zabbix directly for arbitrary expressions.
@@ -324,17 +377,17 @@ The module accepts either:
 - No chat persistence by design
 - No external FastAPI service required
 - The module does **not** create any new Zabbix DB tables
-- Local redaction state and pending confirmations (writes, sensitive reads and bulk previews) are stored as files under the configured state path (default `/tmp/zabbix-ai-module/state`); they are encrypted when a key is configured and readable plaintext under compatibility mode, so protect that path accordingly
-- Local logs are stored as JSONL files under the configured log path (default `/tmp/zabbix-ai-module/logs`) with optional archive path (default `/tmp/zabbix-ai-module/archive`)
-- **Logging is disabled by default.** Enable it in Settings > Logging after setting up writable directories.
-- **Writable directories must exist and be accessible by the web server process.** On systems with `PrivateTmp=yes` (common on RHEL/systemd), the default `/tmp` paths may not work. See `INSTALL.md` section 6 for setup instructions.
+- Local redaction state and pending confirmations (writes, sensitive reads and bulk previews) use the configured state path (new-install default `/var/lib/zabbix-ai/state`); they are encrypted when a key is configured and readable plaintext under compatibility mode. Reports default to `/var/lib/zabbix-ai/reports`.
+- Local JSONL logs default to `/var/log/zabbix-ai`, with archives in `/var/log/zabbix-ai/archive`. Existing saved paths are preserved on upgrade.
+- **New installations enable audit metadata by default**, with payloads and alias mappings off. Existing saved logging choices are preserved.
+- **Runtime directories must be writable by PHP.** The setup helper creates them; Settings reports configuration and access problems. Keep module code read-only.
 - AI-powered Zabbix actions require a provider/model that implements native structured tool calling. JSON-looking model prose is treated only as text and never executed. More capable tool-capable models generally produce better results.
 - Item history fetching uses the Zabbix `history.get` API and auto-detects the correct history type (numeric float, unsigned, string, text, or log).
 
 ## Quick webhook smoke test
 
 ```bash
-curl -k -X POST \
+curl -X POST \
   'https://your-zabbix-frontend/ai-webhook' \
   -H 'Content-Type: application/json' \
   -H 'X-AI-Webhook-Secret: your-shared-secret' \

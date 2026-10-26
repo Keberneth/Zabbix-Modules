@@ -145,6 +145,21 @@ try {
         event_url: params.event_url || ''
     };
 
+    // Stable delivery context keeps retries idempotent while distinguishing
+    // problem, recovery and individual update notifications.
+    [
+        'event_source', 'event_object', 'recovery_eventid', 'event_update_status',
+        'event_update_timestamp', 'event_update_user', 'event_update_action', 'event_update_message',
+        'delivery_id'
+    ].forEach(function (name) {
+        var field = String(params[name] || '').trim();
+        if (field !== '' && !isUnresolvedMacro(field)) {
+            body[name] = field;
+        }
+    });
+    body.delivery_type = body.event_update_status === '1' ? 'update'
+        : (String(body.event_value) === '0' ? 'recovery' : 'problem');
+
     var tags = normalizeTags(params);
     if (!(Array.isArray(tags) && tags.length === 0)) {
         body.event_tags = tags;

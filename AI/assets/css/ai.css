@@ -1511,6 +1511,68 @@ html[theme="hc-dark"] .ai-md .ai-link-btn:focus,
     display: none;
 }
 
+/* Optional payload inspection. Content is rendered as inert, wrapping text. */
+.ai-data-preview-host[hidden] {
+    display: none !important;
+}
+
+.ai-data-preview {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--ai-border, #cfd8dc);
+    border-radius: 4px;
+    background: var(--ai-bg-subtle, transparent);
+    color: inherit;
+    overflow-wrap: anywhere;
+}
+
+.ai-data-preview summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.ai-data-preview summary:focus-visible {
+    outline: 2px solid #2e7dd1;
+    outline-offset: 3px;
+}
+
+.ai-data-preview-notice {
+    margin: 10px 0;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.ai-data-preview-request {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--ai-border, #cfd8dc);
+}
+
+.ai-data-preview h4 {
+    margin: 12px 0 5px;
+    font-size: 12px;
+}
+
+.ai-data-preview pre {
+    margin: 0;
+    padding: 8px;
+    max-height: 260px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    background: var(--ai-bg-accent, rgba(127, 127, 127, 0.08));
+    color: inherit;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.ai-drawer-data-preview {
+    flex-shrink: 0;
+    max-height: 40vh;
+    overflow-y: auto;
+    padding: 0 12px 8px;
+}
+
 #ai-settings-form[data-active-tab="providers"] .ai-tab-section[data-tab="providers"],
 #ai-settings-form[data-active-tab="enrichment"] .ai-tab-section[data-tab="enrichment"],
 #ai-settings-form[data-active-tab="zabbix"] .ai-tab-section[data-tab="zabbix"],

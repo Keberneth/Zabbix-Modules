@@ -15,16 +15,18 @@ class Module extends CModule {
             return;
         }
 
+        $items = [(new CMenuItem(_('Chat')))->setAction('ai.chat')];
+        if ((int) (CWebUser::$data['type'] ?? 0) === USER_TYPE_SUPER_ADMIN) {
+            $items[] = (new CMenuItem(_('Settings')))->setAction('ai.settings');
+            $items[] = (new CMenuItem(_('Logs')))->setAction('ai.logs');
+        }
+
         APP::Component()->get('menu.main')
             ->findOrAdd(_('Monitoring'))
             ->getSubmenu()
             ->insertAfter(_('Problems'),
                 (new CMenuItem(_('AI')))->setSubMenu(
-                    new CMenu([
-                        (new CMenuItem(_('Chat')))->setAction('ai.chat'),
-                        (new CMenuItem(_('Settings')))->setAction('ai.settings'),
-                        (new CMenuItem(_('Logs')))->setAction('ai.logs')
-                    ])
+                    new CMenu($items)
                 )
             );
     }

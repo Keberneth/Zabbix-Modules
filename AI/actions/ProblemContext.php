@@ -8,6 +8,7 @@ use CController,
     CControllerResponseData,
     CWebUser,
     Modules\AI\Lib\Config,
+    Modules\AI\Lib\DataPreview,
     Modules\AI\Lib\Util,
     Modules\AI\Lib\ZabbixApiClient;
 
@@ -75,6 +76,7 @@ class ProblemContext extends CController {
 
             // Pass configured settings to the JS.
             $payload['settings'] = [
+                'can_preview' => DataPreview::canView($config, $this->getUserType(), CWebUser::isGuest()),
                 'auto_analyze' => Util::truthy($config['problem_inline']['auto_analyze'] ?? true),
                 'item_history_period_hours' => (int) ($config['chat']['item_history_period_hours'] ?? 24),
                 'item_history_max_rows' => (int) ($config['chat']['item_history_max_rows'] ?? 50)

@@ -4,7 +4,138 @@ namespace Modules\AI\Lib;
 
 use RuntimeException;
 
+require_once __DIR__.'/DataPreview.php';
+
+/** Internal control flow: the fully built preview must stop before transport. */
+final class ProviderPreviewReady extends RuntimeException {}
+
 class ProviderClient {
+
+    private static bool $preview_only = false;
+
+    public static function previewChat(array $provider, array $messages, array $tools = [], float $temperature = 1.0): array {
+        if (self::$preview_only) {
+            throw new RuntimeException('A provider preview is already in progress.');
+        }
+        self::$preview_only = true;
+        try {
+            // Use the normal adapters, including native tool and message conversion.
+            self::chatWithTools($provider, $messages, $tools, $temperature);
+            throw new RuntimeException('The provider did not produce a preview.');
+        }
+        catch (ProviderPreviewReady $ready) {
+            return DataPreview::snapshot() ?? [];
+        }
+        finally {
+            self::$preview_only = false;
+        }
+    }
+
+    private static function providerRequest(array $provider, string $endpoint, array $options): array {
+        if (self::$preview_only) {
+            Util::assertNoEmbeddedUrlCredentials($endpoint);
+            HttpClient::assertTransport($endpoint, !empty($options['allow_insecure_http']));
+            json_encode($options['json'], JSON_THROW_ON_ERROR);
+            DataPreview::asPreview();
+            DataPreview::record($provider, $options['json'], $options['headers'] ?? [], 'preview');
+            throw new ProviderPreviewReady();
+        }
+        // This boundary sees provider JSON only, never Zabbix or NetBox requests.
+        $capture = DataPreview::record($provider, $options['json'], $options['headers'] ?? []);
+        $response = HttpClient::expectSuccess('POST', $endpoint, $options);
+        DataPreview::markSent($capture);
+        return $response;
+    }
+
+    /**
+     * Optional settings diagnostic: at most two small synthetic requests using
+     * the selected model and the same protocol adapters as normal chat. The
+     * probe tool has no implementation and never reaches Zabbix.
+     */
+    public static function testCapabilities(array $provider): array {
+        if (trim((string) ($provider['model'] ?? '')) === '') {
+            throw new RuntimeException('Select a model before testing chat and native tools.');
+        }
+
+        // Bound the diagnostic independently of normal conversation settings.
+        $provider['max_tokens'] = 512;
+        $provider['timeout'] = max(5, min(30, (int) ($provider['timeout'] ?? 30)));
+        $result = [
+            'chat' => ['ok' => false, 'message' => 'Chat was not tested.'],
+            'tools' => ['ok' => false, 'skipped' => true, 'message' => 'Native tools were not tested because chat failed.']
+        ];
+
+        try {
+            self::chat($provider, [[
+                'role' => 'user',
+                'content' => 'This is a connection test. Reply with OK only.'
+            ]]);
+            $result['chat'] = ['ok' => true, 'message' => 'The selected model returned a chat response.'];
+        }
+        catch (\Throwable $e) {
+            $result['chat']['message'] = self::capabilityError($e, $provider);
+            return $result;
+        }
+
+        $nonce = bin2hex(random_bytes(8));
+        $tools = [[
+            'name' => 'ai_connection_probe',
+            'description' => 'Harmless capability test. Echo the supplied nonce. No action will be executed.',
+            'parameters' => [
+                'type' => 'object',
+                'properties' => ['nonce' => ['type' => 'string']],
+                'required' => ['nonce'],
+                'additionalProperties' => false
+            ]
+        ]];
+
+        try {
+            $response = self::chatWithTools($provider, [[
+                'role' => 'user',
+                'content' => 'This is a native tool capability test. Call ai_connection_probe exactly once '
+                    .'with nonce "'.$nonce.'". Use the native tool interface, not JSON in a text reply. '
+                    .'No Zabbix action will be executed.'
+            ]], $tools);
+            $call = $response['tool_call'] ?? null;
+            if (!is_array($call)) {
+                throw new RuntimeException('The model replied without a native tool call. Native tool support was not confirmed.');
+            }
+            if (($call['name'] ?? '') !== 'ai_connection_probe'
+                    || ($call['arguments'] ?? null) !== ['nonce' => $nonce]) {
+                throw new RuntimeException('The model returned an unexpected tool or arguments. Native tool support was not confirmed.');
+            }
+            $result['tools'] = [
+                'ok' => true,
+                'message' => 'The model returned one valid native tool call. No action was executed.'
+            ];
+        }
+        catch (\Throwable $e) {
+            $result['tools'] = ['ok' => false, 'message' => self::capabilityError($e, $provider)];
+        }
+
+        return $result;
+    }
+
+    private static function capabilityError(\Throwable $error, array $provider): string {
+        $message = $error->getMessage();
+        // A misconfigured provider can echo request credentials in an error.
+        // Diagnostics return status only; never return the model's raw output.
+        foreach (['api_key' => 'api_key_env', 'headers_json' => 'headers_json_ref'] as $field => $reference) {
+            try {
+                $secret = self::providerSecretValue($provider, $field, $reference);
+                $values = $field === 'headers_json' ? Util::decodeJsonArray($secret) : [$secret];
+                foreach ($values as $value) {
+                    if (is_scalar($value) && (string) $value !== '') {
+                        $message = str_replace((string) $value, '[REDACTED]', $message);
+                    }
+                }
+            }
+            catch (\Throwable $ignored) {
+                // Preserve the original failure when secret resolution failed.
+            }
+        }
+        return Util::truncate(Util::sanitizeSensitiveTextForDisplay($message), 1000);
+    }
 
     public static function chat(array $provider, array $messages, float $temperature = 1.0): string {
         $type = strtolower(trim((string) ($provider['type'] ?? 'openai_compatible')));
@@ -117,7 +248,7 @@ class ProviderClient {
 
         $headers = self::buildHeaders($provider);
 
-        $response = HttpClient::expectSuccess('POST', $endpoint, [
+        $response = self::providerRequest($provider, $endpoint, [
             'headers' => $headers,
             'json' => $payload,
             'timeout' => (int) ($provider['timeout'] ?? 120),
@@ -125,7 +256,8 @@ class ProviderClient {
             // HTTPS Ollama must not silently skip certificate verification. For a
             // plain-HTTP loopback endpoint (the common local install) this flag
             // has no effect, so the secure default costs nothing there.
-            'verify_peer' => self::resolveVerifyPeer($provider, $endpoint)
+            'verify_peer' => self::resolveVerifyPeer($provider, $endpoint),
+            'allow_insecure_http' => Util::truthy($provider['allow_insecure_http'] ?? false)
         ]);
 
         if (!is_array($response['json'])) {
@@ -176,11 +308,12 @@ class ProviderClient {
             throw new RuntimeException('The selected Ollama provider has no model configured.');
         }
 
-        $response = HttpClient::expectSuccess('POST', $endpoint, [
+        $response = self::providerRequest($provider, $endpoint, [
             'headers' => self::buildHeaders($provider),
             'json' => $payload,
             'timeout' => (int) ($provider['timeout'] ?? 120),
-            'verify_peer' => self::resolveVerifyPeer($provider, $endpoint)
+            'verify_peer' => self::resolveVerifyPeer($provider, $endpoint),
+            'allow_insecure_http' => Util::truthy($provider['allow_insecure_http'] ?? false)
         ]);
 
         if (!is_array($response['json'])) {
@@ -223,11 +356,12 @@ class ProviderClient {
 
         $headers = self::buildHeaders($provider, true);
 
-        $response = HttpClient::expectSuccess('POST', $endpoint, [
+        $response = self::providerRequest($provider, $endpoint, [
             'headers' => $headers,
             'json' => $payload,
             'timeout' => (int) ($provider['timeout'] ?? 120),
-            'verify_peer' => (bool) ($provider['verify_peer'] ?? true)
+            'verify_peer' => (bool) ($provider['verify_peer'] ?? true),
+            'allow_insecure_http' => Util::truthy($provider['allow_insecure_http'] ?? false)
         ]);
 
         if (!is_array($response['json'])) {
@@ -274,11 +408,12 @@ class ProviderClient {
             throw new RuntimeException('The selected provider has no model configured.');
         }
 
-        $response = HttpClient::expectSuccess('POST', $endpoint, [
+        $response = self::providerRequest($provider, $endpoint, [
             'headers' => self::buildHeaders($provider, true),
             'json' => $payload,
             'timeout' => (int) ($provider['timeout'] ?? 120),
-            'verify_peer' => (bool) ($provider['verify_peer'] ?? true)
+            'verify_peer' => (bool) ($provider['verify_peer'] ?? true),
+            'allow_insecure_http' => Util::truthy($provider['allow_insecure_http'] ?? false)
         ]);
 
         if (!is_array($response['json'])) {
@@ -325,7 +460,7 @@ class ProviderClient {
         $api_messages = [];
 
         foreach ($messages as $msg) {
-            if (($msg['role'] ?? '') === 'system') {
+            if (in_array($msg['role'] ?? '', ['system', 'developer'], true)) {
                 $system_text .= ($system_text !== '' ? "\n\n" : '').trim((string) ($msg['content'] ?? ''));
                 continue;
             }
@@ -370,11 +505,12 @@ class ProviderClient {
 
         self::mergeExtraHeaders($headers, $provider);
 
-        $response = HttpClient::expectSuccess('POST', $endpoint, [
+        $response = self::providerRequest($provider, $endpoint, [
             'headers' => $headers,
             'json' => $payload,
             'timeout' => (int) ($provider['timeout'] ?? 120),
-            'verify_peer' => (bool) ($provider['verify_peer'] ?? true)
+            'verify_peer' => (bool) ($provider['verify_peer'] ?? true),
+            'allow_insecure_http' => Util::truthy($provider['allow_insecure_http'] ?? false)
         ]);
 
         if (!is_array($response['json'])) {
@@ -457,11 +593,12 @@ class ProviderClient {
         ];
         self::mergeExtraHeaders($headers, $provider);
 
-        $response = HttpClient::expectSuccess('POST', $endpoint, [
+        $response = self::providerRequest($provider, $endpoint, [
             'headers' => $headers,
             'json' => $payload,
             'timeout' => (int) ($provider['timeout'] ?? 120),
-            'verify_peer' => (bool) ($provider['verify_peer'] ?? true)
+            'verify_peer' => (bool) ($provider['verify_peer'] ?? true),
+            'allow_insecure_http' => Util::truthy($provider['allow_insecure_http'] ?? false)
         ]);
 
         if (!is_array($response['json'])) {
@@ -525,6 +662,10 @@ class ProviderClient {
             }
 
             $role = (string) ($message['role'] ?? 'user');
+            // Preserve privileged instructions when adapting to older protocols.
+            if ($role === 'developer') {
+                $role = 'system';
+            }
             if ($role === 'assistant' && is_array($message['tool_call'] ?? null)) {
                 $call = $message['tool_call'];
                 $call_id = self::toolCallId($call);
@@ -574,6 +715,9 @@ class ProviderClient {
             }
 
             $role = (string) ($message['role'] ?? 'user');
+            if ($role === 'developer') {
+                $role = 'system';
+            }
             if ($role === 'assistant' && is_array($message['tool_call'] ?? null)) {
                 $call = $message['tool_call'];
                 $result[] = [
@@ -621,6 +765,9 @@ class ProviderClient {
             }
 
             $role = (string) ($message['role'] ?? 'user');
+            if ($role === 'developer') {
+                $role = 'system';
+            }
             if ($role === 'system') {
                 $system_text .= ($system_text !== '' ? "\n\n" : '').trim((string) ($message['content'] ?? ''));
                 continue;

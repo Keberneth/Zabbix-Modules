@@ -9,6 +9,7 @@ use CController,
     CWebUser,
     Modules\AI\Lib\AuditLogger,
     Modules\AI\Lib\Config,
+    Modules\AI\Lib\DataPreview,
     Modules\AI\Lib\Util,
     Modules\AI\Lib\ZabbixApiClient;
 
@@ -95,6 +96,8 @@ class ChatView extends CController {
             'security_enabled' => Util::truthy($config['security']['enabled'] ?? false),
             'logging_enabled' => Util::truthy($config['logging']['enabled'] ?? false),
             'can_view_logs' => $this->getUserType() == USER_TYPE_SUPER_ADMIN,
+            'can_manage_settings' => $this->getUserType() == USER_TYPE_SUPER_ADMIN,
+            'can_preview' => DataPreview::canView($config, $this->getUserType(), CWebUser::isGuest()),
             'item_history_period_hours' => (int) ($config['chat']['item_history_period_hours'] ?? 24),
             'item_history_max_rows' => (int) ($config['chat']['item_history_max_rows'] ?? 50)
         ]);

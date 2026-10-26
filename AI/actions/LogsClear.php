@@ -18,7 +18,7 @@ class LogsClear extends CController {
     }
 
     protected function checkPermissions(): bool {
-        return $this->getUserType() == USER_TYPE_SUPER_ADMIN;
+        return $this->getUserType() == USER_TYPE_SUPER_ADMIN && !CWebUser::isGuest();
     }
 
     protected function doAction(): void {

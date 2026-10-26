@@ -149,6 +149,7 @@
                 '<div class="ai-drawer-loading">Loading problem context...</div>' +
             '</div>' +
             '<div class="ai-drawer-transcript" id="ai-drawer-transcript"></div>' +
+            '<div class="ai-data-preview-host ai-drawer-data-preview" id="ai-drawer-data-preview" hidden></div>' +
             '<div class="ai-drawer-status ai-hidden" id="ai-drawer-status"></div>' +
             '<form class="ai-drawer-compose" id="ai-drawer-compose">' +
                 '<textarea class="ai-drawer-input" id="ai-drawer-message" rows="3" placeholder="Ask about this problem..."></textarea>' +
@@ -162,6 +163,9 @@
         document.body.appendChild(drawer);
         drawer.dataset.eventid = String(eventid);
         drawer.dataset.generation = String(drawerGeneration);
+        drawer.dataset.canPreview = '0';
+        drawer.aiDataPreviewGeneration = 0;
+        drawer.aiRequestGeneration = 0;
         activeDrawer = drawer;
 
         drawer.querySelector('.ai-drawer-close').addEventListener('click', closeDrawer);
@@ -171,6 +175,7 @@
         var fullChatLink = drawer.querySelector('.ai-drawer-open-chat');
         if (fullChatLink) {
             fullChatLink.addEventListener('click', function () {
+                clearDrawerDataPreview(drawer);
                 transferStateToSessionStorage(eventid);
             });
         }
@@ -179,6 +184,8 @@
         var msgField = drawer.querySelector('#ai-drawer-message');
         var sendBtn = drawer.querySelector('#ai-drawer-send');
         var postBtn = drawer.querySelector('#ai-drawer-post');
+        msgField.addEventListener('input', function () { clearDrawerDataPreview(drawer); });
+        msgField.addEventListener('change', function () { clearDrawerDataPreview(drawer); });
 
         form.addEventListener('submit', function (e) {
             e.preventDefault();
@@ -209,10 +216,30 @@
             historyAbortController = null;
         }
         if (activeDrawer) {
+            clearDrawerDataPreview(activeDrawer);
             activeDrawer.remove();
             activeDrawer = null;
             activeEventId = null;
         }
+    }
+
+    function clearDrawerDataPreview(drawer) {
+        if (!drawer) return;
+        drawer.aiDataPreviewGeneration = (drawer.aiDataPreviewGeneration || 0) + 1;
+        var host = drawer.querySelector('#ai-drawer-data-preview');
+        if (host) {
+            host.textContent = '';
+            host.hidden = true;
+        }
+    }
+
+    function showDrawerDataSent(response, drawer, eventid, drawerGeneration, snapshotGeneration) {
+        if (!isCurrentDrawer(drawer, eventid, drawerGeneration)
+                || drawer.dataset.canPreview !== '1'
+                || drawer.aiDataPreviewGeneration !== snapshotGeneration
+                || !response || !response.data_sent || !window.ZabbixAIDataPreview) return;
+        var host = drawer.querySelector('#ai-drawer-data-preview');
+        if (host) window.ZabbixAIDataPreview.render(host, response.data_sent, 'View data sent', false);
     }
 
     function loadContext(eventid, drawer, drawerGeneration) {
@@ -279,6 +306,8 @@
 
                 var chat = getEventChat(eventid);
                 chat.context = ctx;
+                drawer.dataset.canPreview = response.settings && response.settings.can_preview === true ? '1' : '0';
+                clearDrawerDataPreview(drawer);
 
                 // Update "Full chat" link with hostname and problem summary.
                 var chatLink = drawer.querySelector('.ai-drawer-open-chat');
@@ -377,8 +406,12 @@
 
     function doSend(eventid, message, drawer, drawerGeneration, onDone, untrustedMonitoringContext) {
         var chat = getEventChat(eventid);
+        clearDrawerDataPreview(drawer);
+        var snapshotGeneration = drawer.aiDataPreviewGeneration;
+        var requestGeneration = ++drawer.aiRequestGeneration;
         function current() {
-            return isCurrentDrawer(drawer, eventid, drawerGeneration);
+            return isCurrentDrawer(drawer, eventid, drawerGeneration)
+                && drawer.aiRequestGeneration === requestGeneration;
         }
 
         var requestHistory = chat.history.slice(0, -1).filter(function (m) {
@@ -426,6 +459,8 @@
         })
             .then(handleJsonResponse)
             .then(function (response) {
+                if (!current()) return;
+                showDrawerDataSent(response, drawer, eventid, drawerGeneration, snapshotGeneration);
                 if (!response || !response.ok) {
                     throw new Error((response && typeof response.error === 'string') ? response.error : 'Chat request failed.');
                 }
@@ -468,6 +503,7 @@
                 }
             })
             .catch(function (err) {
+                if (!current()) return;
                 var msg = (err && typeof err.message === 'string') ? err.message : String(err);
                 chat.history.push({ role: 'assistant', content: '[Error] ' + msg });
                 if (current()) {
@@ -518,6 +554,7 @@
 
         cancelBtn.addEventListener('click', function () {
             if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
+            clearDrawerDataPreview(drawer);
             bar.remove();
             var chat = getEventChat(eventid);
             chat.pendingAction = null;
@@ -536,6 +573,13 @@
         if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
         var chat = getEventChat(eventid);
         if (!chat.pendingAction) return;
+        clearDrawerDataPreview(drawer);
+        var snapshotGeneration = drawer.aiDataPreviewGeneration;
+        var requestGeneration = ++drawer.aiRequestGeneration;
+        function current() {
+            return isCurrentDrawer(drawer, eventid, drawerGeneration)
+                && drawer.aiRequestGeneration === requestGeneration;
+        }
 
         var sendBtn = drawer.querySelector('#ai-drawer-send');
         var historyBtn = drawer.querySelector('#ai-drawer-history-btn');
@@ -567,6 +611,8 @@
         })
             .then(handleJsonResponse)
             .then(function (response) {
+                if (!current()) return;
+                showDrawerDataSent(response, drawer, eventid, drawerGeneration, snapshotGeneration);
                 if (!response || !response.ok) {
                     throw new Error((response && typeof response.error === 'string') ? response.error : 'Action execution failed.');
                 }
@@ -588,6 +634,7 @@
                 }
             })
             .catch(function (err) {
+                if (!current()) return;
                 var msg = (err && typeof err.message === 'string') ? err.message : String(err);
                 chat.history.push({ role: 'assistant', content: '[Error] ' + msg });
                 if (isCurrentDrawer(drawer, eventid, drawerGeneration)) {
@@ -596,7 +643,7 @@
                 }
             })
             .finally(function () {
-                if (isCurrentDrawer(drawer, eventid, drawerGeneration)) {
+                if (current()) {
                     if (sendBtn) sendBtn.disabled = false;
                     if (historyBtn) historyBtn.disabled = false;
                 }
@@ -605,6 +652,7 @@
 
     function fetchAndSendItemHistory(eventid, drawer, drawerGeneration) {
         if (!isCurrentDrawer(drawer, eventid, drawerGeneration)) return;
+        clearDrawerDataPreview(drawer);
         var historyBtn = drawer.querySelector('#ai-drawer-history-btn');
         var sendBtn = drawer.querySelector('#ai-drawer-send');
         if (historyBtn) historyBtn.disabled = true;
@@ -954,6 +1002,7 @@
 
         injectButtons();
         observeTableRefresh();
+        window.addEventListener('pagehide', closeDrawer);
 
         document.addEventListener('keydown', function (e) {
             if (e.key === 'Escape' && activeDrawer) {

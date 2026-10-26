@@ -46,7 +46,8 @@ class TestNetBox extends CController {
                     'Authorization' => 'Token '.$cfg['token']
                 ],
                 'timeout' => $cfg['timeout'],
-                'verify_peer' => $cfg['verify_peer']
+                'verify_peer' => $cfg['verify_peer'],
+                'allow_insecure_http' => $cfg['allow_insecure_http']
             ]);
 
             $version = '';
@@ -97,6 +98,8 @@ class TestNetBox extends CController {
             ? Util::truthy($post['verify_peer'])
             : true;
         $timeout = (int) ($post['timeout'] ?? 10);
+        $allow_insecure_http = Util::truthy($post['allow_insecure_http'] ?? false);
+        HttpClient::assertTransport($url, $allow_insecure_http);
         $clear_token = !empty($post['clear_token']);
 
         if ($token_is_fresh) {
@@ -106,7 +109,8 @@ class TestNetBox extends CController {
 
         $stored_netbox = (array) ($config['netbox'] ?? []);
         $binding_matches = trim((string) ($stored_netbox['url'] ?? '')) === $url
-            && Util::truthy($stored_netbox['verify_peer'] ?? true) === $verify_peer;
+            && Util::truthy($stored_netbox['verify_peer'] ?? true) === $verify_peer
+            && Util::truthy($stored_netbox['allow_insecure_http'] ?? false) === $allow_insecure_http;
 
         if (!$token_is_fresh && $binding_matches) {
             $stored_reference = trim((string) ($stored_netbox['token_env'] ?? ''));
@@ -139,6 +143,7 @@ class TestNetBox extends CController {
             'url' => $url,
             'token' => $token,
             'verify_peer' => $verify_peer,
+            'allow_insecure_http' => $allow_insecure_http,
             'timeout' => max(3, min(60, $timeout))
         ];
     }

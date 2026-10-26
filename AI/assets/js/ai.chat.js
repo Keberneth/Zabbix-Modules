@@ -12,6 +12,8 @@
         var composeForm = document.getElementById('ai-compose-form');
         var messageField = document.getElementById('ai-message');
         var sendButton = document.getElementById('ai-send-button');
+        var previewButton = document.getElementById('ai-preview-button');
+        var previewHost = document.getElementById('ai-data-preview');
         var providerField = document.getElementById('ai-provider-id');
         var eventidField = document.getElementById('ai-eventid');
         var eventidSearchField = document.getElementById('ai-eventid-search');
@@ -38,6 +40,7 @@
         var historyLimit = parseInt(root.dataset.historyLimit || '12', 10);
         var hasZabbixApi = root.dataset.hasZabbixApi === '1';
         var canPostEventComment = root.dataset.canPostEventComment === '1';
+        var canPreview = root.dataset.canPreview === '1';
         var csrfFieldName = root.dataset.csrfFieldName || '_csrf_token';
         var contextUrl = root.dataset.contextUrl || '';
         var historyPeriod = parseInt(root.dataset.historyPeriod || '24', 10);
@@ -48,6 +51,11 @@
         var pendingUntrustedMonitoringContext = '';
         var pendingUntrustedMonitoringEventId = '';
         var monitoringContextGeneration = 0;
+        // Payload snapshots live only in the current DOM, never in chat history/storage.
+        var dataPreviewGeneration = 0;
+        var previewController = null;
+        var chatRequestGeneration = 0;
+        var pageActive = true;
 
         var HISTORY_KEY = 'zbx_ai_chat_history_v1';
         var CONTEXT_KEY = 'zbx_ai_chat_context_v1';
@@ -125,6 +133,20 @@
                 saveContext();
             });
         }
+
+        root.addEventListener('input', clearDataPreview);
+        root.addEventListener('change', clearDataPreview);
+        window.addEventListener('pagehide', function () {
+            pageActive = false;
+            chatRequestGeneration += 1;
+            clearDataPreview();
+        });
+        window.addEventListener('pageshow', function () {
+            // A cached page may return while its abandoned request is still in
+            // flight. Its fenced response cannot clear the busy state for us.
+            if (!pageActive) setBusy(false);
+            pageActive = true;
+        });
 
         initSearchableDropdown(hostnameSearchField, hostnameList, {
             // While a problem is selected, only its related host(s) are offered.
@@ -312,31 +334,26 @@
                 });
         }
 
-        composeForm.addEventListener('submit', function (event) {
-            event.preventDefault();
-
-            var message = (messageField.value || '').trim();
-
-            if (!message) {
-                showSideStatus('Enter a message first.', true);
-                return;
+        function clearDataPreview() {
+            dataPreviewGeneration += 1;
+            if (previewController) {
+                previewController.abort();
+                previewController = null;
             }
-
-            if (!providerField || providerField.disabled) {
-                showSideStatus('Configure and enable a provider first.', true);
-                return;
+            if (previewHost) {
+                previewHost.textContent = '';
+                previewHost.hidden = true;
             }
+            if (previewButton) {
+                previewButton.textContent = 'Preview data';
+                previewButton.disabled = sendButton.disabled || !providerField || providerField.disabled;
+            }
+        }
 
+        function buildSendPayload(message) {
             var requestHistory = normalizeHistory(history.filter(function (item) {
                 return !item.non_forwardable;
             }), historyLimit);
-            history = normalizeHistory(requestHistory.concat([{ role: 'user', content: message }]), historyLimit);
-            persistHistory();
-            renderHistory();
-
-            messageField.value = '';
-            setBusy(true);
-
             var params = new URLSearchParams();
             params.set('provider_id', providerField.value);
             params.set('provider_user_override', providerUserOverride ? '1' : '0');
@@ -351,11 +368,102 @@
                 pendingUntrustedMonitoringEventId === selectedEventid
                     ? pendingUntrustedMonitoringContext
                     : '');
+            params.set('chat_session_id', chatSessionId);
+            params.set(csrfFieldName, chatCsrf);
+            return params;
+        }
+
+        function showDataSent(response, generation) {
+            if (canPreview && previewHost && pageActive && root.isConnected
+                    && generation === dataPreviewGeneration && response && response.data_sent) {
+                renderDataPreview(previewHost, response.data_sent, 'View data sent', false);
+            }
+        }
+
+        if (canPreview && previewButton && previewHost) {
+            previewButton.addEventListener('click', function () {
+                var message = (messageField.value || '').trim();
+                if (!message || !providerField || providerField.disabled || sendButton.disabled) {
+                    showSideStatus(message ? 'Configure and enable a provider first.' : 'Enter a message first.', true);
+                    return;
+                }
+                clearDataPreview();
+                var generation = dataPreviewGeneration;
+                var params = buildSendPayload(message);
+                var signature = params.toString();
+                params.set('preview_only', '1');
+                var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+                previewController = controller;
+                previewButton.disabled = true;
+                previewButton.textContent = 'Preparing preview…';
+                var options = {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+                    body: params.toString()
+                };
+                if (controller) options.signal = controller.signal;
+                function current() {
+                    return pageActive && root.isConnected && generation === dataPreviewGeneration
+                        && signature === buildSendPayload((messageField.value || '').trim()).toString();
+                }
+                fetch(sendUrl, options)
+                    .then(handleJsonResponse)
+                    .then(function (response) {
+                        if (!current()) return;
+                        if (!response.ok || !response.data_preview) {
+                            throw new Error(response.error || 'Data preview unavailable.');
+                        }
+                        renderDataPreview(previewHost, response.data_preview, 'Preview of data for this request', true);
+                    })
+                    .catch(function (error) {
+                        if (current() && error.name !== 'AbortError') showSideStatus(error.message, true);
+                    })
+                    .finally(function () {
+                        if (generation !== dataPreviewGeneration) return;
+                        previewController = null;
+                        previewButton.textContent = 'Preview data';
+                        previewButton.disabled = sendButton.disabled || providerField.disabled;
+                    });
+            });
+        }
+
+        composeForm.addEventListener('submit', function (event) {
+            event.preventDefault();
+
+            if (sendButton.disabled) return;
+
+            var message = (messageField.value || '').trim();
+
+            if (!message) {
+                showSideStatus('Enter a message first.', true);
+                return;
+            }
+
+            if (!providerField || providerField.disabled) {
+                showSideStatus('Configure and enable a provider first.', true);
+                return;
+            }
+
+            clearDataPreview();
+            var snapshotGeneration = dataPreviewGeneration;
+            var requestGeneration = ++chatRequestGeneration;
+            var requestSession = chatSessionId;
+            function currentRequest() {
+                return pageActive && root.isConnected && requestGeneration === chatRequestGeneration
+                    && requestSession === chatSessionId;
+            }
+            var params = buildSendPayload(message);
+            var requestHistory = JSON.parse(params.get('history_json'));
+            history = normalizeHistory(requestHistory.concat([{ role: 'user', content: message }]), historyLimit);
+            persistHistory();
+            renderHistory();
+
+            messageField.value = '';
+            setBusy(true);
+
             pendingUntrustedMonitoringContext = '';
             pendingUntrustedMonitoringEventId = '';
             monitoringContextGeneration += 1;
-            params.set('chat_session_id', chatSessionId);
-            params.set(csrfFieldName, chatCsrf);
 
             fetch(sendUrl, {
                 method: 'POST',
@@ -367,6 +475,8 @@
             })
                 .then(handleJsonResponse)
                 .then(function (response) {
+                    if (!currentRequest()) return;
+                    showDataSent(response, snapshotGeneration);
                     if (!response.ok) {
                         throw new Error(response.error || 'Chat request failed.');
                     }
@@ -413,18 +523,23 @@
                     updatePostButtonState();
                 })
                 .catch(function (error) {
+                    if (!currentRequest()) return;
                     history = normalizeHistory(history.concat([{ role: 'assistant', content: '[Error] ' + error.message }]), historyLimit);
                     persistHistory();
                     renderHistory();
                     showSideStatus(error.message, true);
                 })
                 .finally(function () {
+                    if (!currentRequest()) return;
                     setBusy(false);
                     messageField.focus();
                 });
         });
 
         clearButton.addEventListener('click', function () {
+            chatRequestGeneration += 1;
+            setBusy(false);
+            clearDataPreview();
             history = [];
             sessionStorage.removeItem(HISTORY_KEY);
             sessionStorage.removeItem(CONTEXT_KEY);
@@ -583,6 +698,7 @@
                         }
 
                         var historyMessage = lines.join('\n');
+                        clearDataPreview();
                         pendingUntrustedMonitoringContext = historyMessage;
                         pendingUntrustedMonitoringEventId = eventid;
 
@@ -615,6 +731,7 @@
         }
 
         function invalidatePendingMonitoringContext(removeDisplayEntry) {
+            clearDataPreview();
             pendingUntrustedMonitoringContext = '';
             pendingUntrustedMonitoringEventId = '';
             monitoringContextGeneration += 1;
@@ -633,6 +750,7 @@
 
         function setBusy(isBusy) {
             sendButton.disabled = isBusy;
+            if (previewButton) previewButton.disabled = isBusy || !!previewController || !providerField || providerField.disabled;
             sendButton.textContent = isBusy ? 'Sending…' : 'Send';
             showTypingIndicator(isBusy);
         }
@@ -1277,6 +1395,14 @@
                 return;
             }
 
+            clearDataPreview();
+            var snapshotGeneration = dataPreviewGeneration;
+            var requestGeneration = ++chatRequestGeneration;
+            var requestSession = chatSessionId;
+            function currentRequest() {
+                return pageActive && root.isConnected && requestGeneration === chatRequestGeneration
+                    && requestSession === chatSessionId;
+            }
             setBusy(true);
             showSideStatus('Executing Zabbix action...', false);
 
@@ -1301,6 +1427,8 @@
             })
                 .then(handleJsonResponse)
                 .then(function (response) {
+                    if (!currentRequest()) return;
+                    showDataSent(response, snapshotGeneration);
                     if (!response.ok) {
                         throw new Error(response.error || 'Action execution failed.');
                     }
@@ -1321,17 +1449,90 @@
                     updatePostButtonState();
                 })
                 .catch(function (error) {
+                    if (!currentRequest()) return;
                     history = normalizeHistory(history.concat([{ role: 'assistant', content: '[Error] ' + error.message }]), historyLimit);
                     persistHistory();
                     renderHistory();
                     showSideStatus(error.message, true);
                 })
                 .finally(function () {
+                    if (!currentRequest()) return;
                     setBusy(false);
                     messageField.focus();
                 });
         }
     }
+
+    // Shared by full chat and the Problems drawer. Snapshot text is never parsed
+    // as Markdown/HTML and is not passed to the conversation persistence helpers.
+    function renderDataPreview(host, snapshot, label, expanded) {
+        host.textContent = '';
+        host.hidden = true;
+        if (!snapshot || typeof snapshot !== 'object' || !Array.isArray(snapshot.requests)) return;
+
+        var panel = document.createElement('details');
+        panel.className = 'ai-data-preview';
+        panel.open = !!expanded;
+        var summary = document.createElement('summary');
+        summary.textContent = label;
+        panel.appendChild(summary);
+
+        var notice = document.createElement('p');
+        notice.className = 'ai-data-preview-notice';
+        notice.textContent = typeof snapshot.notice === 'string' ? snapshot.notice
+            : 'Filtered data view. These details are kept only in this page, outside chat history.';
+        panel.appendChild(notice);
+        if (snapshot.truncated) {
+            var truncated = document.createElement('p');
+            truncated.className = 'ai-data-preview-notice';
+            truncated.textContent = 'This view is truncated; some request details are not shown.';
+            panel.appendChild(truncated);
+        }
+
+        snapshot.requests.forEach(function (request, index) {
+            if (!request || typeof request !== 'object') return;
+            var section = document.createElement('details');
+            section.className = 'ai-data-preview-request';
+            section.open = !!expanded && index === 0;
+            var title = document.createElement('summary');
+            var status = { preview: 'Not sent', sent: 'Sent', attempted: 'Delivery unconfirmed' }[request.status] || 'Request';
+            title.textContent = 'Request ' + (index + 1) + ' — ' + String(request.provider || 'Provider')
+                + (request.model ? ' / ' + String(request.model) : '') + ' — ' + status;
+            section.appendChild(title);
+
+            function addText(titleText, value) {
+                var heading = document.createElement('h4');
+                heading.textContent = titleText;
+                var body = document.createElement('pre');
+                body.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+                section.appendChild(heading);
+                section.appendChild(body);
+            }
+            if (request.type) addText('Provider type', request.type);
+            if (request.context) addText('Context', request.context);
+            if (Array.isArray(request.messages)) {
+                request.messages.forEach(function (message, messageIndex) {
+                    var role = message && typeof message.role === 'string' ? message.role : 'message';
+                    // Preserve fields such as tool-result names without interpreting them.
+                    addText('Message ' + (messageIndex + 1) + ' (' + role + ')', message);
+                });
+            }
+            if (Array.isArray(request.tool_names) && request.tool_names.length) {
+                addText('Available tools (' + request.tool_names.length + ')', request.tool_names.join(', '));
+            }
+            if (request.truncated) {
+                var requestNote = document.createElement('p');
+                requestNote.className = 'ai-data-preview-notice';
+                requestNote.textContent = 'This request view is truncated.';
+                section.appendChild(requestNote);
+            }
+            panel.appendChild(section);
+        });
+        host.appendChild(panel);
+        host.hidden = false;
+    }
+
+    window.ZabbixAIDataPreview = { render: renderDataPreview };
 
     function generateId(prefix) {
         return prefix + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);

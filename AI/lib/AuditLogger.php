@@ -93,7 +93,10 @@ class AuditLogger {
             );
         }
         catch (\Throwable $e) {
-            // Logging must never break the module.
+            // Keep the request usable, but make a broken audit destination
+            // visible in PHP's error log without copying potentially sensitive
+            // exception text or the audit entry into a second log.
+            error_log('Zabbix AI: audit write failed. Check AI Settings setup diagnostics and logging directory permissions.');
         }
     }
 

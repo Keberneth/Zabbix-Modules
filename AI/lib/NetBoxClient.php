@@ -11,19 +11,22 @@ class NetBoxClient {
     private bool $verify_peer;
     private int $timeout;
     private bool $allow_unkeyed_identity;
+    private bool $allow_insecure_http;
 
     public function __construct(
         string $url,
         string $token,
         bool $verify_peer = true,
         int $timeout = 10,
-        bool $allow_unkeyed_identity = false
+        bool $allow_unkeyed_identity = false,
+        bool $allow_insecure_http = false
     ) {
         $this->url = rtrim(trim($url), '/');
         $this->token = trim($token);
         $this->verify_peer = $verify_peer;
         $this->timeout = $timeout;
         $this->allow_unkeyed_identity = $allow_unkeyed_identity;
+        $this->allow_insecure_http = $allow_insecure_http;
     }
 
     public static function fromConfig(array $config): ?self {
@@ -50,7 +53,8 @@ class NetBoxClient {
             $token,
             (bool) ($config['netbox']['verify_peer'] ?? true),
             (int) ($config['netbox']['timeout'] ?? 10),
-            $allow_plaintext
+            $allow_plaintext,
+            Util::truthy($config['netbox']['allow_insecure_http'] ?? false)
         );
     }
 
@@ -61,6 +65,7 @@ class NetBoxClient {
         return [
             'url' => Util::sanitizeUrlForDisplay($this->url),
             'verify_peer' => $this->verify_peer,
+            'allow_insecure_http' => $this->allow_insecure_http,
             'timeout' => $this->timeout,
             'token_hmac' => Crypto::keyedFingerprint(
                 $this->token,
@@ -553,7 +558,8 @@ class NetBoxClient {
         $response = HttpClient::expectSuccess('GET', $url, [
             'headers' => $headers,
             'timeout' => $this->timeout,
-            'verify_peer' => $this->verify_peer
+            'verify_peer' => $this->verify_peer,
+            'allow_insecure_http' => $this->allow_insecure_http
         ]);
 
         if (!is_array($response['json'])) {

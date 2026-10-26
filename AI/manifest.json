@@ -1,9 +1,9 @@
 {
-  "manifest_version": 2.0,
+  "manifest_version": 2,
   "id": "custom_ai",
   "name": "AI",
   "namespace": "AI",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "author": "Keberneth",
   "description": "Ephemeral chat and webhook-driven AI troubleshooting assistant for Zabbix 7 with local redaction state and audit logging.",
   "actions": {
@@ -124,10 +124,11 @@
       "token": "",
       "token_env": "",
       "verify_peer": true,
-      "timeout": 10
+      "timeout": 10,
+      "allow_insecure_http": false
     },
     "webhook": {
-      "enabled": true,
+      "enabled": false,
       "shared_secret": "",
       "shared_secret_env": "",
       "require_secret": true,
@@ -136,11 +137,16 @@
       "comment_chunk_size": 1900,
       "skip_resolved": true,
       "include_netbox": false,
-      "include_os_hint": true
+      "include_os_hint": true,
+      "dedup_ttl_seconds": 86400,
+      "rate_limit_per_minute": 30,
+      "max_concurrent_requests": 2,
+      "max_body_bytes": 65536
     },
     "chat": {
+      "data_preview_visibility": "off",
       "max_history_messages": 12,
-      "temperature": 1.0,
+      "temperature": 1,
       "item_history_period_hours": 24,
       "item_history_max_rows": 50
     },
@@ -151,7 +157,7 @@
       "enabled": true,
       "strict_mode": true,
       "session_ttl_hours": 12,
-      "state_path": "/tmp/zabbix-ai-module/state",
+      "state_path": "/var/lib/zabbix-ai/state",
       "apply_to": {
         "chat": true,
         "webhook": true,
@@ -160,6 +166,12 @@
         "action_formatting": true
       },
       "categories": {
+        "credentials": true,
+        "emails": true,
+        "accounts": false,
+        "mac_addresses": false,
+        "asset_identifiers": false,
+        "personal_paths": false,
         "hostnames": true,
         "ipv4": true,
         "ipv6": true,
@@ -171,9 +183,9 @@
       "custom_rules": []
     },
     "logging": {
-      "enabled": false,
-      "path": "/tmp/zabbix-ai-module/logs",
-      "archive_path": "/tmp/zabbix-ai-module/archive",
+      "enabled": true,
+      "path": "/var/log/zabbix-ai",
+      "archive_path": "/var/log/zabbix-ai/archive",
       "archive_enabled": true,
       "compress_archives": true,
       "retention_days": 30,
@@ -205,6 +217,12 @@
       "require_super_admin_for_write": true,
       "problem_drawer_auto_reads": "off",
       "web_scenario_allowed_origins": ""
+    },
+    "reports": {
+      "enabled": true,
+      "ttl_seconds": 3600,
+      "delete_after_download": false,
+      "directory": "/var/lib/zabbix-ai/reports"
     }
   }
 }

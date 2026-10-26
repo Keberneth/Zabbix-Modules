@@ -2,6 +2,8 @@
 
 namespace Modules\AI\Lib;
 
+require_once __DIR__.'/WebhookGuard.php';
+
 use RuntimeException;
 
 class WebhookHandler {
@@ -20,8 +22,37 @@ class WebhookHandler {
         // it can never be written to the audit log or echoed back in responses.
         unset($payload['shared_secret']);
 
+        // Authentication precedes all delivery state/rate-limit writes.
+        $guard = WebhookGuard::claim($config, $payload);
+        $duplicate = $guard->duplicateResult();
+        if ($duplicate !== null) {
+            return $duplicate;
+        }
+
+        try {
+            $result = self::processAuthenticated($config, $payload, $guard);
+            $guard->complete((int) ($result['posted_chunks'] ?? 0));
+            return $result;
+        }
+        catch (\Throwable $e) {
+            $guard->abort();
+            throw $e;
+        }
+    }
+
+    private static function processAuthenticated(array $config, array $payload, WebhookGuard $guard): array {
+
+        if (($payload['delivery_type'] ?? '') === 'update'
+                && preg_match('/\A\[AI(?: [0-9]+\/[0-9]+)?\] /', (string) ($payload['event_update_message'] ?? ''))) {
+            AuditLogger::log($config, 'webhook', [
+                'event' => 'webhook.skip_ai_update', 'source' => 'ai.webhook', 'status' => 'ok',
+                'meta' => ['eventid' => (string) ($payload['eventid'] ?? '')]
+            ]);
+            return ['ok' => true, 'result' => 'AI-generated comment update ignored', 'posted_chunks' => 0, 'reply' => ''];
+        }
+
         if (Util::truthy($config['webhook']['skip_resolved'] ?? false)
-            && (string) ($payload['event_value'] ?? '1') === '0') {
+            && ($payload['delivery_type'] ?? '') === 'recovery') {
             AuditLogger::log($config, 'webhook', [
                 'event' => 'webhook.skip_resolved',
                 'source' => 'ai.webhook',
@@ -48,6 +79,9 @@ class WebhookHandler {
 
         $context = [];
         $zabbix_api = ZabbixApiClient::fromConfig($config);
+        if (Util::truthy($config['webhook']['add_problem_update'] ?? false) && $zabbix_api === null) {
+            throw new RuntimeException('Zabbix API token is not configured in AI settings.');
+        }
 
         if (!empty($payload['hostname'])
             && Util::truthy($config['webhook']['include_os_hint'] ?? false)
@@ -76,6 +110,9 @@ class WebhookHandler {
             ['role' => 'user', 'content' => $user_prompt]
         ];
         $masked_messages = $redactor->redactNonSystemMessages($messages, 'webhook');
+        // Persist uncertainty before any billable/provider or event-write side
+        // effect. A timeout or worker crash must not silently replay that work.
+        $guard->beginExternalWork();
         $reply_masked = ProviderClient::chat(
             $provider,
             $masked_messages,
@@ -171,28 +208,6 @@ class WebhookHandler {
         ];
     }
 
-    public static function loadConfigFromPdo(\PDO $pdo): array {
-        $module_id = Config::MODULE_ID;
-
-        $stmt = $pdo->prepare('SELECT config,status FROM module WHERE id = :id LIMIT 1');
-        $stmt->execute([':id' => $module_id]);
-        $row = $stmt->fetch();
-
-        if (!$row) {
-            throw new RuntimeException('The AI module is not registered in Zabbix.');
-        }
-        if ((int) ($row['status'] ?? 0) !== 1) {
-            throw new RuntimeException('The AI module is disabled; the standalone webhook is unavailable.');
-        }
-        if (empty($row['config'])) {
-            return Config::mergeWithDefaults([]);
-        }
-
-        $decoded = json_decode($row['config'], true);
-
-        return Config::mergeWithDefaults(is_array($decoded) ? $decoded : []);
-    }
-
     public static function normalizePayload(array $payload): array {
         if (isset($payload['message']) && is_string($payload['message'])) {
             $message_payload = json_decode($payload['message'], true);
@@ -224,6 +239,22 @@ class WebhookHandler {
 
         $event_tags = $payload['event_tags'] ?? $payload['tags'] ?? $payload['event_tags_json'] ?? [];
         $normalized['event_tags_text'] = self::normalizeTags($event_tags);
+
+        foreach ([
+            'event_source', 'event_object', 'delivery_type', 'delivery_id', 'recovery_eventid',
+            'event_update_status', 'event_update_timestamp', 'event_update_user',
+            'event_update_action', 'event_update_message'
+        ] as $field) {
+            $value = Util::cleanMultiline($payload[$field] ?? '', $field === 'event_update_message' ? 4000 : 256);
+            // Unsupported/out-of-context Zabbix macros are not identities.
+            $normalized[$field] = preg_match('/\A\{[A-Z0-9_.]+\}\z/', $value) ? '' : $value;
+        }
+        $normalized['event_source'] = $normalized['event_source'] !== '' ? $normalized['event_source'] : '0';
+        $normalized['event_object'] = $normalized['event_object'] !== '' ? $normalized['event_object'] : '0';
+        if (!in_array($normalized['delivery_type'], ['problem', 'recovery', 'update'], true)) {
+            $normalized['delivery_type'] = $normalized['event_update_status'] === '1' ? 'update'
+                : ($normalized['event_value'] === '0' ? 'recovery' : 'problem');
+        }
 
         return $normalized;
     }

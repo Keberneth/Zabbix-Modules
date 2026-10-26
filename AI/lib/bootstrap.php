@@ -10,6 +10,7 @@ require_once __DIR__.'/RedactionStore.php';
 require_once __DIR__.'/Redactor.php';
 require_once __DIR__.'/PendingActionStore.php';
 require_once __DIR__.'/HttpClient.php';
+require_once __DIR__.'/DataPreview.php';
 require_once __DIR__.'/ProviderClient.php';
 require_once __DIR__.'/PromptBuilder.php';
 require_once __DIR__.'/ZabbixApiClient.php';

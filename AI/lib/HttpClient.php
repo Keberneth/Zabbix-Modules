@@ -8,6 +8,7 @@ class HttpClient {
 
     public static function request(string $method, string $url, array $options = []): array {
         Util::assertNoEmbeddedUrlCredentials($url);
+        self::assertTransport($url, !empty($options['allow_insecure_http']));
         $headers = self::normalizeHeaders($options['headers'] ?? []);
         $timeout = (int) ($options['timeout'] ?? 30);
         $verify_peer = array_key_exists('verify_peer', $options) ? (bool) $options['verify_peer'] : true;
@@ -130,6 +131,25 @@ class HttpClient {
         }
 
         return $response;
+    }
+
+    /** HTTP outside literal loopback requires an explicit administrator exception. */
+    public static function assertTransport(string $url, bool $allow_insecure_http = false): void {
+        $parts = parse_url($url);
+        $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+        $host = strtolower((string) ($parts['host'] ?? ''));
+        if (!is_array($parts) || $host === '' || !in_array($scheme, ['https', 'http'], true)) {
+            throw new RuntimeException('An absolute HTTP or HTTPS service URL is required.');
+        }
+        if ($scheme === 'https' || $allow_insecure_http) {
+            return;
+        }
+        // Do not resolve DNS names here: a remote name must never gain the
+        // local-development exception through DNS or a later address change.
+        if (in_array($host, ['localhost', '127.0.0.1', '[::1]', '::1'], true)) {
+            return;
+        }
+        throw new RuntimeException('HTTPS is required. To use this HTTP service, explicitly enable its Allow HTTP exception in AI Settings.');
     }
 
     private static function normalizeHeaders(array $headers): array {

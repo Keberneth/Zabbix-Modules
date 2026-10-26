@@ -9,6 +9,7 @@ use CController,
     CWebUser,
     Modules\AI\Lib\AuditLogger,
     Modules\AI\Lib\Config,
+    Modules\AI\Lib\DataPreview,
     Modules\AI\Lib\NetBoxClient,
     Modules\AI\Lib\PendingActionStore,
     Modules\AI\Lib\PromptBuilder,
@@ -20,6 +21,8 @@ use CController,
 
 class ChatExecute extends CController {
 
+    private bool $include_data_sent = false;
+
     protected function checkInput(): bool {
         return true;
     }
@@ -30,9 +33,12 @@ class ChatExecute extends CController {
 
     protected function doAction(): void {
         $started_at = microtime(true);
+        DataPreview::start(false);
 
         try {
             $config = Config::get();
+            $this->include_data_sent = DataPreview::canView($config, $this->getUserType(), CWebUser::isGuest());
+            DataPreview::start($this->include_data_sent);
             $post = $_POST;
             $chat_session_id = Util::cleanId($post['chat_session_id'] ?? '', 'chat');
             $action_id = Util::cleanId($post['action_id'] ?? '', 'action');
@@ -270,7 +276,7 @@ class ChatExecute extends CController {
                 }
             }
 
-            $tool_result = ZabbixActionExecutor::execute($tool_name, $tool_params, $zabbix_api, [
+            $tool_result = ZabbixActionExecutor::executeChecked($tool_name, $tool_params, $zabbix_api, [
                 'config' => $config,
                 'server_session' => $this->serverSessionKey(),
                 // For confirmed NetBox reads this is the exact instance whose
@@ -404,7 +410,9 @@ class ChatExecute extends CController {
                     'event' => 'chat.execute.failed',
                     'source' => 'ai.chat.execute',
                     'status' => 'error',
+                    'tool' => $tool_name ?? '',
                     'message' => $e->getMessage(),
+                    'meta' => ['action_id' => $action_id ?? ''],
                     'duration_ms' => (int) round((microtime(true) - $started_at) * 1000)
                 ]);
             }
@@ -413,6 +421,9 @@ class ChatExecute extends CController {
                 'ok' => false,
                 'error' => $e->getMessage()
             ], 400);
+        }
+        finally {
+            DataPreview::start(false);
         }
     }
 
@@ -460,6 +471,12 @@ class ChatExecute extends CController {
     }
 
     private function respond(array $payload, int $http_status = 200): void {
+        if ($this->include_data_sent) {
+            $snapshot = DataPreview::snapshot();
+            if ($snapshot !== null) {
+                $payload['data_sent'] = $snapshot;
+            }
+        }
         http_response_code($http_status);
         header('Content-Type: application/json; charset=UTF-8');
         header('Cache-Control: no-store, private');
