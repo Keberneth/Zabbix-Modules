@@ -3,11 +3,34 @@
   "id": "sla_uptime_report",
   "name": "SLA & Uptime Report",
   "description": "SLA compliance and host availability reporting: rolling 12-month SLI heatmaps with error budgets, per-group uptime with daily downtime charts (maintenance windows count as accepted downtime), and a presentation-ready export. Runs on single-server, multi-server (HA) and Docker Zabbix frontends.",
-  "version": "2.1.0",
+  "version": "2.4.0",
   "namespace": "SlaUptimeReport",
   "author": "Keberneth",
   "url": "",
   "actions": {
+    "slareport.report.data": {
+      "class": "ReportData",
+      "layout": "layout.json"
+    },
+    "slareport.settings.view": {
+      "class": "SettingsView",
+      "layout": "layout.htmlpage",
+      "view": "slareport.settings.view"
+    },
+    "slareport.settings.save": {
+      "class": "SettingsSave",
+      "layout": "layout.htmlpage",
+      "view": "slareport.settings.view"
+    },
+    "slareport.host.view": {
+      "class": "HostDetail",
+      "layout": "layout.htmlpage",
+      "view": "slareport.host.view"
+    },
+    "slareport.maintenance.create": {
+      "class": "MaintenanceCreate",
+      "layout": null
+    },
     "slareport.report.view": {
       "class": "ReportView",
       "layout": "layout.htmlpage",
@@ -20,10 +43,12 @@
   },
   "assets": {
     "css": [
-      "slareport.css"
+      "slareport.css",
+      "slareport.settings.css"
     ],
     "js": [
-      "slareport.js"
+      "slareport.js",
+      "slareport.settings.js"
     ]
   }
 }

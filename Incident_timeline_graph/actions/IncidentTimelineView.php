@@ -43,11 +43,17 @@ final class IncidentTimelineView extends CController {
 	}
 
 	private function sanitizeMonth(string $month): string {
-		return preg_match('/^\d{4}-\d{2}$/', $month) === 1 ? $month : '';
+		if (preg_match('/^(\d{4})-(\d{2})$/D', $month, $parts) !== 1) {
+			return '';
+		}
+		return checkdate((int) $parts[2], 1, (int) $parts[1]) ? $month : '';
 	}
 
 	private function sanitizeDate(string $date): string {
-		return preg_match('/^\d{4}-\d{2}-\d{2}$/', $date) === 1 ? $date : '';
+		if (preg_match('/^(\d{4})-(\d{2})-(\d{2})$/D', $date, $parts) !== 1) {
+			return '';
+		}
+		return checkdate((int) $parts[2], (int) $parts[3], (int) $parts[1]) ? $date : '';
 	}
 
 	private function sanitizeBucket(string $bucket): string {

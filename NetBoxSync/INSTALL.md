@@ -96,10 +96,11 @@ Typical symptom if you chown'd to the wrong user:
 
 ## 7. Configure NetBox
 
-On the settings page, set:
+In the **Integrations** tab, set:
 
 - NetBox base URL
-- NetBox API token, or a `token_env` pointing to an environment variable
+- NetBox API token, or a **Vault / secret reference** such as
+  `vault:secret/data/netbox#api_token`, `env:NETBOX_API_TOKEN` or `file:netbox-token`
 
 Then configure **Zabbix API for unattended sync**:
 
@@ -111,8 +112,8 @@ Then configure **Zabbix API for unattended sync**:
 - Create an API token for that user.
 - Enter the full endpoint, for example
   `https://zabbix.example.com/api_jsonrpc.php`.
-- Enter the API token, or set **Token environment variable** to
-  `NETBOXSYNC_ZABBIX_API_TOKEN` and provide it to the service in step 9.
+- Enter the API token, or set **Vault / secret reference** to
+  `env:NETBOXSYNC_ZABBIX_API_TOKEN` and provide it to the service in step 9.
 
 Click **Test Zabbix API** when the token is stored in the settings or exposed
 to PHP-FPM. Environment variables defined only in the systemd environment file
@@ -122,9 +123,124 @@ The legacy shared secret is not needed by the CLI worker. It does not turn the
 frontend action into an anonymous endpoint because Zabbix performs module
 access checks before that action can run.
 
+### Vault-backed API tokens
+
+NetBoxSync can retrieve API tokens directly from **HashiCorp Vault KV v2**.
+For example, enter `vault:secret/data/netbox#api_token` in the NetBox reference
+field: the module reads the latest version at `secret/data/netbox` and selects
+the string key `api_token`. Use `vault:secret/data/zabbix#api_token` for the
+unattended Zabbix token. This syntax follows the
+[Vault KV v2 read endpoint](https://developer.hashicorp.com/vault/api-docs/secret/kv/kv-v2#read-secret-version).
+
+Configure these values outside module settings, in the PHP-FPM and/or CLI
+environment that will perform the lookup:
+
+| Variable | Value |
+| --- | --- |
+| `NETBOXSYNC_VAULT_ADDR` | HTTPS origin such as `https://vault.example.com:8200`. |
+| `NETBOXSYNC_VAULT_TOKEN_FILE` | Absolute path to a protected file containing the Vault authentication token. |
+| `NETBOXSYNC_VAULT_TOKEN` | Alternative to the token file. Set exactly one authentication source. |
+| `NETBOXSYNC_VAULT_NAMESPACE` | Optional Vault namespace. |
+| `NETBOXSYNC_VAULT_CACERT` | Optional absolute path to a PEM CA file for a private CA. |
+
+For example, the CLI service environment file can contain:
+
+```ini
+NETBOXSYNC_VAULT_ADDR=https://vault.example.com:8200
+NETBOXSYNC_VAULT_TOKEN_FILE=/etc/zabbix/netboxsync-vault-token
+# NETBOXSYNC_VAULT_CACERT=/etc/zabbix/vault-ca.pem
+```
+
+For browser tests and manual runs, also expose these settings to the Zabbix
+PHP-FPM pool, using `env[NETBOXSYNC_VAULT_ADDR] = https://vault.example.com:8200`
+and `env[NETBOXSYNC_VAULT_TOKEN_FILE] = /etc/zabbix/netboxsync-vault-token`.
+The token file must be readable by the corresponding account, protected from
+group/world writes, and kept outside the API-token secret directory. Its
+parent directory must also be protected from group/world writes.
+
+Use a dedicated Vault token whose policy grants only `read` on the required
+KV paths, such as `secret/data/netbox` and `secret/data/zabbix`. Deployment
+tooling is responsible for renewing or rotating this Vault authentication
+token; NetBoxSync rereads the token file for each lookup. This version supports
+KV v2 and token authentication, not KV v1 or an AppRole login flow.
+
+Vault requests always verify the TLS certificate and hostname, refuse
+redirects, and have fixed time/response-size limits. Missing keys, expired or
+denied credentials, and unavailable Vault services fail without using a stored
+fallback. Resolved credentials are not saved in module settings or sent to
+the browser. Click **Test connection** / **Test Zabbix API** after selecting
+the reference to test retrieval and the destination connection together.
+
+Native Zabbix `{$NETBOX.API.TOKEN}` Vault macros are not expanded by the module.
+Zabbix resolves those macros in its server/proxy configuration cache; see
+[Zabbix secret macros](https://www.zabbix.com/documentation/current/en/manual/config/macros/secret_macros).
+
+#### Vault Agent or environment injection
+
+The `env:NAME` and `file:NAME` options also support deployment-injected secrets,
+as in the AI module.
+
+For a file-backed NetBox token:
+
+1. Configure your existing Vault Agent authentication and policy to read the
+   intended secret. Add a template stanza like the following, adjusting its
+   KV v2 path and key. This is a template fragment, not a complete Agent config.
+
+   ```hcl
+   template {
+     contents = "{{ with secret \"secret/data/netbox\" }}{{ .Data.data.api_token }}{{ end }}"
+     destination = "/run/netboxsync-secrets/netbox-token"
+     perms = "0640"
+     error_on_missing_key = true
+     backup = false
+   }
+   ```
+
+2. Use a dedicated secret directory owned by the trusted deployment/Vault Agent
+   account, with mode `0750`, and files with mode `0640` or stricter. Grant the
+   PHP-FPM and CLI service accounts read/traverse access through a dedicated
+   reader group. Neither the directory nor files may be group/world writable.
+   Keep unrelated secrets outside this directory. Apply SELinux read permissions
+   appropriate to your deployment when applicable.
+3. Set `NETBOXSYNC_SECRET_DIR=/run/netboxsync-secrets` in the CLI service's
+   environment file. Expose the same directory to PHP-FPM for browser tests and
+   interactive runs, for example in the Zabbix pool configuration:
+
+   ```ini
+   env[NETBOXSYNC_SECRET_DIR] = /run/netboxsync-secrets
+   ```
+
+4. In **Integrations → NetBox → Vault / secret reference**, enter
+   `file:netbox-token`, leaving the inline token blank. Save and test the
+   connection. For the unattended Zabbix API token, render a separate
+   `zabbix-api-token` file and select `file:zabbix-api-token`.
+
+References accept a filename only. Absolute paths, traversal, and symlinks
+escaping the configured directory are rejected. Files are reread on resolution,
+so later runs use an updated rendered token. See
+[Vault Agent templates](https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent/template)
+for Agent refresh behavior and configuration.
+
+For environment injection, use `env:NETBOX_API_TOKEN` and
+`env:NETBOXSYNC_ZABBIX_API_TOKEN` instead. Bare names remain accepted. Additional
+approved variable names must be configured by the server administrator through
+`NETBOXSYNC_ALLOWED_SECRET_ENV_VARS` (comma- or whitespace-separated) in each
+consumer's environment. This also applies to existing custom names when
+upgrading from 0.2.x. The documented token names and `NETBOXSYNC_SECRET_*` names
+are allowed by default. A name
+being allowed does not create the variable; PHP-FPM and systemd each need the
+actual value supplied to their processes.
+
+Saving a reference removes the corresponding inline secret from module
+configuration. Missing, empty, or unreadable references stop that operation;
+there is no fallback to an old stored token. The browser tests verify the
+frontend process's access. CLI `--check` verifies the Zabbix API credential from
+the unattended environment; it does not test NetBox writes or mapping behavior.
+
 ## 8. Save settings and test a manual run
 
-Click **Run now** on the settings page. The first successful run populates:
+Click **Save settings**, then **Run now**. The **Last run** tab shows the result.
+The first completed run populates:
 
 - `state/timestamps.json`
 - `state/last_summary.json`
@@ -174,7 +290,8 @@ sudo install -o root -g root -m 0644 \
 Create the environment file referenced by the service
 (`EnvironmentFile=/etc/sysconfig/zabbix-netbox-sync`). It contains API tokens,
 so it must be readable only by root. The environment variable name must match
-the **Token environment variable** field saved in module settings:
+the **Vault / secret reference** field saved in module settings (with an
+optional `env:` prefix in that field):
 
 ```bash
 sudo install -o root -g root -m 0600 /dev/null /etc/sysconfig/zabbix-netbox-sync

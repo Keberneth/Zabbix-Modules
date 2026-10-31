@@ -14,29 +14,28 @@
 $fleet = $report['fleet'];
 $target = (float) $filter['target'];
 
-// The maintenance column only appears when some host had maintenance.
-$show_maintenance = (int) $fleet['maintenance_hosts'] > 0;
+$show_maintenance = true;
 ?>
 
 <div class="sr-kpis">
 	<div class="sr-kpi sr-kpi--<?= $fleet['avg'] === null ? 'neutral'
 		: ($fleet['avg'] >= $target ? 'ok'
 			: ($fleet['avg'] >= \Modules\SlaUptimeReport\Helpers\ReportDataHelper::BAD_THRESHOLD ? 'warning' : 'critical')) ?>">
-		<div class="sr-kpi-label"><?= $esc(_('Fleet availability')) ?></div>
+		<div class="sr-kpi-label"><?= $esc(_('Average check availability')) ?></div>
 		<div class="sr-kpi-value"><?= $esc($helper->formatPct($fleet['avg'], 2)) ?></div>
-		<div class="sr-kpi-sub"><?= $esc(sprintf(_('Across %1$d hosts with data'), (int) $fleet['with_data'])) ?></div>
+		<div class="sr-kpi-sub"><?= $esc(sprintf(_('Across %1$d checks with data'), (int) $fleet['with_data'])) ?></div>
 	</div>
 	<div class="sr-kpi sr-kpi--<?= (int) $fleet['below_target'] > 0 ? 'warning' : 'ok' ?>">
 		<div class="sr-kpi-label"><?= $esc(sprintf(_('Below %1$s'), $helper->formatTargetPct($target))) ?></div>
 		<div class="sr-kpi-value"><?= $esc((string) (int) $fleet['below_target']) ?></div>
-		<div class="sr-kpi-sub"><?= $esc(_('Hosts under the availability target')) ?></div>
+		<div class="sr-kpi-sub"><?= $esc(_('Checks under the availability target')) ?></div>
 	</div>
 	<div class="sr-kpi sr-kpi--neutral">
 		<div class="sr-kpi-label"><?= $esc(_('Total downtime')) ?></div>
 		<div class="sr-kpi-value"><?= $esc($fleet['with_data'] > 0
 			? $helper->formatDuration((int) $fleet['downtime_seconds'])
 			: '—') ?></div>
-		<div class="sr-kpi-sub"><?= $esc(_('Summed across all measured hosts')) ?></div>
+		<div class="sr-kpi-sub"><?= $esc(_('Summed across all measured checks')) ?></div>
 	</div>
 	<?php if ($show_maintenance): ?>
 		<div class="sr-kpi sr-kpi--neutral">
@@ -48,16 +47,33 @@ $show_maintenance = (int) $fleet['maintenance_hosts'] > 0;
 		</div>
 	<?php endif; ?>
 	<div class="sr-kpi sr-kpi--<?= (int) $fleet['na'] > 0 ? 'warning' : 'ok' ?>">
-		<div class="sr-kpi-label"><?= $esc(_('Without data')) ?></div>
-		<div class="sr-kpi-value"><?= $esc((string) (int) $fleet['na']) ?></div>
+		<div class="sr-kpi-label"><a href="<?= $esc($nodata_url) ?>" data-sr-view-nodata><?= $esc(_('Without data')) ?></a></div>
+		<div class="sr-kpi-value"><a href="<?= $esc($nodata_url) ?>" data-sr-view-nodata><?= $esc((string) (int) $fleet['na']) ?></a></div>
 		<div class="sr-kpi-sub"><?= $esc(_('No availability item, or no samples')) ?></div>
 	</div>
 </div>
 
+<details class="sr-panel" id="sr-without-data" open tabindex="-1">
+	<summary class="sr-panel-title"><?= $esc(sprintf(_('Checks without data (%1$d)'), (int) $fleet['na'])) ?></summary>
+	<p class="sr-hint"><?= $esc(_('This list includes every matching check without a usable measurement, including rows beyond the rows-per-group limit. Open a check to inspect its item and gaps.')) ?></p>
+	<?php if ($report['availability_health']['nodata'] === []): ?>
+		<p class="sr-empty"><?= $esc(_('No checks without data.')) ?></p>
+	<?php else: ?>
+		<div class="sr-table-wrap"><table class="sr-table">
+			<thead><tr><th scope="col"><?= $esc(_('Host / check')) ?></th><th scope="col"><?= $esc(_('Reason')) ?></th><th scope="col"><?= $esc(_('Item')) ?></th></tr></thead>
+			<tbody><?php foreach ($report['availability_health']['nodata'] as $row): ?>
+				<tr><td><a href="<?= $esc($host_url((string) $row['hostid'], $row['measurementid'] ?? '')) ?>"><?= $esc($helper::measurementName($row)) ?></a></td>
+					<td><?= $esc($row['state'] === 'noitem' ? _('No enabled numeric item matching the configured rule') : _('No usable data or incomplete scan')) ?></td>
+					<td><?= $esc($row['item_key'] ?? '—') ?></td></tr>
+			<?php endforeach; ?></tbody>
+		</table></div>
+	<?php endif; ?>
+</details>
+
 <?php if ($report['groups'] === []): ?>
 	<div class="sr-panel">
 		<p class="sr-empty">
-			<?= $esc(_('No hosts matched the filter. Hosts need an agent.ping, icmpping or agent-available item to be measured.')) ?>
+			<?= $esc(_('No hosts matched the filter and report settings.')) ?>
 		</p>
 	</div>
 <?php endif; ?>
@@ -82,7 +98,7 @@ $show_maintenance = (int) $fleet['maintenance_hosts'] > 0;
 		<?php if ((int) $group['rows_total'] > count($group['rows'])): ?>
 			<p class="sr-panel-sub">
 				<?= $esc(sprintf(
-					_('Showing the %1$d worst of %2$d hosts. Raise "Rows per group" under More filters to see the rest.'),
+					_('Showing the %1$d worst of %2$d checks. Raise "Rows per group" under More filters to see the rest.'),
 					count($group['rows']),
 					(int) $group['rows_total']
 				)) ?>
@@ -93,27 +109,31 @@ $show_maintenance = (int) $fleet['maintenance_hosts'] > 0;
 			<table class="sr-table">
 				<thead>
 					<tr>
-						<th><?= $esc(_('Host')) ?></th>
-						<th><?= $esc(_('Availability')) ?></th>
-						<th><?= $esc(_('Daily trend')) ?></th>
-						<th class="sr-num"><?= $esc(_('Uptime')) ?></th>
-						<th class="sr-num"><?= $esc(_('Downtime')) ?></th>
+						<th scope="col"><?= $esc(_('Host')) ?></th>
+						<th scope="col"><?= $esc(_('Measurement')) ?></th>
+						<th scope="col"><?= $esc(_('Availability')) ?></th>
+						<th scope="col" class="sr-num"><?= $esc(_('Coverage')) ?></th>
+						<th scope="col"><?= $esc(_('Daily trend')) ?></th>
+						<th scope="col" class="sr-num"><?= $esc(_('Uptime')) ?></th>
+						<th scope="col" class="sr-num"><?= $esc(_('Downtime')) ?></th>
 						<?php if ($show_maintenance): ?>
-							<th class="sr-num"><?= $esc(_('Maintenance')) ?></th>
+							<th scope="col" class="sr-num"><?= $esc(_('Maintenance')) ?></th>
 						<?php endif; ?>
-						<th><?= $esc(_('Item')) ?></th>
+						<th scope="col"><?= $esc(_('Item')) ?></th>
 					</tr>
 				</thead>
 				<tbody>
 					<?php foreach ($group['rows'] as $row): ?>
 						<tr>
 							<td class="sr-strong">
-								<?= $esc($row['host']) ?>
+								<a href="<?= $esc($host_url((string) $row['hostid'], $row['measurementid'] ?? '')) ?>"><?= $esc($row['host']) ?></a>
 								<?php if (!$row['enabled']): ?>
 									<span class="sr-status sr-status--neutral" style="margin-left:8px"><?= $esc(_('disabled')) ?></span>
 								<?php endif; ?>
 							</td>
+							<td><a href="<?= $esc($host_url((string) $row['hostid'], $row['measurementid'] ?? '')) ?>"><?= $esc($row['measurement_label'] ?? $row['item_key'] ?? '—') ?></a></td>
 							<td><?= $fmt->hostState((string) $row['state'], $row['pct']) ?></td>
+							<td class="sr-num"><?= $esc($helper->formatPct($row['coverage_pct'] ?? null, 1)) ?></td>
 							<td><?= $chart->sparkline($row['spark'], $row['state'] === 'bad' ? '--sr-critical'
 								: ($row['state'] === 'warn' ? '--sr-warning' : '--sr-s1')) ?></td>
 							<td class="sr-num"><?= $esc($row['pct'] !== null
@@ -127,9 +147,10 @@ $show_maintenance = (int) $fleet['maintenance_hosts'] > 0;
 							<?php if ($show_maintenance): ?>
 								<td class="sr-num sr-dim"><?= $esc((int) $row['maintenance_seconds'] > 0
 									? $helper->formatDuration((int) $row['maintenance_seconds'])
-									: '—') ?></td>
+									: '0s') ?></td>
 							<?php endif; ?>
-							<td class="sr-dim"><?= $esc($row['item_key'] ?? _('none')) ?></td>
+							<td class="sr-dim"><?= $esc($row['item_key'] ?? _('none')) ?>
+								<?php if (!empty($row['source'])): ?><br><small><?= $esc($helper::sourceLabel($row['source'])) ?></small><?php endif; ?></td>
 						</tr>
 					<?php endforeach; ?>
 				</tbody>
@@ -139,19 +160,16 @@ $show_maintenance = (int) $fleet['maintenance_hosts'] > 0;
 <?php endforeach; ?>
 
 <div class="sr-panel">
+	<p class="sr-hint"><?= $esc(_('Each configured check has its own availability result. Averages and total downtime combine checks; they do not represent the percentage of time all websites were available together. Maintenance is host-wide: rows show its effect on each check, while the maintenance total counts each host once.')) ?></p>
 	<p class="sr-hint">
-		<?php if ($report['source_used'] === 'trends'): ?>
-			<?= $esc(_('This period is read from hourly trends: each hour counts as up or down as a whole, so short blips inside an hour can round away. For exact figures pick a window of 7 days or less, which is read from raw history.')) ?>
-		<?php else: ?>
-			<?= $esc(_('This period is read from raw history samples. Missing samples count as downtime, so a polling gap shows up rather than hiding.')) ?>
-		<?php endif; ?>
+		<?= $esc(_('Coverage is observed samples versus expected polls for raw history, or covered eligible time for hourly trends. Missing raw samples count against availability; uncovered trend hours are unknown and excluded. Hourly trends classify the whole hour conservatively. Open a host for timestamped evidence.')) ?>
 	</p>
 	<p class="sr-hint">
 		<?= $esc(sprintf(
 			_('Maintenance windows on a host, or on one of its host groups, are accepted downtime: that time is left out of the host\'s measured time and counts as neither uptime nor downtime. Recurring maintenance periods are laid out in the %1$s time zone (the frontend default), which must match the Zabbix server\'s.'),
 			$report['maintenance']['timezone']
 		)) ?>
-		<?php if ($report['source_used'] === 'trends'): ?>
+		<?php if ($report['source_used'] !== 'history'): ?>
 			<?= $esc(_('On hourly trends, an hour that touches a maintenance window is left out whole.')) ?>
 		<?php endif; ?>
 		<?php if ($report['maintenance']['restricted']): ?>

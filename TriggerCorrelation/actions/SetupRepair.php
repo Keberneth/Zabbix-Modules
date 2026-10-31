@@ -145,7 +145,7 @@ class SetupRepair extends CController {
                     continue;
                 }
                 if (!isset($existing[(string) ($output['receiver_hostid'] ?? '')])) {
-                    $host = $provisioner->ensureCorrelationHost((array) ($rule['conditions'] ?? []), '', array_keys($existing));
+                    $host = $provisioner->ensureCorrelationHost((array) ($rule['conditions'] ?? []), '', array_keys($existing), (array) ($rule['source_selector'] ?? []));
                     $rules[$i]['output']['receiver_host'] = $host['host'];
                     $rules[$i]['output']['receiver_hostid'] = $host['hostid'];
                     $rules[$i]['output']['receiver_host_name'] = $host['name'];
@@ -182,7 +182,7 @@ class SetupRepair extends CController {
             $notes[] = 'Could not clear left-over correlation states: '.Util::truncate($e->getMessage(), 160);
         }
         try {
-            $restored = $this->restoreOrphanSeverities($store, $settings);
+            $restored = $store->withSeverityEvaluationLock(fn(): array => $this->restoreOrphanSeverities($store, $settings));
             if ($restored !== []) {
                 $notes[] = 'Restored the original severity of '.count($restored).' problem(s) still raised by escalation rules that no longer exist: '
                     .Util::truncate(implode(', ', $restored), 240).'.';
@@ -312,7 +312,7 @@ class SetupRepair extends CController {
             return [];
         }
 
-        $held = [];
+        $held = array_fill_keys(array_keys((array) ($store->loadSeverityLedger()['events'] ?? [])), true);
         foreach ((array) (($store->load())['severity_rules'] ?? []) as $rule) {
             foreach (array_keys((array) ($rule['applied'] ?? [])) as $eventid) {
                 $held[(string) $eventid] = true;

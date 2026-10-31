@@ -54,6 +54,8 @@ same(phpBuildId, jsBuildId, 'PHP and browser bundles must expose the same build 
 ok(phpBuildId.startsWith(`${phpVersion}-`), 'The build ID must be namespaced by the module version.');
 same(`capacity-planning-${phpBuildId}.js`, browserAsset,
 	'The browser asset filename must include the complete PHP build ID.');
+same(`capacity-planning-${phpBuildId}.css`, styleAssets[0],
+	'The stylesheet filename must include the complete PHP build ID to avoid stale layout rules.');
 
 // README step 1 of the upgrade checklist is the operator's pre-runtime defense
 // against a stale deployment, so its identifiers have to rotate with the build.

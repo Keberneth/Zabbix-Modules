@@ -1,0 +1,17 @@
+{
+  "name": "zabbix-incident-timeline",
+  "version": "1.4.0",
+  "private": true,
+  "description": "Local regression checks for the Zabbix Incident Timeline module.",
+  "scripts": {
+    "test": "npm run test:frontend && npm run test:browser",
+    "test:frontend": "node tests/frontend-regression.cjs",
+    "test:browser": "node tests/BrowserSmokeTest.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.54.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

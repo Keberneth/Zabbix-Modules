@@ -7,311 +7,528 @@ namespace Modules\TriggerCorrelation\Lib;
 require_once __DIR__.'/Util.php';
 require_once __DIR__.'/CorrelationStore.php';
 require_once __DIR__.'/ZabbixApiClient.php';
+require_once __DIR__.'/RuleEngine.php';
 
-/**
- * Severity-escalation evaluator — the second half of the module.
- *
- * Where the correlation evaluator raises a NEW synthetic problem when a set of
- * source triggers are active together, this one leaves the topology alone and
- * instead RAISES THE SEVERITY of one or more existing problems while the same
- * kind of source condition holds, then restores their original severity when it
- * clears. It works purely through event.acknowledge (Update problem → Change
- * severity, action bitmask 8), so it edits each problem's manual event severity,
- * never the trigger's configured priority — fully reversible and re-appliable.
- *
- * Example: when "demo-sccm01: SSMS service is down" is active, raise
- * "Current month CU not installed" to High on a specific host, a host group, or
- * every host that currently has that problem.
- *
- * It shares the same source-condition primitives, settings and token API
- * transport as the correlation evaluator, but reads/writes its own
- * `severity_rules` set so the correlation feature is completely untouched.
- */
+/** Coordinates all severity rules through a durable, per-event ownership ledger. */
 final class SeverityEvaluator {
-
     private CorrelationStore $store;
     private array $config;
     private array $settings;
     private ZabbixApiClient $api;
+    private bool $injectedApi;
+    private ?RuleEngine $engine = null;
+    private array $targetVisibility = [];
 
-    public function __construct(CorrelationStore $store) {
+    public function __construct(CorrelationStore $store, ?ZabbixApiClient $api = null) {
         $this->store = $store;
         $this->config = $store->load();
         $this->settings = (array) ($this->config['settings'] ?? []);
-        // Runs from the unattended HTTP-agent endpoint (no user session) and uses
-        // event.acknowledge, so it must use the token HTTP client — the same as the
-        // correlation evaluator.
-        $this->api = ZabbixApiClient::fromConfig($this->settings);
+        $this->injectedApi = $api !== null;
+        $this->api = $api ?? ZabbixApiClient::fromConfig($this->settings);
     }
 
     public function evaluate(?string $ruleId = null): array {
-        $started = time();
+        return $this->store->withSeverityEvaluationLock(function () use ($ruleId): array {
+            $this->reload();
+            return $this->evaluateLocked($ruleId);
+        });
+    }
+
+    /** A read-only prediction using the same source, target and timing logic as execution. */
+    public function preview(array $rule): array {
+        $engine = $this->engine ??= new RuleEngine($this->api, $this->settings);
+        $sources = (bool) ($rule['enabled'] ?? true)
+            ? $engine->inspectSources($rule)
+            : ['valid' => true, 'results' => [], 'active_count' => 0, 'total' => 0, 'errors' => []];
+        $valid = (bool) ($sources['valid'] ?? false);
+        $desired = $valid && (bool) ($rule['enabled'] ?? true)
+            && $this->conditionMet($rule, (int) ($sources['active_count'] ?? 0), (int) ($sources['total'] ?? 0)) ? 1 : 0;
+        $rule['_source_signature'] = (string) ($sources['source_signature'] ?? '');
+        $timing = RuleEngine::timedState($rule, $desired, time());
+        if (!(bool) ($rule['enabled'] ?? true)) {
+            $timing = ['state' => 0, 'candidate_state' => 0, 'pending_state' => null, 'pending_since' => 0,
+                'pending_seconds' => 0, 'status' => 'disabled'];
+        }
+        $errors = array_values((array) ($sources['errors'] ?? []));
+        $targets = [];
+        if ($valid && ($desired !== 0 || (int) ($timing['state'] ?? 0) !== 0)) {
+            try {
+                $targets = $this->resolveTargets($rule);
+            }
+            catch (\Throwable $e) {
+                $valid = false;
+                $errors[] = $e->getMessage();
+            }
+        }
+        if (!$valid) {
+            $timing['state'] = (int) ($rule['last_state'] ?? 0);
+            $timing['status'] = 'unknown';
+            // An interrupted observation must not count towards a continuous delay.
+            $timing['pending_state'] = null;
+            $timing['pending_since'] = 0;
+        }
+        $severity = max(1, min(5, (int) ($rule['severity'] ?? 4)));
+        $ledger = (array) (($this->store->loadSeverityLedger())['events'] ?? []);
+        $id = (string) ($rule['id'] ?? '__preview__');
+        $selectedTargets = [];
+        foreach ($targets as &$target) {
+            $eid = (string) $target['eventid'];
+            $selectedTargets[$eid] = true;
+            $entry = (array) ($ledger[$eid] ?? ['baseline' => (int) $target['severity'],
+                'applied_severity' => (int) $target['severity'], 'owners' => []]);
+            $entry['owners'][$id] = ['severity' => $severity, 'only_raise' => (bool) ($rule['only_raise'] ?? true)];
+            $target['manual_override'] = (bool) ($entry['manual_override'] ?? false)
+                || (empty($entry['pending']) && (int) $entry['applied_severity'] !== (int) $target['severity']);
+            $target['requested_severity'] = $severity;
+            $target['effective_severity'] = $this->desiredSeverity($entry);
+            $target['would_change'] = (int) $timing['state'] !== 0 && !$target['manual_override']
+                && (int) $target['severity'] !== $target['effective_severity'];
+        }
+        unset($target);
+        $restorations = [];
+        $release = [];
+        foreach ($ledger as $eid => $entry) {
+            if ($valid && isset($entry['owners'][$id]) && ((int) $timing['state'] === 0 || !isset($selectedTargets[$eid]))) {
+                $release[] = (string) $eid;
+            }
+        }
+        if ($release !== []) {
+            try {
+                $currentEvents = $this->readEvents($release);
+                foreach ($release as $eid) {
+                    $entry = $ledger[$eid];
+                    unset($entry['owners'][$id]);
+                    $event = $currentEvents[$eid] ?? null;
+                    $manual = !empty($entry['manual_override']) || ($event !== null && empty($entry['pending'])
+                        && (int) $entry['applied_severity'] !== (int) $event['severity']);
+                    $restorations[] = ['eventid' => $eid, 'host' => (string) ($entry['host'] ?? ''),
+                        'name' => (string) ($entry['name'] ?? ''), 'available' => $event !== null,
+                        'severity' => $event !== null ? (int) $event['severity'] : null,
+                        'effective_severity' => $this->desiredSeverity($entry), 'manual_override' => $manual,
+                        'would_change' => $event !== null && (string) ($event['r_eventid'] ?? '0') === '0' && !$manual
+                            && (int) $event['severity'] !== $this->desiredSeverity($entry)];
+                }
+            }
+            catch (\Throwable $e) {
+                // Read-only preview can expose an unavailable recovery check without losing intent.
+                $errors[] = 'Recovery preview unavailable: '.$e->getMessage();
+            }
+        }
+        return array_merge($timing, [
+            'type' => 'severity', 'valid' => $valid, 'active' => $desired !== 0,
+            'conditions' => (array) ($sources['results'] ?? []), 'active_count' => (int) ($sources['active_count'] ?? 0),
+            'total' => (int) ($sources['total'] ?? 0), 'targets' => $targets, 'targets_count' => count($targets),
+            'errors' => $errors, 'error' => implode('; ', $errors), 'severity' => $severity,
+            'restorations' => $restorations, 'restorations_count' => count($restorations),
+            'source_signature' => $rule['_source_signature'],
+            'source_members' => array_column((array) ($sources['conditions'] ?? []), 'triggerid')
+        ]);
+    }
+
+    private function reload(): void {
+        $this->config = $this->store->load();
+        $this->settings = (array) ($this->config['settings'] ?? []);
+        if (!$this->injectedApi) {
+            $this->api = ZabbixApiClient::fromConfig($this->settings);
+        }
+        $this->engine = null;
+        $this->targetVisibility = [];
+    }
+
+    private function evaluateLocked(?string $ruleId): array {
+        $clock = time();
         $rules = array_values((array) ($this->config['severity_rules'] ?? []));
         $selected = [];
+        $known = [];
         foreach ($rules as $rule) {
-            if ($ruleId !== null && (string) ($rule['id'] ?? '') !== $ruleId) {
-                continue;
+            $id = (string) ($rule['id'] ?? '');
+            $known[$id] = true;
+            if ($ruleId === null || $id === $ruleId) {
+                $selected[$id] = $rule;
             }
-            $selected[] = $rule;
         }
-
         if ($ruleId !== null && $selected === []) {
             throw new \RuntimeException('Severity escalation rule not found.');
         }
-
-        $summary = [
-            'type' => 'severity',
-            'evaluated_at' => gmdate('c', $started),
-            'rules_total' => count($rules),
-            'rules_evaluated' => count($selected),
-            'persist_error' => null,
-            'rules' => []
-        ];
-
-        $runtimeByRuleId = [];
-        foreach ($selected as $rule) {
-            $result = $this->evaluateRule($rule, $started);
-            $id = (string) ($rule['id'] ?? '');
-            if ($id !== '') {
-                $runtimeByRuleId[$id] = [
-                    'last_state' => $result['state'],
-                    'last_error' => $result['error'],
-                    'last_evaluated' => $started,
-                    'last_evaluated_iso' => gmdate('c', $started),
-                    'applied' => $result['applied'],
-                    'last_comment_sig' => $result['comment_sig'],
-                    'last_targets_count' => $result['targets_count']
-                ];
+        $ledger = $this->initialLedger($rules);
+        $events = (array) $ledger['events'];
+        $drafts = [];
+        $targets = [];
+        $affected = [];
+        foreach ($events as $eid => $entry) {
+            foreach (array_keys((array) ($entry['release_owners'] ?? [])) as $owner) {
+                $affected[$eid][$owner] = true;
             }
-            $summary['rules'][] = [
-                'id' => $id,
-                'name' => (string) ($rule['name'] ?? $id),
-                'state' => $result['state'],
-                'active' => $result['active'],
-                'escalated' => $result['escalated'],
-                'restored' => $result['restored'],
-                'targets_count' => $result['targets_count'],
-                'error' => $result['error']
-            ];
+        }
+        foreach ($selected as $id => $rule) {
+            $drafts[$id] = $this->preview($rule);
+            if (!$drafts[$id]['valid']) {
+                continue; // Unknown never removes an existing contribution.
+            }
+            foreach ($events as $eid => &$entry) {
+                if (isset($entry['owners'][$id])) {
+                    $affected[$eid][$id] = true;
+                    $entry['release_owners'][$id] = true;
+                    unset($entry['owners'][$id]);
+                }
+            }
+            unset($entry);
+            if ((int) $drafts[$id]['state'] === 0) {
+                continue;
+            }
+            foreach ($drafts[$id]['targets'] as $target) {
+                $eid = (string) $target['eventid'];
+                $targets[$eid] = $target;
+                $affected[$eid][$id] = true;
+                if (!isset($events[$eid])) {
+                    $events[$eid] = ['baseline' => (int) $target['severity'], 'applied_severity' => (int) $target['severity'],
+                        'owners' => [], 'host' => (string) ($target['host'] ?? ''), 'name' => (string) ($target['name'] ?? ''),
+                        'manual_override' => false];
+                }
+                $events[$eid]['owners'][$id] = ['severity' => $drafts[$id]['severity'],
+                    'only_raise' => (bool) ($rule['only_raise'] ?? true)];
+                unset($events[$eid]['release_owners'][$id]);
+            }
+        }
+        // Deleted rules release ownership even if their last UI request failed.
+        foreach ($events as $eid => &$entry) {
+            foreach (array_keys((array) ($entry['owners'] ?? [])) as $owner) {
+                if (!isset($known[$owner])) {
+                    unset($entry['owners'][$owner]);
+                }
+            }
+        }
+        unset($entry);
+
+        $errors = [];
+        $changed = [];
+        $restored = [];
+        $observed = $this->readEvents(array_keys($events));
+        $operations = [];
+        foreach ($events as $eid => &$entry) {
+            $event = $observed[$eid] ?? null;
+            if ($event === null) {
+                $errors[$eid] = 'Event '.$eid.' is unavailable to the API token; its recovery record is retained.';
+                continue;
+            }
+            if ((string) ($event['r_eventid'] ?? '0') !== '0') {
+                unset($events[$eid]);
+                continue;
+            }
+            if (!empty($entry['baseline_uncertain'])) {
+                $errors[$eid] = 'Event '.$eid.' has conflicting legacy baselines and no usable severity history. Recovery requires review; no severity was changed.';
+                continue;
+            }
+            $current = (int) $event['severity'];
+            $pending = (array) ($entry['pending'] ?? []);
+            if ($pending !== [] && $current === (int) $pending['to']) {
+                // Covers a successful API write followed by a lost response or failed commit.
+                $entry['applied_severity'] = $current;
+                $entry['last_operation'] = (string) ($pending['id'] ?? '');
+                unset($entry['pending']);
+            }
+            elseif ($pending !== [] && $current !== (int) $pending['from']) {
+                $entry['manual_override'] = true;
+                unset($entry['pending']);
+            }
+            elseif ($pending === [] && $current !== (int) $entry['applied_severity']) {
+                $entry['manual_override'] = true;
+            }
+            if (!empty($entry['manual_override'])) {
+                // Respect an operator's severity for the rest of this ownership period.
+                if (empty($entry['owners'])) {
+                    unset($events[$eid]);
+                }
+                continue;
+            }
+            $wanted = $this->desiredSeverity($entry);
+            if ($current === $wanted) {
+                unset($entry['pending']);
+                $entry['applied_severity'] = $current;
+                if (empty($entry['owners'])) {
+                    unset($events[$eid]);
+                }
+                continue;
+            }
+            $opid = bin2hex(random_bytes(8));
+            $entry['pending'] = ['id' => $opid, 'from' => $current, 'to' => $wanted];
+            $operations[$eid] = $entry['pending'];
+        }
+        unset($entry);
+
+        // Entire intended batch and baselines must fit durable storage before the first side effect.
+        $ledger['events'] = $events;
+        $this->store->saveSeverityLedger($ledger);
+        foreach ($operations as $eid => $operation) {
+            try {
+                // Recheck immediately before writing so a human edit since the snapshot wins.
+                $latest = $this->readEvents([(string) $eid]);
+                $event = $latest[$eid] ?? null;
+                if ($event === null) {
+                    throw new \RuntimeException('Event '.$eid.' became unavailable; restoration remains pending.');
+                }
+                if ((string) ($event['r_eventid'] ?? '0') !== '0') {
+                    unset($ledger['events'][$eid]);
+                }
+                elseif ((int) $event['severity'] !== (int) $operation['from']) {
+                    $ledger['events'][$eid]['manual_override'] = true;
+                    unset($ledger['events'][$eid]['pending']);
+                }
+                else {
+                    $recovery = empty($ledger['events'][$eid]['owners']);
+                    $message = $this->operationMessage($ledger['events'][$eid], $operation, $rules, $drafts);
+                    $this->api->setEventSeverity((string) $eid, (int) $operation['to'], $message);
+                    if ($recovery) {
+                        $restored[$eid] = true;
+                        unset($ledger['events'][$eid]);
+                    }
+                    else {
+                        $changed[$eid] = true;
+                        $ledger['events'][$eid]['applied_severity'] = (int) $operation['to'];
+                        $ledger['events'][$eid]['last_operation'] = $operation['id'];
+                        unset($ledger['events'][$eid]['pending']);
+                    }
+                }
+            }
+            catch (\Throwable $e) {
+                $errors[$eid] = $e->getMessage();
+                // Keep the durable intent; next run observes whether a timed-out write succeeded.
+            }
+            // A failed commit aborts the remaining API writes; the original journal remains recoverable.
+            $this->store->saveSeverityLedger($ledger);
         }
 
-        try {
-            $this->store->saveSeverityRuntimeState($runtimeByRuleId);
+        $runtime = [];
+        $summary = ['type' => 'severity', 'evaluated_at' => gmdate('c', $clock), 'rules_total' => count($rules),
+            'rules_evaluated' => count($selected), 'persist_error' => null, 'rules' => [], 'errors' => array_values($errors)];
+        foreach ($selected as $id => $rule) {
+            $draft = $drafts[$id];
+            $ruleErrors = (array) $draft['errors'];
+            $applied = [];
+            $manual = 0;
+            foreach ((array) $ledger['events'] as $eid => $entry) {
+                if (isset($entry['owners'][$id]) || isset($affected[$eid][$id])) {
+                    if (!empty($entry['manual_override'])) {
+                        $manual++;
+                    }
+                    if (isset($errors[$eid])) {
+                        $ruleErrors[] = $errors[$eid];
+                    }
+                    if (isset($entry['owners'][$id]) || isset($entry['release_owners'][$id]) || !empty($entry['pending'])) {
+                        $applied[$eid] = ['sev' => (int) $entry['baseline'],
+                            'to' => !empty($entry['manual_override']) && isset($observed[$eid])
+                                ? (int) $observed[$eid]['severity'] : (int) $entry['applied_severity'],
+                            'host' => (string) ($entry['host'] ?? ''), 'name' => (string) ($entry['name'] ?? ''),
+                            'manual_override' => !empty($entry['manual_override']),
+                            'pending_restore' => empty($entry['owners']) && empty($entry['manual_override'])];
+                    }
+                }
+            }
+            $error = Util::truncate(implode('; ', array_unique($ruleErrors)), 1000);
+            $status = !$draft['valid'] ? 'unknown' : ($error !== '' ? 'error' : ($manual > 0 ? 'manual_override' : (string) $draft['status']));
+            $patch = ['last_state' => (int) $draft['state'], 'last_error' => $error, 'last_evaluated' => $clock,
+                'last_evaluated_iso' => gmdate('c', $clock), 'applied' => $applied, 'last_targets_count' => $draft['targets_count'],
+                'status' => $status, 'manual_override_count' => $manual,
+                'source_signature' => $draft['source_signature'], 'source_members' => $draft['source_members']];
+            foreach (['pending_state', 'pending_since', 'pending_seconds', 'candidate_state'] as $key) {
+                $patch[$key] = $draft[$key] ?? null;
+            }
+            if ($error === '') {
+                $patch['last_successful'] = $clock;
+            }
+            $commentSig = (string) ($rule['last_comment_sig'] ?? '');
+            if ($draft['valid'] && (int) $draft['state'] !== 0 && $error === '') {
+                $sources = [];
+                foreach ((array) $draft['conditions'] as $condition) {
+                    foreach ((array) ($condition['problems'] ?? []) as $problem) {
+                        $sources[] = $problem + ['host' => (string) ($condition['host'] ?? ''),
+                            'trigger' => (string) ($condition['trigger'] ?? '')];
+                    }
+                }
+                $commentApplied = array_filter($applied, static fn(array $entry): bool => empty($entry['manual_override']) && empty($entry['pending_restore']));
+                $commentSig = $this->maybeCommentSources($rule, (string) ($rule['name'] ?? $id),
+                    (int) $draft['severity'], $sources, $commentApplied, $commentSig);
+            }
+            elseif ((int) $draft['state'] === 0) {
+                $commentSig = '';
+            }
+            $patch['last_comment_sig'] = $commentSig;
+            $runtime[$id] = $patch;
+            $ruleAffected = array_filter($affected, static fn(array $owners): bool => isset($owners[$id]));
+            $summary['rules'][] = ['id' => $id, 'name' => (string) ($rule['name'] ?? $id), 'state' => (int) $draft['state'],
+                'active' => (int) $draft['state'] !== 0, 'escalated' => count(array_intersect_key($changed, $ruleAffected)),
+                'restored' => count(array_intersect_key($restored, $ruleAffected)), 'targets_count' => $draft['targets_count'],
+                'manual_overrides' => $manual, 'status' => $status, 'error' => $error];
         }
-        catch (\Throwable $e) {
-            $summary['persist_error'] = $e->getMessage();
+        $this->store->saveSeverityRuntimeState($runtime);
+        $finishedDeletes = [];
+        foreach ($selected as $id => $rule) {
+            if (!empty($rule['deletion_pending']) && ($runtime[$id]['last_error'] ?? '') === '') {
+                $finishedDeletes[$id] = true;
+            }
         }
-
+        if ($finishedDeletes !== []) {
+            CorrelationStore::transaction(function () use ($finishedDeletes): void {
+                $config = $this->store->load();
+                $config['severity_rules'] = array_values(array_filter((array) ($config['severity_rules'] ?? []),
+                    static fn(array $rule): bool => !isset($finishedDeletes[(string) ($rule['id'] ?? '')])));
+                $this->store->save($config);
+            });
+        }
         return $summary;
     }
 
-    /**
-     * Restore every severity this rule had raised, e.g. when the rule is deleted or
-     * disabled from the UI. Best-effort; never throws. Returns the number reverted.
-     */
+    private function initialLedger(array $rules): array {
+        $ledger = $this->store->loadSeverityLedger();
+        if ((int) ($ledger['version'] ?? 0) >= 1) {
+            return $ledger;
+        }
+        $events = [];
+        foreach ($rules as $rule) {
+            $id = (string) ($rule['id'] ?? '');
+            foreach ($this->normalizeApplied($rule['applied'] ?? []) as $eid => $info) {
+                if (!isset($events[$eid])) {
+                    $events[$eid] = ['baseline' => $info['sev'], 'applied_severity' => $info['to'], 'owners' => [],
+                        'host' => $info['host'], 'name' => $info['name'], 'manual_override' => false];
+                }
+                $events[$eid]['baseline'] = min((int) $events[$eid]['baseline'], $info['sev']);
+                $events[$eid]['applied_severity'] = max((int) $events[$eid]['applied_severity'], $info['to']);
+                $events[$eid]['owners'][$id] = ['severity' => $info['to'], 'only_raise' => (bool) ($rule['only_raise'] ?? true)];
+            }
+        }
+        // Old versions kept independent baselines. Recover the beginning of the
+        // current module-change chain when event history is available.
+        if ($events !== []) {
+            $history = $this->readEvents(array_keys($events), true);
+            foreach ($events as $eid => &$entry) {
+                $changes = array_values(array_filter((array) ($history[$eid]['acknowledges'] ?? []),
+                    static fn(array $change): bool => ((int) ($change['action'] ?? 0) & 8) !== 0));
+                $foundBaseline = false;
+                foreach ($changes as $index => $change) {
+                    $message = (string) ($change['message'] ?? '');
+                    if (!str_starts_with($message, '[TC severity]')) {
+                        if ($index === 0) { $entry['manual_override'] = true; }
+                        break;
+                    }
+                    if (stripos($message, 'restor') !== false) { break; }
+                    $entry['baseline'] = (int) ($change['old_severity'] ?? $entry['baseline']);
+                    $foundBaseline = true;
+                }
+                if (!$foundBaseline && count($entry['owners']) > 1) {
+                    foreach ($entry['owners'] as $owner) {
+                        if (!$owner['only_raise']) { $entry['baseline_uncertain'] = true; }
+                    }
+                }
+            }
+            unset($entry);
+        }
+        return ['version' => 1, 'events' => $events];
+    }
+
+    private function desiredSeverity(array $entry): int {
+        $owners = (array) ($entry['owners'] ?? []);
+        if ($owners === []) {
+            return (int) $entry['baseline'];
+        }
+        $wanted = 0;
+        foreach ($owners as $owner) {
+            $severity = (int) $owner['severity'];
+            if ((bool) ($owner['only_raise'] ?? true)) {
+                $severity = max($severity, (int) $entry['baseline']);
+            }
+            $wanted = max($wanted, $severity);
+        }
+        return $wanted;
+    }
+
+    private function operationMessage(array $entry, array $operation, array $rules, array $drafts): string {
+        $message = '[TC severity]';
+        if (empty($entry['owners'])) {
+            $message .= ' Restored original severity to '.self::sevText((int) $operation['to']).'.';
+        }
+        else {
+            $reasons = [];
+            foreach ($rules as $rule) {
+                $id = (string) ($rule['id'] ?? '');
+                if (!isset($entry['owners'][$id]) || !(bool) ($rule['comment_target'] ?? true)) { continue; }
+                $label = '"'.(string) ($rule['name'] ?? $id).'"';
+                $problems = [];
+                foreach ((array) ($drafts[$id]['conditions'] ?? []) as $condition) {
+                    foreach ((array) ($condition['problems'] ?? []) as $problem) { $problems[] = $problem; }
+                }
+                if ($problems !== []) { $label .= ' because '.$this->sourceLabel($problems); }
+                $reasons[] = $label;
+            }
+            if ($reasons !== []) {
+                $message .= ' Severity '.self::sevText((int) $operation['to']).' from active escalation '.implode('; ', $reasons).'.';
+            }
+        }
+        return $message.' [operation '.$operation['id'].']';
+    }
+
+    /** Missing events remain unknown; only a visible recovery event proves resolution. */
+    private function readEvents(array $ids, bool $history = false): array {
+        $events = [];
+        foreach (array_chunk(array_map('strval', $ids), 200) as $chunk) {
+            $params = ['output' => ['eventid', 'severity', 'r_eventid'],
+                'eventids' => $chunk, 'source' => 0, 'object' => 0];
+            if ($history) {
+                $params['selectAcknowledges'] = ['action', 'message', 'old_severity', 'new_severity'];
+            }
+            foreach ((array) $this->api->call('event.get', $params) as $event) {
+                $events[(string) $event['eventid']] = $event;
+            }
+        }
+        return $events;
+    }
+
+    /** Retire a rule without discarding recovery intent if the API or storage fails. */
+    public function deleteRule(string $id): array {
+        return $this->store->withSeverityEvaluationLock(function () use ($id): array {
+            $found = false;
+            CorrelationStore::transaction(function () use ($id, &$found): void {
+                $config = $this->store->load();
+                foreach ($config['severity_rules'] as &$rule) {
+                    if ((string) ($rule['id'] ?? '') === $id) {
+                        $rule['enabled'] = false;
+                        $rule['deletion_pending'] = true;
+                        $found = true;
+                    }
+                }
+                unset($rule);
+                if ($found) {
+                    $this->store->save($config);
+                }
+            });
+            if (!$found) {
+                return ['deleted' => 0, 'pending' => false];
+            }
+            $this->reload();
+            $result = $this->evaluateLocked($id);
+            $error = (string) ($result['rules'][0]['error'] ?? '');
+            if ($error !== '') {
+                return ['deleted' => 0, 'pending' => true, 'error' => $error];
+            }
+            return ['deleted' => 1, 'pending' => false];
+        });
+    }
+
+    /** Compatibility for callers that still retain a rule before requesting its removal. */
     public function revertRule(array $rule): int {
-        $name = (string) ($rule['name'] ?? '');
-        $reverted = 0;
-        foreach ($this->normalizeApplied($rule['applied'] ?? []) as $eventid => $info) {
-            try {
-                $this->api->setEventSeverity(
-                    (string) $eventid,
-                    (int) ($info['sev'] ?? 0),
-                    '[TC severity] Restored original severity (escalation "'.$name.'" removed).'
-                );
-                $reverted++;
-            }
-            catch (\Throwable $e) {
-                // The problem may already be resolved — nothing to restore.
-            }
+        $result = $this->deleteRule((string) ($rule['id'] ?? ''));
+        if (!empty($result['pending'])) {
+            throw new \RuntimeException((string) $result['error']);
         }
-        return $reverted;
-    }
-
-    private function evaluateRule(array $rule, int $clock): array {
-        $name = (string) ($rule['name'] ?? ($rule['id'] ?? ''));
-        $enabled = (bool) ($rule['enabled'] ?? true);
-        $applied = $this->normalizeApplied($rule['applied'] ?? []);
-        $commentSig = (string) ($rule['last_comment_sig'] ?? '');
-        $state = (int) ($rule['last_state'] ?? 0);
-        $error = '';
-        $active = false;
-        $escalated = 0;
-        $restored = 0;
-        $targetsCount = 0;
-
-        try {
-            $conditions = array_values((array) ($rule['conditions'] ?? []));
-            if ($conditions === []) {
-                throw new \RuntimeException('Severity escalation rule has no source trigger conditions.');
-            }
-
-            $activeCount = 0;
-            $total = 0;
-            $activeProblems = [];
-            foreach ($conditions as $condition) {
-                $total++;
-                $cr = $this->conditionActive((array) $condition);
-                if ($cr['active']) {
-                    $activeCount++;
-                    foreach ($cr['problems'] as $p) {
-                        $activeProblems[] = $p;
-                    }
-                }
-            }
-
-            $active = $enabled && $this->conditionMet($rule, $activeCount, $total);
-
-            if ($active) {
-                $severity = max(1, min(5, (int) ($rule['severity'] ?? 4)));
-                $onlyRaise = (bool) ($rule['only_raise'] ?? true);
-                $commentTarget = (bool) ($rule['comment_target'] ?? true);
-                $sourceLabel = $this->sourceLabel($activeProblems);
-
-                $targets = $this->resolveTargets($rule);
-                $targetsCount = count($targets);
-                $newApplied = [];
-
-                foreach ($targets as $target) {
-                    $eventid = (string) $target['eventid'];
-                    if ($eventid === '') {
-                        continue;
-                    }
-                    $current = (int) $target['severity'];
-                    $original = isset($applied[$eventid]) ? (int) $applied[$eventid]['sev'] : $current;
-                    $needsChange = $onlyRaise ? ($current < $severity) : ($current !== $severity);
-
-                    if ($needsChange) {
-                        // Always carry the [TC severity] marker — even with comments off —
-                        // so a raise can be recognised and restored if the rule's own
-                        // record of it is ever lost (Repair automatic setup).
-                        $message = $commentTarget
-                            ? '[TC severity] Raised to '.self::sevText($severity).' by escalation "'.$name.'" because: '.$sourceLabel
-                            : '[TC severity]';
-                        try {
-                            $this->api->setEventSeverity($eventid, $severity, $message);
-                            $escalated++;
-                            $newApplied[$eventid] = [
-                                'sev' => $original,
-                                'to' => $severity,
-                                'host' => (string) $target['host'],
-                                'name' => (string) $target['name']
-                            ];
-                        }
-                        catch (\Throwable $e) {
-                            // Keep any prior record so a transient API error does not
-                            // make us forget we already raised (and must later restore).
-                            if (isset($applied[$eventid])) {
-                                $newApplied[$eventid] = $applied[$eventid];
-                            }
-                        }
-                    }
-                    elseif (isset($applied[$eventid])) {
-                        // Already at/over target and we raised it before: keep the memory.
-                        $newApplied[$eventid] = $applied[$eventid];
-                    }
-                    // else: already as-severe and we never touched it → leave it alone.
-                }
-
-                // Cross-link the SOURCE problems once per (source set → target set)
-                // change, mirroring the correlation feature's source comments.
-                $commentSig = $this->maybeCommentSources($rule, $name, $severity, $activeProblems, $newApplied, $commentSig);
-
-                $applied = $newApplied;
-                $state = 1;
-            }
-            else {
-                // Condition no longer met (or rule disabled): restore every severity
-                // we raised, then forget them.
-                foreach ($applied as $eventid => $info) {
-                    try {
-                        $this->api->setEventSeverity(
-                            (string) $eventid,
-                            (int) ($info['sev'] ?? 0),
-                            '[TC severity] Restored severity to '.self::sevText((int) ($info['sev'] ?? 0)).' (escalation "'.$name.'" cleared).'
-                        );
-                        $restored++;
-                    }
-                    catch (\Throwable $e) {
-                        // Problem already resolved — nothing to restore.
-                    }
-                }
-                $applied = [];
-                $commentSig = '';
-                $state = 0;
-            }
-        }
-        catch (\Throwable $e) {
-            $error = $e->getMessage();
-        }
-
-        return [
-            'state' => $state,
-            'active' => $active,
-            'escalated' => $escalated,
-            'restored' => $restored,
-            'targets_count' => $targetsCount,
-            'applied' => $applied,
-            'comment_sig' => $commentSig,
-            'error' => $error
-        ];
-    }
-
-    /** Active problems for one source condition (same rules as correlation). */
-    private function conditionActive(array $condition): array {
-        $triggerid = trim((string) ($condition['triggerid'] ?? ''));
-        $hostid = trim((string) ($condition['hostid'] ?? ''));
-        $host = trim((string) ($condition['host'] ?? ''));
-        $trigger = trim((string) ($condition['trigger'] ?? ''));
-
-        if ($triggerid === '') {
-            throw new \RuntimeException('A condition is missing its trigger selection for host '.$host.'.');
-        }
-
-        $problems = $this->api->activeProblemsForTrigger($triggerid, $hostid, $this->settings);
-        $minActive = max(0, (int) ($this->settings['min_active_seconds'] ?? 0));
-        $ignoreSymptoms = (bool) ($this->settings['ignore_symptoms'] ?? true);
-        $now = time();
-        $out = [];
-
-        foreach ($problems as $problem) {
-            $clock = (int) ($problem['clock'] ?? 0);
-            if ($minActive > 0 && $clock > 0 && ($now - $clock) < $minActive) {
-                continue;
-            }
-            $cause = (string) ($problem['cause_eventid'] ?? '');
-            if ($ignoreSymptoms && $cause !== '' && $cause !== '0') {
-                continue;
-            }
-            $out[] = [
-                'eventid' => (string) ($problem['eventid'] ?? ''),
-                'host' => $host,
-                'trigger' => $trigger !== '' ? $trigger : (string) ($problem['name'] ?? ''),
-                'severity' => (string) ($problem['severity'] ?? '')
-            ];
-        }
-
-        return ['active' => count($out) > 0, 'problems' => $out];
+        return (int) ($result['deleted'] ?? 0);
     }
 
     private function conditionMet(array $rule, int $activeCount, int $total): bool {
-        $mode = (string) ($rule['match_mode'] ?? 'all');
-        if ($mode === 'any') {
-            return $activeCount >= 1;
-        }
-        if ($mode === 'count') {
-            return $activeCount >= max(1, (int) ($rule['min_active'] ?? 1));
-        }
-        return $total > 0 && $activeCount === $total;
+        return match ((string) ($rule['match_mode'] ?? 'all')) {
+            'any' => $activeCount >= 1,
+            'count' => $activeCount >= max(1, (int) ($rule['min_active'] ?? 1)),
+            default => $total > 0 && $activeCount === $total
+        };
     }
-
-    /**
-     * Resolve every active problem a rule's targets point at, deduped by event id.
-     * Each target is a trigger plus a scope:
-     *   host      → that exact trigger's active problem(s) (by trigger id)
-     *   hostgroup → active problems with the same trigger NAME in a host group
-     *   all       → active problems with the same trigger NAME on any host
-     */
     private function resolveTargets(array $rule): array {
         $results = [];
 
@@ -320,6 +537,7 @@ final class SeverityEvaluator {
             $scope = (string) ($target['scope'] ?? 'host');
             $triggerName = trim((string) ($target['trigger'] ?? ''));
             $matchMode = (string) ($target['match'] ?? 'exact');
+            $this->assertTargetVisible($target);
 
             $params = [
                 // NOTE: problem.get in Zabbix 7.0 has NO selectHosts — the host is
@@ -330,7 +548,8 @@ final class SeverityEvaluator {
                 'recent' => false,
                 'sortfield' => ['eventid'],
                 'sortorder' => 'DESC',
-                'limit' => 200
+                // Fetch one extra so the safety limit is explicit, never silent partial coverage.
+                'limit' => 1001
             ];
             if ((bool) ($this->settings['ignore_suppressed'] ?? true)) {
                 $params['suppressed'] = false;
@@ -371,11 +590,9 @@ final class SeverityEvaluator {
                 }
             }
 
-            try {
-                $problems = (array) $this->api->call('problem.get', $params);
-            }
-            catch (\Throwable $e) {
-                continue;
+            $problems = (array) $this->api->call('problem.get', $params);
+            if (count($problems) > 1000) {
+                throw new \RuntimeException('The escalation target matches more than 1000 problems. Narrow its host group or name filter; no partial escalation was applied.');
             }
 
             foreach ($problems as $problem) {
@@ -428,6 +645,40 @@ final class SeverityEvaluator {
         }
 
         return array_values($results);
+    }
+
+    /** An empty problem query proves only no visible matches, not target visibility. */
+    private function assertTargetVisible(array $target): void {
+        $scope = (string) ($target['scope'] ?? 'host');
+        if ($scope === 'all') { return; }
+        $triggerid = trim((string) ($target['triggerid'] ?? ''));
+        $hostid = trim((string) ($target['hostid'] ?? ''));
+        $groupid = trim((string) ($target['groupid'] ?? ''));
+        $cacheKey = $scope.'|'.$triggerid.'|'.$hostid.'|'.$groupid;
+        if (isset($this->targetVisibility[$cacheKey])) { return; }
+        if ($scope === 'hostgroup') {
+            if ($groupid === '' || !(array) $this->api->call('hostgroup.get', ['output' => ['groupid'], 'groupids' => [$groupid]])) {
+                throw new \RuntimeException('The escalation target host group is unavailable to the API token or was removed. Existing escalation ownership is retained.');
+            }
+        }
+        elseif ($triggerid !== '') {
+            $rows = (array) $this->api->call('trigger.get', ['output' => ['triggerid'], 'triggerids' => [$triggerid],
+                'selectHosts' => ['hostid']]);
+            $visible = false;
+            foreach ($rows as $row) {
+                if ((string) ($row['triggerid'] ?? '') !== $triggerid) { continue; }
+                if ($hostid === '' || in_array($hostid, array_map('strval', array_column((array) ($row['hosts'] ?? []), 'hostid')), true)) {
+                    $visible = true;
+                }
+            }
+            if (!$visible) {
+                throw new \RuntimeException('The escalation target trigger is unavailable to the API token, was removed, or no longer belongs to the selected host. Existing escalation ownership is retained.');
+            }
+        }
+        elseif ($hostid === '' || !(array) $this->api->call('host.get', ['output' => ['hostid'], 'hostids' => [$hostid]])) {
+            throw new \RuntimeException('The escalation target host is unavailable to the API token or was removed. Existing escalation ownership is retained.');
+        }
+        $this->targetVisibility[$cacheKey] = true;
     }
 
     /** Map trigger ids → host label/id (problem.get cannot selectHosts in 7.0). */
@@ -490,8 +741,8 @@ final class SeverityEvaluator {
             $targets[trim($label, ': ')] = true;
         }
         $targetList = implode('; ', array_keys($targets));
-        $message = 'While this problem is active, escalation "'.$name.'" raises the severity of '
-            .($targetList !== '' ? $targetList : count($applied).' problem(s)').' to '.self::sevText($severity).'.';
+        $message = 'While this problem is active, escalation "'.$name.'" requests '.self::sevText($severity).' for '
+            .($targetList !== '' ? $targetList : count($applied).' problem(s)').'. Other active rules may request a higher severity.';
 
         $allPosted = true;
         foreach ($sourceEventIds as $eventid) {

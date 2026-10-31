@@ -1,0 +1,16 @@
+.sr-settings-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.sr-settings .sr-table input[type="number"] { width: 75px; }
+.sr-settings .sr-table input[type="text"] { width: 150px; }
+.sr-settings .sr-table input.sr-settings-key { width: 230px; }
+.sr-settings .sr-table input.sr-settings-label { width: 165px; }
+.sr-settings .sr-table select { max-width: 215px; }
+.sr-settings-exclusions { display: flex; gap: 24px; flex-wrap: wrap; }
+.sr-settings-exclusions label { display: flex; flex-direction: column; gap: 8px; flex: 1 1 320px; }
+.sr-settings-exclusions select { width: 100%; min-height: 180px; }
+.sr-settings fieldset:disabled { opacity: 0.85; }
+.sr-settings fieldset:disabled [data-sr-remove-rule] { display: none; }
+.sr-settings [data-sr-object-name] { display: block; max-width: 180px; white-space: normal; overflow-wrap: anywhere; margin-top: 5px; }
+.sr-settings-import { margin-bottom: 16px; padding: 12px; border: 1px solid var(--sr-border); border-radius: 4px; }
+.sr-settings-import summary { cursor: pointer; font-weight: 600; }
+.sr-settings-import label { display: block; margin-bottom: 6px; }
+.sr-settings-import textarea { box-sizing: border-box; width: 100%; margin-bottom: 10px; font-family: monospace; white-space: pre; }

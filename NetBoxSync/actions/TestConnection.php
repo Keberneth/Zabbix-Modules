@@ -24,6 +24,8 @@ class TestConnection extends CController {
         $fields = [
             'url' => 'string',
             'token' => 'string',
+            'token_env' => 'string',
+            'clear_token' => 'in 0,1',
             'verify_peer' => 'in 0,1',
             'timeout' => 'int32'
         ];
@@ -48,17 +50,19 @@ class TestConnection extends CController {
         set_time_limit(60);
 
         try {
-            $config = Config::sanitizeForRuntime(Config::get());
+            $config = Config::get();
 
             $url = trim((string) ($_REQUEST['url'] ?? ''));
             if ($url === '') {
                 $url = (string) ($config['netbox']['url'] ?? '');
             }
 
-            $token = (string) ($_REQUEST['token'] ?? '');
-            if (trim($token) === '') {
-                $token = (string) ($config['netbox']['token'] ?? '');
+            $secret_input = $_REQUEST;
+            if (!array_key_exists('token_env', $secret_input)) {
+                $secret_input['token_env'] = $config['netbox']['token_env'] ?? '';
             }
+            $secret = Config::buildSecretSettings($secret_input, $config['netbox'] ?? []);
+            $token = Config::resolveSectionSecret($secret);
 
             $verify_peer = array_key_exists('verify_peer', $_REQUEST)
                 ? Util::truthy($_REQUEST['verify_peer'])

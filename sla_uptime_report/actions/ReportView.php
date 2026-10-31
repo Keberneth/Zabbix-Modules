@@ -13,8 +13,8 @@ class ReportView extends CController {
 		$this->disableCsrfValidation();
 	}
 
-	protected function checkInput(): bool {
-		$fields = [
+	protected static function inputFields(): array {
+		return [
 			'filter_mode' => 'in prev_month,specific_month,custom_range,days_back',
 			'filter_month' => 'string',
 			'filter_date_from' => 'string',
@@ -25,10 +25,13 @@ class ReportView extends CController {
 			'filter_exclude_disabled' => 'in 0,1',
 			'filter_target' => 'string',
 			'filter_top' => 'int32',
-			'filter_tab' => 'in overview,slas,availability'
+			'filter_tab' => 'in overview,slas,availability',
+			'full' => 'in 0,1'
 		];
+	}
 
-		$ret = $this->validateInput($fields);
+	protected function checkInput(): bool {
+		$ret = $this->validateInput(self::inputFields());
 
 		if (!$ret) {
 			$this->setResponse(new CControllerResponseFatal());
@@ -51,7 +54,9 @@ class ReportView extends CController {
 
 			[$time_from, $time_to] = ReportDataHelper::resolveDateRange($filter);
 
-			$report = $helper->buildReport($filter, $time_from, $time_to);
+			$full = (bool) $this->getInput('full', 0);
+			$report = $full ? $helper->buildReport($filter, $time_from, $time_to)
+				: $helper->buildShell($filter, $time_from, $time_to);
 
 			$this->setResponse(new CControllerResponseData([
 				'title' => _('SLA & Uptime Report'),
@@ -59,7 +64,8 @@ class ReportView extends CController {
 				'time_from' => $time_from,
 				'time_to' => $time_to,
 				'report' => $report,
-				'helper' => $helper
+				'helper' => $helper,
+				'async' => !$full
 			]));
 		}
 		catch (\InvalidArgumentException $e) {
@@ -78,7 +84,7 @@ class ReportView extends CController {
 		}
 	}
 
-	private function readFilterInput(): array {
+	protected function readFilterInput(): array {
 		$defaults = ReportDataHelper::getDefaultFilter();
 
 		return [

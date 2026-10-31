@@ -21,8 +21,8 @@ $sla_summary = $report['sla_summary'];
 	<div class="sr-kpis">
 		<?php foreach ($report['cards'] as $card): ?>
 			<div class="sr-kpi sr-kpi--<?= $esc($card['tone']) ?>">
-				<div class="sr-kpi-label"><?= $esc($card['label']) ?></div>
-				<div class="sr-kpi-value"><?= $esc($card['value']) ?></div>
+				<div class="sr-kpi-label"><?php if ($card['key'] === 'nodata'): ?><a href="<?= $esc($nodata_url) ?>" data-sr-view-nodata><?= $esc($card['label']) ?></a><?php else: ?><?= $esc($card['label']) ?><?php endif; ?></div>
+				<div class="sr-kpi-value"><?php if ($card['key'] === 'nodata'): ?><a href="<?= $esc($nodata_url) ?>" data-sr-view-nodata><?= $esc($card['value']) ?></a><?php else: ?><?= $esc($card['value']) ?><?php endif; ?></div>
 				<div class="sr-kpi-sub"><?= $esc($card['sub']) ?></div>
 			</div>
 		<?php endforeach; ?>
@@ -35,7 +35,7 @@ $sla_summary = $report['sla_summary'];
 		<span class="sr-panel-note"><?= $esc(_('Stacked by host group')) ?></span>
 	</div>
 	<p class="sr-panel-sub">
-		<?= $esc(_('Minutes of host downtime each day, summed across the selected hosts. A flat baseline at zero is the goal; spikes are incidents worth a look.')) ?>
+		<?= $esc(_('Minutes of downtime each day, summed across the selected checks. Separate website checks on one host contribute independently.')) ?>
 	</p>
 	<div class="sr-chart-scroll">
 		<?= $chart->stackedTime(
@@ -82,6 +82,7 @@ $sla_summary = $report['sla_summary'];
 						<tr>
 							<th><?= $esc(_('Host group')) ?></th>
 							<th class="sr-num"><?= $esc(_('Hosts')) ?></th>
+							<th class="sr-num"><?= $esc(_('Checks')) ?></th>
 							<th class="sr-num"><?= $esc(_('Average')) ?></th>
 							<th style="width: 30%"><?= $esc(_('Downtime')) ?></th>
 							<th class="sr-num"><?= $esc(_('Worst host')) ?></th>
@@ -106,6 +107,7 @@ $sla_summary = $report['sla_summary'];
 									<span class="sr-strong"><?= $esc($group['name']) ?></span>
 								</td>
 								<td class="sr-num"><?= $esc((string) $group['hosts_total']) ?></td>
+								<td class="sr-num"><?= $esc((string) ($group['measurements_total'] ?? $group['hosts_total'])) ?></td>
 								<td class="sr-num"><?= $fmt->pill($avg_state === 'ok' ? 'ok' : ($avg_state === 'neutral' ? 'neutral' : $avg_state), $helper->formatPct($avg, 2)) ?></td>
 								<td>
 									<?php if ($group['with_data'] === 0): ?>
@@ -230,10 +232,12 @@ $sla_summary = $report['sla_summary'];
 		<p class="sr-empty">
 			<?= $esc(_('Nothing to check yet. No hosts or SLAs were found for this selection.')) ?>
 		</p>
+	<?php elseif ($report['attention'] === [] && ((int) $fleet['na'] > 0 || (int) ($fleet['partial_data'] ?? 0) > 0)): ?>
+		<p class="sr-hint"><?= $esc(_('Measured results are on target, but some hosts have missing or incomplete data. Review host coverage before concluding that the whole fleet met its target.')) ?></p>
 	<?php elseif ($report['attention'] === []): ?>
 		<div class="sr-all-clear">
 			<span aria-hidden="true">●</span>
-			<span><?= $esc(_('Everything is on target. Every SLO is met and every measured host is above the availability target.')) ?></span>
+			<span><?= $esc(_('Everything is on target. Every SLO is met and every measured check is above the availability target.')) ?></span>
 		</div>
 	<?php else: ?>
 		<div class="sr-attention">

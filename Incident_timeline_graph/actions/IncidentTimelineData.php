@@ -8,6 +8,8 @@ use API;
 use CController;
 use CControllerResponseData;
 
+final class IncidentTimelineInputException extends \RuntimeException {}
+
 final class IncidentTimelineData extends CController {
 	// ~25 months. Lets the UI request long, multi-month windows; the server keeps
 	// per-request work bounded by bucketing + per-severity counting.
@@ -69,10 +71,10 @@ final class IncidentTimelineData extends CController {
 				return;
 			}
 
-			$time_from = (int) $this->getInput('time_from');
-			$time_to = (int) $this->getInput('time_to');
+			$time_from = $this->parseTimestamp((string) $this->getInput('time_from'));
+			$time_to = $this->parseTimestamp((string) $this->getInput('time_to'));
 
-			if ($time_from <= 0 || $time_to <= 0 || $time_from > $time_to) {
+			if ($time_from === null || $time_to === null || $time_from > $time_to) {
 				$this->respondJsonError(_('Invalid time range.'), 400);
 				return;
 			}
@@ -97,6 +99,9 @@ final class IncidentTimelineData extends CController {
 			else {
 				$this->handleAggregate($time_from, $time_to, $filter);
 			}
+		}
+		catch (IncidentTimelineInputException $e) {
+			$this->respondJsonError($e->getMessage(), 400);
 		}
 		catch (\Throwable $e) {
 			// Log the real cause; return a generic message (avoid leaking internal
@@ -126,7 +131,7 @@ final class IncidentTimelineData extends CController {
 		$notes = [];
 
 		if ($group !== '') {
-			$rows = API::HostGroup()->get(['output' => ['groupid'], 'search' => ['name' => $group]]) ?: [];
+			$rows = $this->requireRows(API::HostGroup()->get(['output' => ['groupid'], 'search' => ['name' => $group]]));
 			$groupids = array_values(array_map(static fn ($g) => (string) $g['groupid'], $rows));
 			$groups_matched = count($groupids);
 			$notes[] = sprintf(_('%1$d host group(s)'), $groups_matched);
@@ -144,7 +149,10 @@ final class IncidentTimelineData extends CController {
 		if (($host !== '' || $template !== '') && !$empty) {
 			$tids = [];
 			if ($template !== '') {
-				$tpls = API::Template()->get(['output' => ['templateid'], 'search' => ['host' => $template]]) ?: [];
+				$tpls = $this->requireRows(API::Template()->get([
+					'output' => ['templateid'], 'search' => ['host' => $template, 'name' => $template],
+					'searchByAny' => true
+				]));
 				$tids = array_map(static fn ($t) => (string) $t['templateid'], $tpls);
 				if (!$tids) {
 					$empty = true;
@@ -152,9 +160,10 @@ final class IncidentTimelineData extends CController {
 			}
 
 			if (!$empty) {
-				$params = ['output' => ['hostid'], 'limit' => self::MAX_FILTER_HOSTS];
+				$params = ['output' => ['hostid'], 'limit' => self::MAX_FILTER_HOSTS + 1, 'sortfield' => 'hostid'];
 				if ($host !== '') {
-					$params['search'] = ['host' => $host];
+					$params['search'] = ['host' => $host, 'name' => $host];
+					$params['searchByAny'] = true;
 				}
 				if ($tids) {
 					$params['templateids'] = $tids;
@@ -162,11 +171,14 @@ final class IncidentTimelineData extends CController {
 				if ($groupids) {
 					$params['groupids'] = $groupids;
 				}
-				$rows = API::Host()->get($params) ?: [];
+				$rows = $this->requireRows(API::Host()->get($params));
 				$hostids = array_values(array_unique(array_map(static fn ($h) => (string) $h['hostid'], $rows)));
-				$notes[] = sprintf(_('%1$d host(s)'), count($hostids));
-				if (count($hostids) >= self::MAX_FILTER_HOSTS) {
+				if (count($hostids) > self::MAX_FILTER_HOSTS) {
 					$truncated = true;
+					$hostids = array_slice($hostids, 0, self::MAX_FILTER_HOSTS);
+				}
+				$notes[] = sprintf(_('%1$d host(s)'), count($hostids));
+				if ($truncated) {
 					$notes[] = _('(host list truncated — narrow the filter)');
 				}
 				if (!$hostids) {
@@ -188,7 +200,7 @@ final class IncidentTimelineData extends CController {
 	 * Assemble the shared event.get filter (host/group ids, severity, name search)
 	 * from already-resolved request inputs.
 	 *
-	 * @return array{base: array, severity: ?int, name_regex: ?string, error: ?string}
+	 * @return array{base: array, severities: ?array, severity_single: ?int, name_regex: ?string, error: ?string}
 	 */
 	private function buildEventFilter(): array {
 		$base = ['source' => 0, 'object' => 0, 'value' => 1];
@@ -216,7 +228,10 @@ final class IncidentTimelineData extends CController {
 			$list = [];
 			foreach (explode(',', (string) $this->getInput('severities', '')) as $s) {
 				$s = trim($s);
-				if ($s !== '' && ctype_digit($s) && (int) $s >= 0 && (int) $s <= 5) {
+				if ($s !== '' && (!ctype_digit($s) || (int) $s > 5)) {
+					throw new IncidentTimelineInputException(_('Invalid severity filter.'));
+				}
+				if ($s !== '') {
 					$list[(int) $s] = (int) $s;
 				}
 			}
@@ -231,7 +246,7 @@ final class IncidentTimelineData extends CController {
 
 		if ($name !== '') {
 			if ($name_regex_flag) {
-				if (mb_strlen($name) > 1000) {
+				if (strlen($name) > 1000) {
 					return ['base' => $base, 'severities' => $severities, 'severity_single' => $severity_single,
 						'name_regex' => null, 'error' => _('The regular expression filter is too long.')];
 				}
@@ -261,11 +276,41 @@ final class IncidentTimelineData extends CController {
 		$out = [];
 		foreach (explode(',', $csv) as $part) {
 			$part = trim($part);
-			if ($part !== '' && ctype_digit($part)) {
+			if ($part !== '' && (!ctype_digit($part) || trim($part, '0') === '')) {
+				throw new IncidentTimelineInputException(_('Invalid host or host group identifier.'));
+			}
+			if ($part !== '') {
 				$out[] = $part;
 			}
 		}
 		return array_values(array_unique($out));
+	}
+
+	private function parseTimestamp(string $value): ?int {
+		if (!ctype_digit($value)) {
+			return null;
+		}
+		$timestamp = filter_var($value, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 253402300799]]);
+		return $timestamp === false ? null : $timestamp;
+	}
+
+	/** An API failure must never be presented as a successful empty result. */
+	private function requireRows($rows): array {
+		if (!is_array($rows)) {
+			throw new \RuntimeException('Failed to retrieve incident report data from the API.');
+		}
+		return $rows;
+	}
+
+	private function matchesName(?string $pattern, string $name): bool {
+		if ($pattern === null) {
+			return true;
+		}
+		$result = @preg_match($pattern, $name);
+		if ($result === false) {
+			throw new IncidentTimelineInputException(_('The regular expression could not be evaluated within its limits. Simplify the expression or use a substring filter.'));
+		}
+		return $result === 1;
 	}
 
 	// -------------------------------------------------------------------------
@@ -292,7 +337,7 @@ final class IncidentTimelineData extends CController {
 
 			$limit_reached = $this->paginateEvents($query, $time_from, $time_to, function (string $eid, array $ev)
 					use (&$buckets, &$severity_counts, $key_of, $pattern): void {
-				if (!preg_match($pattern, (string) ($ev['name'] ?? ''))) {
+				if (!$this->matchesName($pattern, (string) ($ev['name'] ?? ''))) {
 					return;
 				}
 				$sev = (int) $ev['severity'];
@@ -359,7 +404,10 @@ final class IncidentTimelineData extends CController {
 		$params['time_till'] = $to;
 		$params['countOutput'] = true;
 		$res = API::Event()->get($params);
-		return is_numeric($res) ? (int) $res : 0;
+		if ((!is_int($res) && !(is_string($res) && ctype_digit($res))) || (int) $res < 0) {
+			throw new \RuntimeException('Failed to count incidents from the API.');
+		}
+		return (int) $res;
 	}
 
 	// -------------------------------------------------------------------------
@@ -385,7 +433,7 @@ final class IncidentTimelineData extends CController {
 
 		$limit_reached = $this->paginateEvents($query, $time_from, $time_to, function (string $eid, array $ev)
 				use (&$buckets, &$severity_counts, &$incidents, &$recovery_ids, $key_of, $pattern): void {
-			if ($pattern !== null && !preg_match($pattern, (string) ($ev['name'] ?? ''))) {
+			if (!$this->matchesName($pattern, (string) ($ev['name'] ?? ''))) {
 				return;
 			}
 			$sev = (int) $ev['severity'];
@@ -413,28 +461,33 @@ final class IncidentTimelineData extends CController {
 		});
 
 		// Recovery clocks (can land after time_to, so no time filter).
+		$recovery_clock_map = [];
 		if ($recovery_ids) {
-			$recovery_clock_map = [];
 			foreach (array_chunk(array_keys($recovery_ids), self::RECOVERY_BATCH) as $chunk) {
-				$rec = API::Event()->get(['output' => ['eventid', 'clock'], 'eventids' => $chunk, 'preservekeys' => true]);
-				if (is_array($rec)) {
-					foreach ($rec as $re) {
-						$recovery_clock_map[(string) $re['eventid']] = (int) $re['clock'];
-					}
+				$rec = $this->requireRows(API::Event()->get(['output' => ['eventid', 'clock'], 'eventids' => $chunk, 'preservekeys' => true]));
+				foreach ($rec as $re) {
+					$recovery_clock_map[(string) $re['eventid']] = (int) $re['clock'];
 				}
 			}
-			foreach ($incidents as &$inc) {
-				$r = $inc['r'];
-				$inc['rc'] = ($r !== '0' && $r !== '') ? ($recovery_clock_map[$r] ?? 0) : 0;
-			}
-			unset($inc);
 		}
-		else {
-			foreach ($incidents as &$inc) {
+		$recovery_time_unavailable = 0;
+		foreach ($incidents as &$inc) {
+			$r = $inc['r'];
+			if ($r === '0' || $r === '') {
 				$inc['rc'] = 0;
+				$inc['status'] = 'ongoing';
 			}
-			unset($inc);
+			elseif (isset($recovery_clock_map[$r]) && $recovery_clock_map[$r] >= $inc['c']) {
+				$inc['rc'] = $recovery_clock_map[$r];
+				$inc['status'] = 'resolved';
+			}
+			else {
+				$inc['rc'] = null;
+				$inc['status'] = 'resolved_time_unavailable';
+				$recovery_time_unavailable++;
+			}
 		}
+		unset($inc);
 
 		$bucket_list = array_values($buckets);
 
@@ -452,6 +505,7 @@ final class IncidentTimelineData extends CController {
 				'limit' => self::MAX_EVENTS,
 				'limit_reached' => $limit_reached,
 				'total_incidents' => count($incidents),
+				'recovery_time_unavailable' => $recovery_time_unavailable,
 				'severity' => $filter['severity_single'],
 				'mode' => 'incidents',
 				'count_method' => 'rows'
@@ -471,8 +525,8 @@ final class IncidentTimelineData extends CController {
 		);
 
 		// Aggregate per trigger (objectid) during a single lean scan.
-		$agg = [];                 // objectid => [count, first, last, sev, dur_sum, resolved]
-		$pending = [];             // r_eventid => [objectid, problem_clock] (for MTTR)
+		$agg = [];                 // Per-trigger counts and known duration samples.
+		$pending = [];             // r_eventid => list of [objectid, problem_clock] (for MTTR)
 		$pattern = $filter['name_regex'];
 
 		$query = $filter['base'];
@@ -484,7 +538,7 @@ final class IncidentTimelineData extends CController {
 
 		$limit_reached = $this->paginateEvents($query, $time_from, $time_to, function (string $eid, array $ev)
 				use (&$agg, &$pending, $pattern): void {
-			if ($pattern !== null && !preg_match($pattern, (string) ($ev['name'] ?? ''))) {
+			if (!$this->matchesName($pattern, (string) ($ev['name'] ?? ''))) {
 				return;
 			}
 			$oid = (string) ($ev['objectid'] ?? '0');
@@ -493,7 +547,7 @@ final class IncidentTimelineData extends CController {
 
 			if (!isset($agg[$oid])) {
 				$agg[$oid] = ['count' => 0, 'first' => $clock, 'last' => $clock, 'sev' => $sev,
-					'dur_sum' => 0, 'resolved' => 0];
+					'dur_sum' => 0, 'resolved' => 0, 'duration_sample_count' => 0];
 			}
 			$a = &$agg[$oid];
 			$a['count']++;
@@ -510,6 +564,7 @@ final class IncidentTimelineData extends CController {
 
 			$r = (string) ($ev['r_eventid'] ?? '0');
 			if ($r !== '0' && $r !== '') {
+				$agg[$oid]['resolved']++;
 				// A single recovery event can close several problems (correlation),
 				// so collect every problem keyed by its recovery id.
 				$pending[$r][] = [$oid, $clock];
@@ -519,10 +574,7 @@ final class IncidentTimelineData extends CController {
 		// MTTR: resolve recovery clocks and fold durations back per trigger.
 		if ($pending) {
 			foreach (array_chunk(array_keys($pending), self::RECOVERY_BATCH) as $chunk) {
-				$rec = API::Event()->get(['output' => ['eventid', 'clock'], 'eventids' => $chunk, 'preservekeys' => true]);
-				if (!is_array($rec)) {
-					continue;
-				}
+				$rec = $this->requireRows(API::Event()->get(['output' => ['eventid', 'clock'], 'eventids' => $chunk, 'preservekeys' => true]));
 				foreach ($rec as $reid => $re) {
 					if (!isset($pending[(string) $reid])) {
 						continue;
@@ -531,7 +583,7 @@ final class IncidentTimelineData extends CController {
 						$dur = (int) $re['clock'] - $pclock;
 						if ($dur >= 0 && isset($agg[$oid])) {
 							$agg[$oid]['dur_sum'] += $dur;
-							$agg[$oid]['resolved']++;
+							$agg[$oid]['duration_sample_count']++;
 						}
 					}
 				}
@@ -541,11 +593,13 @@ final class IncidentTimelineData extends CController {
 
 		$trigger_count = count($agg);
 		$total = 0;
+		$recovery_time_unavailable = 0;
 		foreach ($agg as $a) {
 			$total += $a['count'];
+			$recovery_time_unavailable += $a['resolved'] - $a['duration_sample_count'];
 		}
 
-		// Rank by problem count. When filtered, show (almost) everything; otherwise top 100.
+		// Rank by problem count: up to 1000 when filtered; otherwise top 100.
 		uasort($agg, static fn ($x, $y) => $y['count'] <=> $x['count']);
 		$limit_applied = $has_filter ? 1000 : 100;
 		$top = array_slice($agg, 0, $limit_applied, true);
@@ -555,18 +609,16 @@ final class IncidentTimelineData extends CController {
 		$oids = array_keys($top);
 		$trig_map = [];
 		foreach (array_chunk($oids, 1000) as $chunk) {
-			$trigs = API::Trigger()->get([
+			$trigs = $this->requireRows(API::Trigger()->get([
 				'output' => ['triggerid', 'description'],
 				'triggerids' => $chunk,
 				'selectHosts' => ['name'],
 				// Show "High CPU utilization on db01", not "... on {HOST.NAME}".
 				'expandDescription' => true,
 				'preservekeys' => true
-			]);
-			if (is_array($trigs)) {
-				foreach ($trigs as $tid => $tr) {
-					$trig_map[(string) $tid] = $tr;
-				}
+			]));
+			foreach ($trigs as $tid => $tr) {
+				$trig_map[(string) $tid] = $tr;
 			}
 		}
 
@@ -590,7 +642,9 @@ final class IncidentTimelineData extends CController {
 				'first' => $a['first'],
 				'last' => $a['last'],
 				'resolved' => $a['resolved'],
-				'mttr' => $a['resolved'] > 0 ? (int) round($a['dur_sum'] / $a['resolved']) : null,
+				'duration_sample_count' => $a['duration_sample_count'],
+				'recovery_time_unavailable' => $a['resolved'] - $a['duration_sample_count'],
+				'mttr' => $a['duration_sample_count'] > 0 ? (int) round($a['dur_sum'] / $a['duration_sample_count']) : null,
 				'share' => $total > 0 ? round($a['count'] / $total, 4) : 0
 			];
 		}
@@ -602,6 +656,7 @@ final class IncidentTimelineData extends CController {
 				'time_to' => $time_to,
 				'generated_at' => time(),
 				'total_incidents' => $total,
+				'recovery_time_unavailable' => $recovery_time_unavailable,
 				'trigger_count' => $trigger_count,
 				'shown' => count($rows),
 				'limit_applied' => $limit_applied,
@@ -632,16 +687,13 @@ final class IncidentTimelineData extends CController {
 		$query['sortorder'] = 'ASC';
 		$query['preservekeys'] = true;
 
-		while ($total < self::MAX_EVENTS) {
+		while ($total < self::MAX_EVENTS && $cursor_from <= $time_to) {
 			$page = $query;
 			$page['time_from'] = $cursor_from;
 			$page['time_till'] = $time_to;
 			$page['limit'] = self::FETCH_BATCH;
 
-			$batch = API::Event()->get($page);
-			if ($batch === false) {
-				throw new \RuntimeException(_('Failed to retrieve events from the API.'));
-			}
+			$batch = $this->requireRows(API::Event()->get($page));
 			if ($batch === []) {
 				break;
 			}
@@ -658,22 +710,20 @@ final class IncidentTimelineData extends CController {
 				$drain['time_from'] = $min_clock;
 				$drain['time_till'] = $min_clock;
 				$drain['limit'] = self::MAX_EVENTS;
-				$drained = API::Event()->get($drain);
-				if (is_array($drained)) {
-					foreach ($drained as $eid => $ev) {
-						if (isset($boundary_seen[$eid])) {
-							continue;
-						}
-						$on_row((string) $eid, $ev);
-						$total++;
-						if ($total >= self::MAX_EVENTS) {
-							$limit_reached = true;
-							break;
-						}
+				$drained = $this->requireRows(API::Event()->get($drain));
+				foreach ($drained as $eid => $ev) {
+					if (isset($boundary_seen[$eid])) {
+						continue;
 					}
-					if (count($drained) >= self::MAX_EVENTS) {
+					$on_row((string) $eid, $ev);
+					$total++;
+					if ($total >= self::MAX_EVENTS) {
 						$limit_reached = true;
+						break;
 					}
+				}
+				if (count($drained) >= self::MAX_EVENTS) {
+					$limit_reached = true;
 				}
 				$cursor_from = $min_clock + 1;
 				$boundary_seen = [];

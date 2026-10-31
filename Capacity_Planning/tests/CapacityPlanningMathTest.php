@@ -73,13 +73,16 @@ final class CapacityPlanningMathTest {
 		$this->testSparseDiskSeriesHasNoModel();
 		$this->testCurrentDiskBreachSurvivesMissingHistory();
 		$this->testCurrentWarningIsASeverityFloorNotCeiling();
-		$this->testDirectPercentageSeriesDrivesPercentageEta();
+		$this->testUsedByteGrowthDrivesCoherentPercentageEta();
 		$this->testLowConfidencePercentageDoesNotCapByteRisk();
 		$this->testInvalidDirectPercentageFallsBackToDerived();
 		$this->testUnqualifiedDirectPercentageFallsBackToDerived();
 		$this->testDirectPercentageAccelerationRestoresEtaOrdering();
-		$this->testSteadyDirectPercentageIgnoresByteAcceleration();
-		$this->testDivergenceNoteDisclosesCrossModelDisagreement();
+		$this->testHistoricalPercentageDoesNotOverrideProjectedCapacity();
+		$this->testFixedCapacityForecastCannotFillBeforeCritical();
+		$this->testPercentageOnlyFilesystemKeepsCurrentBreach();
+		$this->testDerivedBytesCannotInventFullDate();
+		$this->testWeakOrStaleDiskModelsWithholdForecast();
 		$this->testBasisSpecificThresholdEtasRemainAvailable();
 		$this->testSparseNoisyRecentWindowCannotVetoConfidence();
 		$this->testSmallFilesystemGrowthIsForecast();
@@ -773,7 +776,7 @@ final class CapacityPlanningMathTest {
 			'A nulled percentage slope must not produce a warning ETA.');
 	}
 
-	private function testDirectPercentageSeriesDrivesPercentageEta(): void {
+	private function testUsedByteGrowthDrivesCoherentPercentageEta(): void {
 		$now = 2000000000;
 		$byte_rows = [];
 		$pct_rows = [];
@@ -794,10 +797,12 @@ final class CapacityPlanningMathTest {
 		]);
 		$this->assertTrue($result['pct_series_direct'],
 			'The direct pused history should be identified as the percentage source.');
-		$this->assertAlmost(0.25, (float) $result['growth_pct_day'], 0.001,
-			'Percentage growth must come from direct pused history rather than current-capacity scaling.');
-		$this->assertAlmost(80.0, (float) $result['eta']['warn_days'], 0.2,
-			'Percentage ETA should use current pused distance divided by the direct percentage slope.');
+		$this->assertAlmost(1.0, (float) $result['growth_pct_day'], 0.001,
+			'Projected percentage growth must share the byte model and fixed current capacity.');
+		$this->assertAlmost(0.25, (float) $result['observed_growth_pct_day'], 0.001,
+			'Measured percentage history remains available as a descriptive diagnostic.');
+		$this->assertAlmost(20.0, (float) $result['eta']['warn_days'], 0.2,
+			'Percentage ETA must use the same growth and capacity as the Full ETA.');
 	}
 
 	private function testLowConfidencePercentageDoesNotCapByteRisk(): void {
@@ -821,7 +826,8 @@ final class CapacityPlanningMathTest {
 		$result = $this->call('forecastDisk', [
 			$spec, $byte_rows, 'trends', $now, null, $pct_rows, 'trends', null
 		]);
-		$this->assertSame('Low', $result['pct_confidence'], 'The short pused model should be low confidence.');
+		$this->assertSame('Low', $result['observed_pct_confidence'], 'The short observed pused model should be low confidence.');
+		$this->assertSame('High', $result['pct_confidence'], 'The projected percentage model shares qualified byte evidence.');
 		$this->assertSame('High', $result['byte_confidence'], 'The sustained byte model should be high confidence.');
 		$this->assertSame('Critical', $result['severity'],
 			'An unrelated low-confidence pused model must not cap a high-confidence near-full byte forecast.');
@@ -924,7 +930,7 @@ final class CapacityPlanningMathTest {
 			'On a fixed-capacity filesystem critical must not be reported after full.');
 	}
 
-	private function testSteadyDirectPercentageIgnoresByteAcceleration(): void {
+	private function testHistoricalPercentageDoesNotOverrideProjectedCapacity(): void {
 		// Autogrow shape: bytes accelerate while measured pused rises steadily
 		// (capacity grew). The direct percentage model must keep its own long
 		// window; byte acceleration must never leak into a direct pused series.
@@ -949,15 +955,17 @@ final class CapacityPlanningMathTest {
 		]);
 		$this->assertTrue($result['pct_series_direct'],
 			'The steady direct pused history should remain the percentage source.');
-		$this->assertSame(false, $result['pct_accelerating'],
-			'A steady direct percentage series must not inherit byte acceleration.');
-		$this->assertTrue($result['pct_sel'] !== '1m',
-			'The steady percentage model should keep its long window.');
-		$this->assertAlmost(0.25, (float) $result['growth_pct_day'], 0.005,
-			'Percentage growth should stay on the steady direct slope.');
+		$this->assertSame(false, $result['observed_pct_accelerating'],
+			'A steady observed percentage series must not inherit byte acceleration.');
+		$this->assertTrue($result['observed_pct_sel'] !== '1m',
+			'The observed percentage model should keep its long window.');
+		$this->assertAlmost(0.25, (float) $result['observed_growth_pct_day'], 0.005,
+			'Observed percentage growth should stay on its measured slope.');
+		$this->assertAlmost(1.0, (float) $result['growth_pct_day'], 0.02,
+			'Projected percentage growth must use accelerated byte growth at current capacity.');
 	}
 
-	private function testDivergenceNoteDisclosesCrossModelDisagreement(): void {
+	private function testFixedCapacityForecastCannotFillBeforeCritical(): void {
 		$now = 2000000000;
 		$byte_rows = [];
 		$slow_pct_rows = [];
@@ -976,10 +984,12 @@ final class CapacityPlanningMathTest {
 		$divergent = $this->call('forecastDisk', [
 			$spec, $byte_rows, 'trends', $now, null, $slow_pct_rows, 'trends', null
 		]);
-		$this->assertTrue($divergent['eta']['crit_days'] > $divergent['eta']['full_days'],
-			'This scenario must exercise a threshold ETA later than the full date.');
-		$this->assertTrue(strpos((string) $divergent['note'], 'disagree') !== false,
-			'A threshold ETA later than the full date must be disclosed as cross-model divergence.');
+		$this->assertTrue($divergent['eta']['crit_days'] <= $divergent['eta']['full_days'],
+			'Historical capacity changes must not put the critical threshold after Full.');
+		$this->assertSame('used_bytes_fixed_capacity', $divergent['projection_basis'],
+			'The projected capacity assumption must be explicit.');
+		$this->assertTrue(strpos((string) $divergent['note'], 'capacity stays fixed') !== false,
+			'The fixed-capacity assumption must be visible in the result.');
 
 		// Consistent control: both models describe the same growth and the
 		// current snapshot matches the series endpoint, so no note may appear.
@@ -997,6 +1007,108 @@ final class CapacityPlanningMathTest {
 			'The control scenario must be internally consistent.');
 		$this->assertTrue(strpos((string) $consistent['note'], 'disagree') === false,
 			'Consistent single-story forecasts must not carry the divergence note.');
+	}
+
+	private function testPercentageOnlyFilesystemKeepsCurrentBreach(): void {
+		$now = 2000000000;
+		$items = ['h1' => [$this->item('1', 'vfs.fs.size[/data,pused]', 99.0, $now - 60)]];
+		$result = $this->call('buildDiskFindings', [
+			['h1' => $this->host()], $items, $this->macroIndex(), $now
+		])[0];
+		$this->assertSame('Incomplete', $result['status'], 'Missing bytes must remain explicit.');
+		$this->assertSame(true, $result['current_snapshot_usable'], 'Fresh percentages can assess percentage thresholds.');
+		$this->assertSame('Critical', $result['current_severity'], 'A measured 99% filesystem must not become Unknown.');
+		$this->assertAlmost(99.0, (float) $result['pused'], 0.001, 'Keep the measured percentage.');
+		$this->assertSame(null, $result['free'], 'Percentage alone cannot invent free bytes.');
+		$this->assertSame('1', $result['itemid'], 'Percentage-only items must reach forecast fetching.');
+		$this->assertSame(null, $result['pr'], 'Percentage-only history must not become fake byte history.');
+
+		$rows = [];
+		for ($hour = 0; $hour < 70 * 24; $hour++) {
+			$rows[] = $this->hourlyRow($now - 70 * 86400 + $hour * 3600, 40 + $hour / 240);
+		}
+		$spec = [
+			'id' => 'd0', 'used' => null, 'free' => null, 'pused' => 47.0, 'total' => null,
+			'warn_pct' => 90.0, 'crit_pct' => 95.0, 'warn_free' => 0.0, 'crit_free' => 0.0,
+			'os' => 'Linux', 'fs_kind' => 'Local', 'ok' => true, 'byte_source' => 'none'
+		];
+		$forecast = $this->call('forecastDisk', [$spec, [], 'trends', $now, null, $rows, 'trends', null]);
+		$this->assertSame('percentage_only', $forecast['projection_basis'], 'Percentage history is an independent fallback.');
+		$this->assertAlmost(430.0, (float) $forecast['eta']['warn_days'], 0.3, 'Percentage-only history can forecast its threshold.');
+		$this->assertSame(null, $forecast['eta']['full_days'], 'Unknown capacity must not invent a Full date.');
+		$this->assertSame('Healthy', $forecast['severity'], 'A qualified percentage-only model can assess percentage-only policy.');
+		$spec['warn_free'] = 5000000000.0;
+		$missing_free = $this->call('forecastDisk', [$spec, [], 'trends', $now, null, $rows, 'trends', null]);
+		$this->assertSame('Unknown', $missing_free['severity'],
+			'A healthy percentage must not conceal an unassessable configured free-space threshold.');
+		$this->assertTrue(strpos((string) $missing_free['note'], 'absolute free-space thresholds could not be assessed') !== false,
+			'Incomplete threshold coverage must be explicit.');
+		$spec['pused'] = 99.0;
+		$critical = $this->call('forecastDisk', [$spec, [], 'trends', $now, null, $rows, 'trends', null]);
+		$this->assertSame('Critical', $critical['severity'],
+			'Missing free bytes must not hide a confirmed critical percentage breach.');
+	}
+
+	private function testDerivedBytesCannotInventFullDate(): void {
+		$now = 2000000000;
+		$rows = [];
+		$pct_rows = [];
+		for ($hour = 0; $hour < 70 * 24; $hour++) {
+			$clock = $now - 70 * 86400 + $hour * 3600;
+			$rows[] = $this->hourlyRow($clock, 400000000000.0 + $hour * 10000000.0);
+			$pct_rows[] = $this->hourlyRow($clock, 40 + $hour / 240);
+		}
+		$spec = [
+			'id' => 'd0', 'used' => 470000000000.0, 'free' => 530000000000.0, 'pused' => 47.0,
+			'total' => 1000000000000.0, 'warn_pct' => 90.0, 'crit_pct' => 95.0,
+			'warn_free' => 100000000000.0, 'crit_free' => 50000000000.0,
+			'os' => 'Linux', 'fs_kind' => 'Local', 'ok' => true
+		];
+		foreach (['free', 'percentage'] as $source) {
+			$spec['byte_source'] = $source;
+			$result = $this->call('forecastDisk', [$spec, $rows, 'trends', $now, null, $pct_rows, 'trends', null]);
+			$this->assertSame(null, $result['growth_day'], 'Current-capacity conversion cannot establish historical byte growth.');
+			$this->assertSame(null, $result['eta']['full_days'], 'A derived byte series cannot produce a precise Full date.');
+			$this->assertSame(null, $result['eta']['warn_free_days'], 'A derived byte series cannot forecast absolute free thresholds.');
+			$this->assertAlmost(430.0, (float) $result['eta']['warn_days'], 0.3, 'Measured percentages remain independently useful.');
+		}
+	}
+
+	private function testWeakOrStaleDiskModelsWithholdForecast(): void {
+		$now = 2000000000;
+		$spec = [
+			'id' => 'd0', 'used' => 700000000000.0, 'free' => 300000000000.0, 'pused' => 70.0,
+			'total' => 1000000000000.0, 'warn_pct' => 90.0, 'crit_pct' => 95.0,
+			'warn_free' => 0.0, 'crit_free' => 0.0, 'os' => 'Linux', 'fs_kind' => 'Local', 'ok' => true
+		];
+		foreach (['stale', 'weak', 'sparse_tail'] as $case) {
+			$rows = [];
+			for ($hour = 0; $hour < 70 * 24; $hour++) {
+				$day = $hour / 24;
+				$clock = $now - ($case === 'weak' ? 70 : 80) * 86400 + $hour * 3600;
+				$value = 400000000000.0 + $day * 10000000.0
+					+ ($case === 'weak' ? ((int) $day % 2 === 0 ? 100000000000.0 : -100000000000.0) : 0.0);
+				$rows[] = $this->hourlyRow($clock, $value);
+			}
+			if ($case === 'sparse_tail') {
+				$rows[] = $this->hourlyRow($now - 3600, 400000000000.0 + (80 - 1 / 24) * 10000000.0);
+			}
+			$result = $this->call('forecastDisk', [$spec, $rows, 'trends', $now, null]);
+			$this->assertSame(false, $result['forecast_reliable'], $case.' history cannot establish a reliable forecast.');
+			$this->assertSame(null, $result['growth_day'], $case.' growth must not drive extrapolation.');
+			$this->assertSame(null, $result['eta']['full_days'], $case.' history must not produce an exact Full date.');
+			$this->assertSame('Unknown', $result['severity'], 'Withholding a forecast must not imply Healthy.');
+			$this->assertTrue($result['forecast_unavailable_reason'] !== null, 'Withheld forecasts must explain the missing evidence.');
+			if ($case === 'sparse_tail') {
+				$this->assertTrue(strpos($result['forecast_unavailable_reason'], 'last seven days') !== false,
+					'A fresh isolated sample must not conceal the recent collection gap.');
+				$this->assertTrue($result['windows']['3m']['days'] >= 60,
+					'The regression must exercise an otherwise qualified long-term history.');
+			}
+			$breached = array_replace($spec, ['used' => 990000000000.0, 'free' => 10000000000.0, 'pused' => 99.0]);
+			$current = $this->call('forecastDisk', [$breached, $rows, 'trends', $now, null]);
+			$this->assertSame('Critical', $current['severity'], 'A current breach survives an unreliable growth model.');
+		}
 	}
 
 	private function testBasisSpecificThresholdEtasRemainAvailable(): void {
@@ -1020,12 +1132,12 @@ final class CapacityPlanningMathTest {
 			$spec, $byte_rows, 'trends', $now, null, $pct_rows, 'trends', null
 		]);
 		$eta = $result['eta'];
-		$this->assertAlmost(80.0, (float) $eta['warn_pct_days'], 0.2,
-			'The percentage warning candidate must retain its own percentage-model ETA.');
+		$this->assertAlmost(20.0, (float) $eta['warn_pct_days'], 0.2,
+			'The percentage warning candidate must use the common fixed-capacity projection.');
 		$this->assertAlmost(5.0, (float) $eta['warn_free_days'], 0.2,
 			'The absolute-free warning candidate must retain its own byte-model ETA.');
-		$this->assertAlmost(100.0, (float) $eta['crit_pct_days'], 0.2,
-			'The percentage critical candidate must retain its own percentage-model ETA.');
+		$this->assertAlmost(25.0, (float) $eta['crit_pct_days'], 0.2,
+			'The percentage critical candidate must use the common fixed-capacity projection.');
 		$this->assertAlmost(10.0, (float) $eta['crit_free_days'], 0.2,
 			'The absolute-free critical candidate must retain its own byte-model ETA.');
 		$this->assertSame('free GB', $eta['warn_basis'],
@@ -1679,9 +1791,11 @@ final class CapacityPlanningMathTest {
 			'Ungrouped dense series must keep exact UTC day-start timestamps.');
 		$this->assertSame(2.0, $dense[0][2],
 			'The dense day average must be unchanged by the timestamp weighting.');
+		$this->assertSame([$base, $base + 86400], array_slice($dense[0], 4),
+			'Daily chart points must expose their UTC calendar interval for truthful tooltips.');
 
-		// 421 populated days force two-day groups. The first group pairs day 0
-		// (three samples) with day 40 (one sample) across a 40-day gap.
+		// 421 populated days normally force two-day groups. The missing days
+		// between day 0 and day 40 must remain visible, not averaged together.
 		$rows = [
 			['clock' => $base + 100, 'num' => 3, 'min' => 1.0, 'avg' => 2.0, 'max' => 3.0],
 			['clock' => $base + 40 * 86400 + 200, 'num' => 1, 'min' => 4.0, 'avg' => 4.0, 'max' => 4.0]
@@ -1690,12 +1804,18 @@ final class CapacityPlanningMathTest {
 			$rows[] = ['clock' => $base + $i * 86400, 'num' => 1, 'min' => 5.0, 'avg' => 5.0, 'max' => 5.0];
 		}
 		$sparse = $this->call('downsampleSeries', [$rows]);
-		$this->assertSame($base + 10 * 86400, $sparse[0][0],
-			'A sparse group must be stamped at its sample-weighted mean clock, not its first day.');
-		$this->assertSame(2.5, $sparse[0][2],
-			'The grouped average must stay sample-weighted.');
-		$this->assertTrue($sparse[0][0] >= $base && $sparse[0][0] <= $base + 40 * 86400,
-			'The stamped clock must lie inside the group\'s populated day range.');
+		$this->assertSame($base, $sparse[0][0],
+			'A lone day must not be averaged across a missing-data gap.');
+		$this->assertSame(2.0, $sparse[0][2],
+			'The isolated day must retain its own average.');
+		$this->assertSame([$base, $base + 86400], array_slice($sparse[0], 4),
+			'The isolated interval must stop before the missing days.');
+		$this->assertSame([$base + 40 * 86400, $base + 42 * 86400], array_slice($sparse[1], 4),
+			'Contiguous populated days may still be grouped after the gap.');
+		$this->assertSame($base + (int) (40.5 * 86400), $sparse[1][0],
+			'A contiguous group must retain a sample-weighted representative clock.');
+		$this->assertSame(4.5, $sparse[1][2],
+			'Contiguous grouped averages must remain sample-weighted.');
 	}
 
 	private function testMissingResourceItemsRemainVisible(): void {
@@ -1800,3 +1920,6 @@ final class CapacityPlanningMathTest {
 }
 
 (new CapacityPlanningMathTest())->run();
+require_once __DIR__.'/CapacityPlanningResourceAccuracyTest.php';
+require_once __DIR__.'/CapacityPlanningDiskPersistenceTest.php';
+require_once __DIR__.'/CapacityPlanningDiskInformationTest.php';

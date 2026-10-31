@@ -32,7 +32,7 @@ class HtmlExportRenderer {
 		$sla_summary = $report['sla_summary'];
 		$target = (float) $filter['target'];
 		$verdict = $this->verdict($report, $target);
-		$show_maintenance = (int) $fleet['maintenance_hosts'] > 0;
+		$show_maintenance = true;
 
 		$minutes_axis = static function($value, int $decimals = 0, $reference = null): string {
 		$value = (float) $value;
@@ -68,10 +68,11 @@ class HtmlExportRenderer {
 		<h1><?= $h(_('SLA & Uptime Report')) ?></h1>
 		<p class="cover-period"><?= $h($report['period']['label']) ?></p>
 		<p class="cover-servers"><?= $h(sprintf(
-			_('%1$d hosts · %2$d SLAs · availability target %3$s'),
+			_('%1$d hosts · %2$d SLAs · availability target %3$s · %4$d checks'),
 			(int) $fleet['hosts_total'],
 			(int) $sla_summary['slas_total'],
-			$helper->formatTargetPct($target)
+			$helper->formatTargetPct($target),
+			(int) ($fleet['measurements_total'] ?? $fleet['hosts_total'])
 		)) ?></p>
 	</div>
 	<div class="cover-verdict verdict--<?= $h($verdict['tone']) ?>">
@@ -96,7 +97,7 @@ class HtmlExportRenderer {
 <section class="section">
 	<h2><?= $h(_('Where uptime was lost')) ?></h2>
 	<p class="lede">
-		<?= $h(_('Minutes of host downtime per day, stacked by host group. A flat baseline at zero is the goal; each spike is an incident.')) ?>
+		<?= $h(_('Minutes of downtime per check per day, stacked by host group. Checks on the same host contribute independently.')) ?>
 	</p>
 	<div class="card">
 		<?= $chart->stackedTime($report['daily']['dates'], $report['daily']['series'], [
@@ -109,10 +110,10 @@ class HtmlExportRenderer {
 	</div>
 	<p class="takeaway">
 		<?php if ($fleet['with_data'] > 0 && (int) $fleet['downtime_seconds'] === 0): ?>
-			<?= $h(_('No measured host lost any time at all in this period.')) ?>
+			<?= $h(_('No measured check lost any time in the available evidence for this period.')) ?>
 		<?php elseif ($fleet['with_data'] > 0): ?>
 			<?= $h(sprintf(
-				_('%1$s of downtime across %2$d measured hosts. The worst affected host was %3$s at %4$s availability.'),
+				_('%1$s of downtime across %2$d measured checks. The worst affected check was %3$s at %4$s availability.'),
 				$helper->formatDuration((int) $fleet['downtime_seconds']),
 				(int) $fleet['with_data'],
 				(string) $fleet['worst_host'],
@@ -148,13 +149,13 @@ class HtmlExportRenderer {
 		<table>
 			<thead>
 				<tr>
-					<th><?= $h(_('Service')) ?></th>
-					<th><?= $h(_('State')) ?></th>
+					<th scope="col"><?= $h(_('Service')) ?></th>
+					<th scope="col"><?= $h(_('State')) ?></th>
 					<?php foreach ($sla['months'] as $month): ?>
-						<th class="heat-head"><?= $h($helper->shortMonth($month)) ?></th>
+						<th scope="col" class="heat-head"><?= $h($helper->shortMonth($month)) ?></th>
 					<?php endforeach; ?>
-					<th class="num"><?= $h(_('Breaches')) ?></th>
-					<th><?= $h(sprintf(
+					<th scope="col" class="num"><?= $h(_('Breaches')) ?></th>
+					<th scope="col"><?= $h(sprintf(
 						_('Error budget (%1$s)'),
 						$sla['months'] !== [] ? $helper->shortMonth((string) end($sla['months'])) : _('this period')
 					)) ?></th>
@@ -212,16 +213,16 @@ class HtmlExportRenderer {
 		<p class="dim"><?= $h(_('Nothing to check: no hosts or SLAs were found for this selection.')) ?></p>
 	<?php elseif ($report['attention'] === []): ?>
 		<p class="takeaway takeaway--good">
-			<?= $h(_('Nothing outstanding. Every SLO is met and every measured host is above the availability target.')) ?>
+			<?= $h(_('Nothing outstanding. Every SLO is met and every measured check is above the availability target.')) ?>
 		</p>
 	<?php else: ?>
 		<table>
 			<thead>
 				<tr>
-					<th class="sev-col"><?= $h(_('Severity')) ?></th>
-					<th><?= $h(_('Area')) ?></th>
-					<th><?= $h(_('Finding')) ?></th>
-					<th><?= $h(_('Detail')) ?></th>
+					<th scope="col" class="sev-col"><?= $h(_('Severity')) ?></th>
+					<th scope="col"><?= $h(_('Area')) ?></th>
+					<th scope="col"><?= $h(_('Finding')) ?></th>
+					<th scope="col"><?= $h(_('Detail')) ?></th>
 				</tr>
 			</thead>
 			<tbody>
@@ -245,7 +246,7 @@ class HtmlExportRenderer {
 	<h2><?= $h(_('Host availability in detail')) ?></h2>
 	<p class="lede">
 		<?= $h(sprintf(
-			_('Every host in the selection, grouped by host group and sorted worst first, against the %1$s availability target.'),
+			_('Every displayed check in the selection, grouped by host group and sorted worst first, against the %1$s availability target.'),
 			$helper->formatTargetPct($target)
 		)) ?>
 	</p>
@@ -265,12 +266,14 @@ class HtmlExportRenderer {
 		<table>
 			<thead>
 				<tr>
-					<th><?= $h(_('Host')) ?></th>
-					<th><?= $h(_('Availability')) ?></th>
-					<th class="num"><?= $h(_('Uptime')) ?></th>
-					<th class="num"><?= $h(_('Downtime')) ?></th>
+					<th scope="col"><?= $h(_('Host')) ?></th>
+					<th scope="col"><?= $h(_('Measurement')) ?></th>
+					<th scope="col"><?= $h(_('Availability')) ?></th>
+					<th scope="col" class="num"><?= $h(_('Coverage')) ?></th>
+					<th scope="col" class="num"><?= $h(_('Uptime')) ?></th>
+					<th scope="col" class="num"><?= $h(_('Downtime')) ?></th>
 					<?php if ($show_maintenance): ?>
-						<th class="num"><?= $h(_('Maintenance')) ?></th>
+						<th scope="col" class="num"><?= $h(_('Maintenance')) ?></th>
 					<?php endif; ?>
 				</tr>
 			</thead>
@@ -278,11 +281,13 @@ class HtmlExportRenderer {
 				<?php foreach ($group['rows'] as $row): ?>
 					<tr>
 						<td><strong><?= $h($row['host']) ?></strong><?= $row['enabled'] ? '' : ' '.$fmt->pill('neutral', _('disabled')) ?></td>
+						<td><?= $h($row['measurement_label'] ?? $row['item_key'] ?? '—') ?></td>
 						<td><?= $fmt->hostState((string) $row['state'], $row['pct']) ?></td>
+						<td class="num"><?= $h($helper->formatPct($row['coverage_pct'] ?? null, 1)) ?></td>
 						<td class="num"><?= $h($row['pct'] !== null ? $helper->formatDuration((int) $row['uptime_seconds']) : '—') ?></td>
 						<td class="num"><?= $h($row['pct'] !== null ? $helper->formatDuration((int) $row['downtime_seconds']) : '—') ?></td>
 						<?php if ($show_maintenance): ?>
-							<td class="num"><?= $h((int) $row['maintenance_seconds'] > 0 ? $helper->formatDuration((int) $row['maintenance_seconds']) : '—') ?></td>
+							<td class="num"><?= $h($helper->formatDuration((int) $row['maintenance_seconds'])) ?></td>
 						<?php endif; ?>
 					</tr>
 				<?php endforeach; ?>
@@ -290,7 +295,7 @@ class HtmlExportRenderer {
 		</table>
 		<?php if ((int) $group['rows_total'] > count($group['rows'])): ?>
 			<p class="dim"><?= $h(sprintf(
-				_('Showing the %1$d worst of %2$d hosts in this group.'),
+				_('Showing the %1$d worst of %2$d checks in this group.'),
 				count($group['rows']),
 				(int) $group['rows_total']
 			)) ?></p>
@@ -306,13 +311,17 @@ class HtmlExportRenderer {
 	<div class="dim">
 		<?= $h(sprintf(
 			_('Source: Zabbix %1$s. SLI values come from the Zabbix SLA engine; host availability is measured from each host\'s availability item. All times UTC.'),
-			$report['source_used'] === 'trends' ? _('hourly trends') : _('raw history')
+			$helper::sourceLabel($report['source_used'])
 		)) ?>
 		<?= $h(sprintf(
 			_('Maintenance windows on a host or its host groups are accepted downtime and excluded from its availability (recurring periods in %1$s time).'),
 			$report['maintenance']['timezone']
 		)) ?>
+		<?= $h(_('Coverage shows observed versus expected data outside accepted maintenance. Uncovered trend time is excluded from uptime and downtime; missing raw samples count against availability. Averages and downtime sum independent checks. Maintenance applies to every check on its host; the headline maintenance total counts each host once.')) ?>
 	</div>
+	<?php if (($report['cache']['rows_reused'] ?? 0) > 0): ?>
+		<div class="dim footnote"><?= $h(_('This report reuses cached numeric readings. Recent readings are refreshed; older cached intervals expire within 24 hours. Permissions, measurement rules and maintenance were checked again when this report was generated. Use Refresh data in the report before exporting to re-read older intervals.')) ?></div>
+	<?php endif; ?>
 	<?php foreach (($report['warnings'] ?? []) as $warning): ?>
 		<div class="dim footnote"><?= $h($warning) ?></div>
 	<?php endforeach; ?>
@@ -369,11 +378,15 @@ class HtmlExportRenderer {
 				'line' => $warning === 1 ? _('1 item to review') : sprintf(_('%1$d items to review'), $warning)
 			];
 		}
+		if ((int) $report['fleet']['na'] > 0 || (int) ($report['fleet']['partial_data'] ?? 0) > 0) {
+			return ['tone' => 'warning', 'word' => _('Incomplete coverage'),
+				'line' => _('Measured results are on target, but missing host data prevents a complete fleet assessment')];
+		}
 
 		return [
 			'tone' => 'ok',
 			'word' => _('On target'),
-			'line' => sprintf(_('Every SLO met, every measured host above %1$s'), $this->helper->formatTargetPct($target))
+			'line' => sprintf(_('Every SLO met, every measured check above %1$s'), $this->helper->formatTargetPct($target))
 		];
 	}
 

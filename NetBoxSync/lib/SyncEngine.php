@@ -23,6 +23,7 @@ class SyncEngine {
     private ZabbixApiClient $zabbix;
     private NetBoxClient $netbox;
     private array $summary = [];
+    private bool $host_total_known = false;
     private bool $force = false;
     private ?HostContext $current_host = null;
     /** Run-wide NetBox platform-id cache (name does not vary per host). */
@@ -34,9 +35,15 @@ class SyncEngine {
     }
 
     public function __construct(array $config, array $options = []) {
-        $this->config = Config::sanitizeForRuntime($config ?? []);
+        $this->config = Config::sanitizeForRuntime($config ?? [], []);
         $this->force = !empty($options['force']);
+        $run_id = (string) ($options['run_id'] ?? '');
+        if ($run_id !== '' && !preg_match('/\A[0-9a-f]{32}\z/i', $run_id)) {
+            throw new \InvalidArgumentException('Invalid sync run identifier.');
+        }
         $this->summary = [
+            'run_id' => $run_id !== '' ? strtolower($run_id) : bin2hex(random_bytes(16)),
+            'summary_saved' => false,
             'ok' => true,
             'source' => (string) ($options['source'] ?? 'manual'),
             'force' => $this->force,
@@ -45,6 +52,7 @@ class SyncEngine {
             'elapsed_seconds' => 0,
             'hosts_total' => 0,
             'hosts_processed' => 0,
+            'hosts_completed' => 0,
             'mappings_run' => 0,
             'created' => 0,
             'updated' => 0,
@@ -71,13 +79,13 @@ class SyncEngine {
         if (empty($netbox['enabled'])) {
             throw new RuntimeException('NetBox integration is disabled in module settings.');
         }
-
-        $this->netbox = new NetBoxClient(
-            (string) ($netbox['url'] ?? ''),
-            (string) ($netbox['token'] ?? ''),
-            !empty($netbox['verify_peer']),
-            (int) ($netbox['timeout'] ?? 15)
-        );
+        $netbox_client = $options['netbox_client'] ?? null;
+        if ($netbox_client !== null && !($netbox_client instanceof NetBoxClient)) {
+            throw new RuntimeException('The supplied NetBox client is invalid.');
+        }
+        if ($netbox_client !== null) {
+            $this->netbox = $netbox_client;
+        }
     }
 
     private function execute(): array {
@@ -85,10 +93,22 @@ class SyncEngine {
             set_time_limit(300);
         }
         $started_at = microtime(true);
+        $owns_lock = false;
 
         try {
             $this->store->ensureDirectories();
-            $this->store->acquireLock();
+            $this->store->acquireLock($this->summary['run_id']);
+            $owns_lock = true;
+            $this->publishProgress('preparing');
+            if (!isset($this->netbox)) {
+                $netbox = $this->config['netbox'];
+                $this->netbox = new NetBoxClient(
+                    (string) ($netbox['url'] ?? ''),
+                    Config::resolveSectionSecret($netbox),
+                    !empty($netbox['verify_peer']),
+                    (int) ($netbox['timeout'] ?? 15)
+                );
+            }
             $this->log('info', 'NetBox sync run started.', [
                 'source' => $this->summary['source'],
                 'force' => $this->force
@@ -99,6 +119,7 @@ class SyncEngine {
             $max_hosts = (int) ($this->config['runner']['max_hosts_per_run'] ?? 0);
             $fetch_limit = $max_hosts > 0 ? min($max_hosts, self::MAX_HOSTS_FETCH) : self::MAX_HOSTS_FETCH;
 
+            $this->publishProgress('fetching');
             $hosts = $this->zabbix->getAllHosts($fetch_limit);
 
             if (count($hosts) >= $fetch_limit) {
@@ -106,33 +127,34 @@ class SyncEngine {
             }
 
             $this->summary['hosts_total'] = count($hosts);
+            $this->host_total_known = true;
+            $this->publishProgress('prefetching');
 
             // Bulk-prefetch Zabbix item/interface data for every target host so the
             // standard syncs read prefilled maps instead of issuing one API call per
             // host (the classic N+1). Falls back to lazy per-host lookups on failure.
             $prefetch = $this->buildPrefetch($hosts);
+            $this->publishProgress('syncing');
 
             foreach ($hosts as $host) {
-                if ($max_hosts > 0 && $this->summary['hosts_processed'] >= $max_hosts) {
+                if ($max_hosts > 0 && $this->summary['hosts_completed'] >= $max_hosts) {
                     $this->note('Reached max_hosts_per_run limit; remaining hosts skipped.');
+                    $this->summary['ok'] = false;
                     break;
                 }
 
                 $hostid = (string) ($host['hostid'] ?? '');
                 $hostname = (string) ($host['host'] ?? '');
 
-                if ($hostid === '' || $hostname === '') {
-                    $this->summary['skipped']++;
-                    continue;
-                }
-
-                $ctx = new HostContext($host, $this->zabbix, $this->config);
-
-                if ($prefetch !== null) {
-                    $ctx->seedPrefetch($this->hostBundle($prefetch, $hostid));
-                }
-
                 try {
+                    if ($hostid === '' || $hostname === '') {
+                        $this->summary['skipped']++;
+                        continue;
+                    }
+                    $ctx = new HostContext($host, $this->zabbix, $this->config);
+                    if ($prefetch !== null) {
+                        $ctx->seedPrefetch($this->hostBundle($prefetch, $hostid));
+                    }
                     $this->processHost($ctx);
                     $this->summary['hosts_processed']++;
                 }
@@ -153,31 +175,94 @@ class SyncEngine {
                         'error' => $e->getMessage()
                     ]);
                 }
+                finally {
+                    $this->current_host = null;
+                    $this->summary['hosts_completed']++;
+                    $this->publishProgress('syncing');
+                }
             }
 
+            $this->publishProgress('finalizing');
             $this->store->saveTimestamps();
         }
         catch (Throwable $e) {
-            $this->summary['ok'] = false;
-            $this->summary['errors']++;
-            $this->note($e->getMessage(), 'error');
-            $this->events->record([
-                'type' => LogStore::TYPE_ERROR,
-                'sync_id' => 'runner',
-                'message' => $e->getMessage()
-            ]);
-            $this->log('error', 'NetBox sync run failed.', [
-                'error' => $e->getMessage()
-            ]);
+            $this->recordRunnerFailure($e, $owns_lock);
         }
         finally {
             $this->summary['finished_at'] = gmdate('c');
             $this->summary['elapsed_seconds'] = round(microtime(true) - $started_at, 3);
-            $this->store->saveLastSummary($this->summary);
-            $this->store->releaseLock();
+            if ($owns_lock) {
+                try {
+                    $this->summary['progress'] = $this->makeProgress($this->summary['ok'] ? 'completed' : 'failed', false);
+                    try {
+                        $this->summary['summary_saved'] = true;
+                        $this->store->saveLastSummary($this->summary);
+                    }
+                    catch (Throwable $e) {
+                        $this->summary['summary_saved'] = false;
+                        $this->recordRunnerFailure($e, true);
+                        $this->summary['progress'] = $this->makeProgress('failed', false);
+                    }
+                    try {
+                        $this->store->saveProgress($this->summary['progress']);
+                    }
+                    catch (Throwable $e) {
+                        $this->recordRunnerFailure($e, true);
+                        $this->summary['progress'] = $this->makeProgress('failed', false);
+                        // If progress storage failed, leave its old active record
+                        // to be identified as interrupted once the lock releases.
+                        try {
+                            $this->summary['summary_saved'] = true;
+                            $this->store->saveLastSummary($this->summary);
+                        }
+                        catch (Throwable $ignored) {
+                            $this->summary['summary_saved'] = false;
+                        }
+                    }
+                }
+                finally {
+                    $this->store->releaseLock();
+                }
+            }
         }
 
         return $this->summary;
+    }
+
+    private function publishProgress(string $phase): void {
+        $this->store->saveProgress($this->makeProgress($phase, true));
+    }
+
+    private function makeProgress(string $phase, bool $running): array {
+        $completed = (int) $this->summary['hosts_completed'];
+        $total = (int) $this->summary['hosts_total'];
+        $percent = null;
+        if ($this->host_total_known) {
+            $percent = $total > 0 ? (int) floor(100 * $completed / $total) : 0;
+            $percent = $running ? min(99, $percent) : ($completed === $total ? 100 : $percent);
+        }
+        return [
+            'run_id' => $this->summary['run_id'], 'phase' => $phase, 'running' => $running,
+            'percent' => $percent, 'hosts_completed' => $completed, 'hosts_total' => $total,
+            'total_known' => $this->host_total_known, 'errors' => (int) $this->summary['errors'],
+            'source' => (string) $this->summary['source'], 'started_at' => $this->summary['started_at'],
+            'updated_at' => gmdate('c'), 'finished_at' => $running ? null : $this->summary['finished_at']
+        ];
+    }
+
+    private function recordRunnerFailure(Throwable $error, bool $write_logs): void {
+        $this->summary['ok'] = false;
+        $this->summary['errors']++;
+        $this->summary['messages'][] = ['time' => gmdate('H:i:s'), 'level' => 'error', 'message' => Util::truncate($error->getMessage(), 1000)];
+        if ($write_logs) {
+            try {
+                $this->events->record(['type' => LogStore::TYPE_ERROR, 'sync_id' => 'runner', 'message' => $error->getMessage()]);
+                $this->log('error', 'NetBox sync run failed.', ['error' => $error->getMessage()]);
+            }
+            catch (Throwable $ignored) {
+                // Storage errors must not prevent publishing failure/releasing the lock.
+            }
+        }
     }
 
     /**

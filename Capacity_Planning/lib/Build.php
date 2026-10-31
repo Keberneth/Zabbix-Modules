@@ -13,8 +13,8 @@ namespace Modules\CapacityPlanning\Lib;
  * then fails closed when a partial deployment or OPcache mixes builds.
  */
 final class Build {
-	public const VERSION = '1.4.0';
-	public const ID = '1.4.0-20260801.1';
+	public const VERSION = '1.4.3';
+	public const ID = '1.4.3-20261031.3';
 
 	private function __construct() {}
 }

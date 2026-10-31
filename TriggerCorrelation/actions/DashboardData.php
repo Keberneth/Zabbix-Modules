@@ -9,6 +9,7 @@ use Modules\TriggerCorrelation\Lib\CorrelationEvaluator;
 use Modules\TriggerCorrelation\Lib\CorrelationStore;
 use Modules\TriggerCorrelation\Lib\JsonResponse;
 use Modules\TriggerCorrelation\Lib\ReceiverProvisioner;
+use Modules\TriggerCorrelation\Lib\RuleEngine;
 use Modules\TriggerCorrelation\Lib\Util;
 use Modules\TriggerCorrelation\Lib\ZabbixApiClient;
 
@@ -17,6 +18,7 @@ require_once dirname(__DIR__).'/lib/JsonResponse.php';
 require_once dirname(__DIR__).'/lib/ZabbixApiClient.php';
 require_once dirname(__DIR__).'/lib/CorrelationEvaluator.php';
 require_once dirname(__DIR__).'/lib/ReceiverProvisioner.php';
+require_once dirname(__DIR__).'/lib/RuleEngine.php';
 
 /**
  * Live data for the Dashboard tab: every correlation with its source triggers
@@ -24,13 +26,11 @@ require_once dirname(__DIR__).'/lib/ReceiverProvisioner.php';
  * problems it is holding up, and the same triggers regrouped per host.
  *
  * Read-only (no writes, no evaluation), so like the other GET data endpoints it
- * runs without CSRF; Super Admin only. All reads use the in-process API under
- * the viewer's session — a handful of batched calls regardless of rule count.
+ * runs without CSRF; Super Admin only. Source inspection uses the runtime token;
+ * receiver problem details use the viewer's session. No evaluation is performed.
  */
 class DashboardData extends CController {
     use JsonResponse;
-
-    private const MAX_TRIGGERS = 2000;
 
     public function init(): void {
         $this->disableCsrfValidation();
@@ -56,55 +56,38 @@ class DashboardData extends CController {
             $rules = array_values((array) ($config['rules'] ?? []));
             $sevRules = array_values((array) ($config['severity_rules'] ?? []));
 
-            // 1. Every source trigger, and the active problem of each.
-            $triggerids = [];
-            foreach (array_merge($rules, $sevRules) as $rule) {
-                foreach ((array) ($rule['conditions'] ?? []) as $c) {
-                    $id = trim((string) ($c['triggerid'] ?? ''));
-                    if ($id !== '') {
-                        $triggerids[$id] = true;
-                    }
-                }
-            }
-            $triggerids = array_slice(array_keys($triggerids), 0, self::MAX_TRIGGERS);
-
-            $triggers = [];
+            // Inspect through the same token and shared logic as evaluation.
+            // The viewer's Super Admin permissions must not turn missing runtime
+            // coverage into a healthy-looking candidate result.
+            $engine = new RuleEngine(ZabbixApiClient::fromConfig($settings), $settings);
+            $frontendEngine = new RuleEngine($api, $settings);
+            $inspections = [];
             $problems = [];
-            if ($triggerids !== []) {
-                foreach ((array) $api->call('trigger.get', [
-                    'output' => ['triggerid', 'description', 'priority', 'value', 'status', 'lastchange'],
-                    'selectHosts' => ['hostid', 'host', 'name'],
-                    'triggerids' => $triggerids,
-                    'expandDescription' => true,
-                    'preservekeys' => true
-                ]) as $id => $t) {
-                    $triggers[(string) $id] = $t;
-                }
-
-                $params = [
-                    'output' => ['eventid', 'objectid', 'name', 'severity', 'clock', 'acknowledged', 'suppressed', 'cause_eventid'],
-                    'source' => 0,
-                    'object' => 0,
-                    'objectids' => $triggerids,
-                    'recent' => false,
-                    'sortfield' => ['eventid'],
-                    'sortorder' => 'DESC'
-                ];
-                if (!empty($settings['ignore_suppressed'])) {
-                    $params['suppressed'] = false;
-                }
-                if (!empty($settings['ignore_symptoms'])) {
-                    $params['symptom'] = false;
-                }
-                foreach ((array) $api->call('problem.get', $params) as $p) {
-                    $tid = (string) $p['objectid'];
-                    // Newest problem per trigger (sorted DESC).
-                    if (!isset($problems[$tid])) {
-                        $problems[$tid] = $p;
+            foreach (['correlation' => $rules, 'severity' => $sevRules] as $kind => $collection) {
+                foreach ($collection as $rule) {
+                    $inspection = $engine->inspectSources($rule);
+                    if (($rule['source_selector']['mode'] ?? '') === 'group') {
+                        try {
+                            $expected = $frontendEngine->resolveSources($rule);
+                            $hidden = array_diff(array_column($expected, 'triggerid'), array_column($inspection['conditions'], 'triggerid'));
+                            if ($hidden !== []) {
+                                $inspection['valid'] = false;
+                                $inspection['errors'][] = count($hidden).' dynamic source trigger(s) are invisible to the runtime token.';
+                            }
+                        }
+                        catch (\Throwable $e) {
+                            $inspection['valid'] = false;
+                            $inspection['errors'][] = 'Dynamic source coverage could not be compared: '.$e->getMessage();
+                        }
+                    }
+                    $inspections[$kind.':'.(string) ($rule['id'] ?? '')] = $inspection;
+                    foreach ($inspection['results'] as $source) {
+                        foreach ($source['problems'] as $problem) {
+                            $problems[(string) $problem['eventid']] = $problem;
+                        }
                     }
                 }
             }
-            $minActive = max(0, (int) ($settings['min_active_seconds'] ?? 0));
 
             // 2. The correlation problem each rule raised.
             $correlationProblems = $this->correlationProblems($api, $rules, $settings);
@@ -113,9 +96,14 @@ class DashboardData extends CController {
             $correlations = [];
             foreach ($rules as $rule) {
                 $output = (array) ($rule['output'] ?? []);
-                [$members, $active, $total] = $this->members((array) ($rule['conditions'] ?? []), $triggers, $problems, $minActive);
+                $inspection = $inspections['correlation:'.(string) ($rule['id'] ?? '')];
+                $members = $this->members($inspection);
+                $active = (int) $inspection['active_count'];
+                $total = (int) $inspection['total'];
                 $enabled = (bool) ($rule['enabled'] ?? true);
-                $state = $enabled ? CorrelationEvaluator::resolveState($output, $active, $total) : 0;
+                $candidate = $inspection['valid'] ? ($enabled ? CorrelationEvaluator::resolveState($output, $active, $total) : 0) : null;
+                $runtime = self::runtimeStatus($rule, $inspection, $candidate);
+                $state = (int) ($rule['last_state'] ?? 0);
                 $id = (string) ($rule['id'] ?? '');
                 $item = [
                     'id' => $id,
@@ -140,7 +128,7 @@ class DashboardData extends CController {
                     'last_evaluated' => (int) ($rule['last_evaluated'] ?? 0),
                     'last_error' => (string) ($rule['last_error'] ?? ''),
                     'members' => $members
-                ];
+                ] + $runtime;
                 $correlations[] = $item;
                 $this->indexHosts($hostIndex, $members, 'correlations', ['id' => $id, 'name' => $item['name'], 'state' => $state]);
             }
@@ -167,7 +155,15 @@ class DashboardData extends CController {
             $escalations = [];
             $raisedCount = 0;
             foreach ($sevRules as $rule) {
-                [$members, $active, $total] = $this->members((array) ($rule['conditions'] ?? []), $triggers, $problems, $minActive);
+                $inspection = $inspections['severity:'.(string) ($rule['id'] ?? '')];
+                $members = $this->members($inspection);
+                $active = (int) $inspection['active_count'];
+                $total = (int) $inspection['total'];
+                $enabled = (bool) ($rule['enabled'] ?? true);
+                $mode = (string) ($rule['match_mode'] ?? 'all');
+                $met = $mode === 'any' ? $active > 0 : ($mode === 'count' ? $active >= max(1, (int) ($rule['min_active'] ?? 1)) : $total > 0 && $active === $total);
+                $candidate = $inspection['valid'] ? ($enabled && $met ? 1 : 0) : null;
+                $runtime = self::runtimeStatus($rule, $inspection, $candidate);
                 $raised = [];
                 foreach ((array) ($rule['applied'] ?? []) as $eventid => $info) {
                     $live = $raisedLive[(string) $eventid] ?? null;
@@ -180,11 +176,13 @@ class DashboardData extends CController {
                         'name' => (string) ($live['name'] ?? ($info['name'] ?? '')),
                         'from' => (int) ($info['sev'] ?? 0),
                         'to' => (int) ($live['severity'] ?? ($info['to'] ?? 0)),
+                        'manual_override' => !empty($info['manual_override']),
+                        'pending_restore' => !empty($info['pending_restore']),
                         'clock' => (int) ($live['clock'] ?? 0),
                         'acknowledged' => (string) ($live['acknowledged'] ?? '0') === '1'
                     ];
                 }
-                $raisedCount += count($raised);
+                $raisedCount += count(array_filter($raised, static fn(array $r): bool => !$r['manual_override']));
                 $id = (string) ($rule['id'] ?? '');
                 $escalations[] = [
                     'id' => $id,
@@ -202,9 +200,10 @@ class DashboardData extends CController {
                         'group' => (string) ($t['group'] ?? '')
                     ], (array) ($rule['targets'] ?? [])),
                     'raised' => $raised,
+                    'manual_override_count' => (int) ($rule['manual_override_count'] ?? 0),
                     'last_error' => (string) ($rule['last_error'] ?? ''),
                     'members' => $members
-                ];
+                ] + $runtime;
                 $this->indexHosts($hostIndex, $members, 'escalations', ['id' => $id, 'name' => (string) ($rule['name'] ?? ''), 'active' => (int) ($rule['last_state'] ?? 0) !== 0]);
             }
 
@@ -235,6 +234,12 @@ class DashboardData extends CController {
             }
             krsort($bySeverity);
 
+            $engineSummary = $this->engineSummary($settings);
+            $unhealthy = count(array_filter(array_merge($correlations, $escalations), static fn(array $r): bool => $r['enabled'] && in_array($r['status'], ['error', 'stale', 'never'], true)));
+            if ($unhealthy > 0 && $engineSummary['status'] === 'ok') {
+                $engineSummary['status'] = 'warn';
+                $engineSummary['text'] = 'Needs attention: '.$unhealthy.' rule(s)';
+            }
             $this->jsonResponse([
                 'ok' => true,
                 'generated_at' => time(),
@@ -246,7 +251,8 @@ class DashboardData extends CController {
                     'escalations_active' => count(array_filter($escalations, static fn(array $e): bool => $e['active'])),
                     'raised' => $raisedCount,
                     'source_problems' => count($problems),
-                    'engine' => $this->engineSummary($settings)
+                    'engine' => $engineSummary,
+                    'rules_needing_attention' => $unhealthy
                 ],
                 'correlations' => $correlations,
                 'escalations' => $escalations,
@@ -259,51 +265,69 @@ class DashboardData extends CController {
         }
     }
 
-    /**
-     * A rule's conditions grouped by host, each trigger with its live problem.
-     * Returns [members, active condition count, total].
-     */
-    private function members(array $conditions, array $triggers, array $problems, int $minActive): array {
+    /** A rule's source inspection grouped by host, retaining exclusion reasons. */
+    private function members(array $inspection): array {
         $byHost = [];
-        $active = 0;
-        $now = time();
-        foreach ($conditions as $c) {
-            $tid = trim((string) ($c['triggerid'] ?? ''));
-            if ($tid === '') {
-                continue;
+        $sources = (array) ($inspection['results'] ?? []);
+        if ($sources === [] && empty($inspection['valid'])) {
+            foreach ((array) ($inspection['conditions'] ?? []) as $c) {
+                $sources[] = $c + ['available' => false, 'reason' => 'Source data could not be assessed', 'problems' => [], 'excluded' => []];
             }
-            $t = $triggers[$tid] ?? null;
-            $host = (array) ($t['hosts'][0] ?? []);
-            $hostid = (string) ($host['hostid'] ?? ($c['hostid'] ?? ''));
-            $p = $problems[$tid] ?? null;
-            if ($p !== null && $minActive > 0 && $now - (int) $p['clock'] < $minActive) {
-                $p = null;
-            }
-            if ($p !== null) {
-                $active++;
-            }
+        }
+        foreach ($sources as $source) {
+            $tid = (string) ($source['triggerid'] ?? '');
+            $hostid = (string) ($source['hostid'] ?? '');
+            $p = $source['problems'][0] ?? null;
             if (!isset($byHost[$hostid])) {
                 $byHost[$hostid] = [
                     'hostid' => $hostid,
-                    'name' => (string) (($host['name'] ?? '') ?: ($c['host'] ?? $hostid)),
+                    'name' => (string) ($source['host'] ?? $hostid),
                     'triggers' => []
                 ];
             }
             $byHost[$hostid]['triggers'][] = [
                 'triggerid' => $tid,
-                'description' => (string) (($t['description'] ?? '') ?: ($c['trigger'] ?? $tid)),
-                'priority' => (int) ($t['priority'] ?? 0),
-                'missing' => $t === null,
-                'disabled' => $t !== null && (string) ($t['status'] ?? '0') === '1',
+                'description' => (string) ($source['trigger'] ?? $tid),
+                'priority' => (int) ($p['severity'] ?? 0),
+                'missing' => empty($source['available']),
+                'disabled' => false,
+                'available' => (bool) ($source['available'] ?? false),
+                'reason' => (string) ($source['reason'] ?? ''),
+                'excluded' => count((array) ($source['excluded'] ?? [])),
+                'problem_count' => count((array) ($source['problems'] ?? [])),
                 'problem' => $p === null ? null : [
                     'eventid' => (string) $p['eventid'],
                     'severity' => (int) $p['severity'],
                     'clock' => (int) $p['clock'],
-                    'acknowledged' => (string) $p['acknowledged'] === '1'
+                    'acknowledged' => (string) ($p['acknowledged'] ?? '0') === '1'
                 ]
             ];
         }
-        return [array_values($byHost), $active, count($conditions)];
+        return array_values($byHost);
+    }
+
+    /** Candidate observations never replace the last successfully applied state. */
+    public static function runtimeStatus(array $rule, array $inspection, ?int $candidate, ?int $now = null): array {
+        $now = $now ?? time();
+        $lastEvaluated = (int) ($rule['last_evaluated'] ?? 0);
+        $lastSuccessful = (int) ($rule['last_successful'] ?? (empty($rule['last_error']) ? $lastEvaluated : 0));
+        $stored = (int) ($rule['last_state'] ?? 0);
+        $status = $stored === 0 ? 'clear' : 'applied';
+        $pending = 0;
+        $issues = array_values((array) ($inspection['errors'] ?? []));
+        if (!(bool) ($rule['enabled'] ?? true)) { $status = 'disabled'; }
+        elseif (empty($inspection['valid']) || !empty($rule['last_error'])) { $status = 'error'; }
+        elseif ($lastEvaluated === 0) { $status = 'never'; }
+        elseif ($now - $lastEvaluated > 420) { $status = 'stale'; }
+        elseif (!empty($rule['manual_override_count']) || ($rule['status'] ?? '') === 'manual_override') { $status = 'manual_override'; }
+        elseif ($candidate !== null && ($rule['pending_state'] ?? null) === $candidate && (int) ($rule['pending_since'] ?? 0) > 0) {
+            $timed = RuleEngine::timedState($rule, $candidate, $now);
+            $pending = (int) $timed['pending_seconds'];
+            $status = $pending > 0 ? $timed['status'] : ($candidate !== $stored ? 'awaiting_evaluation' : $status);
+        }
+        elseif ($candidate !== null && $candidate !== $stored) { $status = 'awaiting_evaluation'; }
+        return ['candidate_state' => $candidate, 'stored_state' => $stored, 'last_evaluated' => $lastEvaluated,
+            'last_successful' => $lastSuccessful, 'status' => $status, 'pending_seconds' => $pending, 'source_issues' => $issues];
     }
 
     private function indexHosts(array &$index, array $members, string $kind, array $ref): void {

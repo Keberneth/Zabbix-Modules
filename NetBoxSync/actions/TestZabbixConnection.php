@@ -18,6 +18,7 @@ class TestZabbixConnection extends CController {
             'url' => 'string',
             'token' => 'string',
             'token_env' => 'string',
+            'clear_token' => 'in 0,1',
             'verify_peer' => 'in 0,1',
             'timeout' => 'int32'
         ]);
@@ -38,7 +39,6 @@ class TestZabbixConnection extends CController {
 
         try {
             $stored = Config::get();
-            $runtime = Config::sanitizeForRuntime($stored);
             $api = is_array($stored['zabbix_api'] ?? null) ? $stored['zabbix_api'] : [];
 
             $url = trim((string) ($_REQUEST['url'] ?? ''));
@@ -46,27 +46,16 @@ class TestZabbixConnection extends CController {
                 $url = (string) ($api['url'] ?? '');
             }
 
-            $token = trim((string) ($_REQUEST['token'] ?? ''));
-            $token_env = Util::cleanString($_REQUEST['token_env'] ?? '', 128);
-            if ($token === '' && $token_env !== '') {
-                $env_value = getenv($token_env);
-                if ($env_value === false || trim((string) $env_value) === '') {
-                    throw new \InvalidArgumentException(sprintf(
-                        _('Environment variable "%s" is not available to the PHP frontend process.'),
-                        $token_env
-                    ));
-                }
-                $token = trim((string) $env_value);
+            $secret_input = $_REQUEST;
+            if (!array_key_exists('token_env', $secret_input)) {
+                $secret_input['token_env'] = $api['token_env'] ?? '';
             }
-            if ($token === '') {
-                $token = (string) ($runtime['zabbix_api']['token'] ?? '');
-            }
+            $secret = Config::buildSecretSettings($secret_input, $api);
 
-            $test_config = $runtime;
-            $test_config['zabbix_api'] = [
+            $test_config = ['zabbix_api' => [
                 'url' => $url,
-                'token' => $token,
-                'token_env' => '',
+                'token' => $secret['token'],
+                'token_env' => $secret['token_env'],
                 'verify_peer' => array_key_exists('verify_peer', $_REQUEST)
                     ? Util::truthy($_REQUEST['verify_peer'])
                     : !empty($api['verify_peer']),
@@ -74,7 +63,7 @@ class TestZabbixConnection extends CController {
                     $_REQUEST['timeout'] ?? ($api['timeout'] ?? 15),
                     15, 5, 300
                 )
-            ];
+            ]];
 
             $hosts = ZabbixApiClient::fromConfig($test_config)->getAllHosts(1);
             $message = $hosts === []
@@ -90,7 +79,7 @@ class TestZabbixConnection extends CController {
             error_log('NetBoxSync TestZabbixConnection: '.$e->getMessage());
             $this->respond([
                 'ok' => false,
-                'error' => Util::truncate($e->getMessage(), 500)
+                'error' => _('Connection test failed. Check the URL, credential reference, TLS setting, and the server error log for details.')
             ], 502);
         }
     }

@@ -13,6 +13,8 @@ use Modules\TriggerCorrelation\Lib\Util;
 require_once dirname(__DIR__).'/lib/CorrelationStore.php';
 require_once dirname(__DIR__).'/lib/JsonResponse.php';
 require_once dirname(__DIR__).'/lib/ReceiverProvisioner.php';
+require_once dirname(__DIR__).'/lib/RuleDefinition.php';
+require_once dirname(__DIR__).'/lib/RuleEngine.php';
 
 /**
  * Create/update one severity-escalation rule (the new "Severity escalation" tab).
@@ -36,8 +38,15 @@ class SeverityRuleSave extends CController {
             $rule = $this->normalizeRule($this->postJsonField('rule'));
             $store = new CorrelationStore();
             $notes = [];
+            if (!empty($rule['enabled'])) {
+                $settings = (array) ($store->load()['settings'] ?? []);
+                $inspection = (new \Modules\TriggerCorrelation\Lib\RuleEngine(\Modules\TriggerCorrelation\Lib\ZabbixApiClient::fromConfig($settings), $settings))->inspectSources($rule);
+                if (!$inspection['valid']) { throw new \InvalidArgumentException(implode(' ', $inspection['errors'])); }
+                $rule['conditions'] = $inspection['conditions'];
+            }
             ReceiverProvisioner::prepareForSave($store);
 
+            $store->withSeverityEvaluationLock(function () use ($store, $rule, &$notes): void {
             CorrelationStore::transaction(function () use ($store, $rule, &$notes): void {
                 $config = $store->load();
                 $rules = array_values((array) ($config['severity_rules'] ?? []));
@@ -47,12 +56,12 @@ class SeverityRuleSave extends CController {
                     if ((string) ($existing['id'] ?? '') === $rule['id']) {
                         $runtime = [];
                         foreach (['last_state', 'last_error', 'last_evaluated', 'last_evaluated_iso',
-                            'applied', 'last_comment_sig', 'last_targets_count'] as $key) {
+                            'applied', 'last_comment_sig', 'last_targets_count', 'last_successful', 'status', 'candidate_state', 'manual_override_count', 'source_signature', 'source_members'] as $key) {
                             if (array_key_exists($key, $existing)) {
                                 $runtime[$key] = $existing[$key];
                             }
                         }
-                        $rules[$i] = array_merge($rule, $runtime);
+                        $rules[$i] = array_merge($rule, $runtime, ['pending_since' => 0, 'pending_state' => null, 'pending_seconds' => 0]);
                         $found = true;
                         break;
                     }
@@ -80,6 +89,7 @@ class SeverityRuleSave extends CController {
                 $config['severity_rules'] = $rules;
                 $store->save($config);
             });
+            });
 
             $this->jsonResponse(['ok' => true, 'notes' => $notes] + $store->publicConfig());
         }
@@ -93,120 +103,6 @@ class SeverityRuleSave extends CController {
     }
 
     private function normalizeRule(array $rule): array {
-        $id = trim((string) ($rule['id'] ?? ''));
-        if ($id === '') {
-            $id = CorrelationStore::generateId();
-        }
-
-        $name = trim((string) ($rule['name'] ?? ''));
-        if ($name === '') {
-            throw new \InvalidArgumentException('Rule name is required.');
-        }
-
-        // ── Source conditions (the "when"): at least one host+trigger ──────────
-        $conditions = [];
-        foreach ((array) ($rule['conditions'] ?? []) as $condition) {
-            $condition = (array) $condition;
-            $hostid = trim((string) ($condition['hostid'] ?? ''));
-            $triggerid = trim((string) ($condition['triggerid'] ?? ''));
-            if ($hostid === '' && $triggerid === ''
-                && trim((string) ($condition['host'] ?? '')) === ''
-                && trim((string) ($condition['trigger'] ?? '')) === '') {
-                continue;
-            }
-            if ($hostid === '' || $triggerid === '') {
-                throw new \InvalidArgumentException('Each source condition must have a selected host and trigger.');
-            }
-            $conditions[] = [
-                'hostid' => $hostid,
-                'host' => trim((string) ($condition['host'] ?? '')),
-                'triggerid' => $triggerid,
-                'trigger' => trim((string) ($condition['trigger'] ?? ''))
-            ];
-        }
-        if (count($conditions) < 1) {
-            throw new \InvalidArgumentException('At least one source trigger condition is required.');
-        }
-        if (count($conditions) > 100) {
-            throw new \InvalidArgumentException('A rule can have at most 100 source triggers (this one has '.count($conditions).').');
-        }
-
-        $matchMode = (string) ($rule['match_mode'] ?? 'all');
-        if (!in_array($matchMode, ['all', 'any', 'count'], true)) {
-            $matchMode = 'all';
-        }
-        $minActive = max(1, (int) ($rule['min_active'] ?? 1));
-
-        // ── Targets (the "what to escalate") ──────────────────────────────────
-        $targets = [];
-        foreach ((array) ($rule['targets'] ?? []) as $target) {
-            $target = (array) $target;
-            $scope = (string) ($target['scope'] ?? 'host');
-            if (!in_array($scope, ['host', 'hostgroup', 'all'], true)) {
-                $scope = 'host';
-            }
-            $trigger = trim((string) ($target['trigger'] ?? ''));
-            $triggerid = trim((string) ($target['triggerid'] ?? ''));
-            $hostid = trim((string) ($target['hostid'] ?? ''));
-            $host = trim((string) ($target['host'] ?? ''));
-            $groupid = trim((string) ($target['groupid'] ?? ''));
-            $group = trim((string) ($target['group'] ?? ''));
-            $match = (string) ($target['match'] ?? 'exact');
-            if (!in_array($match, ['exact', 'contains'], true)) {
-                $match = 'exact';
-            }
-
-            // Skip a fully-empty target row.
-            if ($trigger === '' && $triggerid === '' && $groupid === '') {
-                continue;
-            }
-
-            if ($scope === 'host') {
-                if ($triggerid === '' && ($hostid === '' || $trigger === '')) {
-                    throw new \InvalidArgumentException('A "this host" target needs a selected trigger.');
-                }
-            }
-            elseif ($scope === 'hostgroup') {
-                if ($groupid === '' || $trigger === '') {
-                    throw new \InvalidArgumentException('A "host group" target needs a host group and a trigger name.');
-                }
-            }
-            else { // all
-                if ($trigger === '') {
-                    throw new \InvalidArgumentException('An "all hosts" target needs a trigger name.');
-                }
-            }
-
-            $targets[] = [
-                'scope' => $scope,
-                'trigger' => $trigger,
-                'triggerid' => $scope === 'host' ? $triggerid : '',
-                'hostid' => $scope === 'host' ? $hostid : '',
-                'host' => $scope === 'host' ? $host : '',
-                'groupid' => $scope === 'hostgroup' ? $groupid : '',
-                'group' => $scope === 'hostgroup' ? $group : '',
-                'match' => $match
-            ];
-        }
-        if ($targets === []) {
-            throw new \InvalidArgumentException('At least one escalation target is required.');
-        }
-
-        return [
-            'id' => $id,
-            'enabled' => (bool) ($rule['enabled'] ?? true),
-            'name' => $name,
-            'description' => trim((string) ($rule['description'] ?? '')),
-            'conditions' => $conditions,
-            'match_mode' => $matchMode,
-            'min_active' => $minActive,
-            'targets' => $targets,
-            'severity' => max(1, min(5, (int) ($rule['severity'] ?? 4))),
-            'only_raise' => (bool) ($rule['only_raise'] ?? true),
-            'comment_target' => (bool) ($rule['comment_target'] ?? true),
-            'comment_source' => (bool) ($rule['comment_source'] ?? true),
-            'updated_at' => time(),
-            'updated_at_iso' => gmdate('c')
-        ];
+        return \Modules\TriggerCorrelation\Lib\RuleDefinition::normalize($rule, 'severity');
     }
 }

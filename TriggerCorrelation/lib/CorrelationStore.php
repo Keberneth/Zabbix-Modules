@@ -259,13 +259,16 @@ final class CorrelationStore {
     private const RUNTIME_KEYS = [
         'last_state', 'last_error', 'last_evaluated', 'last_evaluated_iso', 'last_eventids',
         'last_push_result', 'last_correlation_comment_sig', 'last_correlation_eventid',
-        'last_source_comment_sig'
+        'last_source_comment_sig', 'candidate_state', 'pending_state', 'pending_since',
+        'pending_seconds', 'status', 'last_successful', 'source_signature', 'source_members'
     ];
 
     /** Runtime fields the severity-escalation evaluator rewrites each run. */
     private const SEVERITY_RUNTIME_KEYS = [
         'last_state', 'last_error', 'last_evaluated', 'last_evaluated_iso',
-        'applied', 'last_comment_sig', 'last_targets_count'
+        'applied', 'last_comment_sig', 'last_targets_count', 'candidate_state', 'pending_state',
+        'pending_since', 'pending_seconds', 'status', 'last_successful', 'manual_override_count',
+        'source_signature', 'source_members'
     ];
 
     /**
@@ -282,6 +285,82 @@ final class CorrelationStore {
     /** Same as saveRuntimeState() but for the severity-escalation rule set. */
     public function saveSeverityRuntimeState(array $runtimeByRuleId): void {
         $this->writeRuntimeState('severity_rules', self::SEVERITY_RUNTIME_KEYS, $runtimeByRuleId);
+    }
+
+    public static function storageUsage(array $config): array {
+        $json = json_encode($config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        $bytes = strlen($json);
+        return ['bytes' => $bytes, 'max_bytes' => self::CONFIG_MAX_BYTES,
+            'percent' => round($bytes * 100 / self::CONFIG_MAX_BYTES, 1)];
+    }
+
+    public function loadSeverityLedger(): array {
+        return (array) ($this->load()['severity_ledger'] ?? []);
+    }
+
+    /** Commit recovery intent before touching events; never overwrite a concurrent UI edit. */
+    public function saveSeverityLedger(array $ledger): void {
+        $apply = static function (array $row) use ($ledger): void {
+            $config = self::decodeConfig($row['config'] ?? '');
+            $config['severity_ledger'] = $ledger;
+            self::persist($row['moduleid'], $config);
+        };
+        if (self::$pdo !== null) {
+            $pdo = self::$pdo;
+            if ($pdo->inTransaction()) { throw new \RuntimeException('Severity recovery state requires an independent committed write.'); }
+            $pdo->beginTransaction();
+            try {
+                $stmt = $pdo->prepare('SELECT moduleid,config FROM module WHERE id = :id FOR UPDATE');
+                $stmt->execute([':id' => self::MODULE_ID]);
+                $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+                if (!$row) { throw new \RuntimeException('The module configuration is missing. No event changes were made.'); }
+                $apply($row);
+                $pdo->commit();
+            }
+            catch (\Throwable $e) {
+                if ($pdo->inTransaction()) { $pdo->rollBack(); }
+                throw $e;
+            }
+            return;
+        }
+        global $DB;
+        if (!empty($DB['TRANSACTIONS'])) { throw new \RuntimeException('Severity recovery state cannot be written inside a configuration transaction.'); }
+        self::transaction(static function () use ($apply): void {
+            $row = self::getModuleRecord();
+            if ($row === null) { throw new \RuntimeException('The module configuration is missing.'); }
+            $apply($row);
+        });
+    }
+
+    /** Session lock spans API calls, while individual ledger updates commit independently. */
+    public function withSeverityEvaluationLock(callable $fn) {
+        return $this->withEvaluationLock('severity', $fn);
+    }
+
+    public function withEvaluationLock(string $kind, callable $fn) {
+        global $DB;
+        $postgres = self::$pdo !== null ? self::$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'pgsql'
+            : strtoupper((string) ($DB['TYPE'] ?? 'MYSQL')) === 'POSTGRESQL';
+        $lockId = $kind === 'severity' ? 1413698367 : 1413698368;
+        $name = $kind === 'severity' ? 'severity' : 'correlation';
+        $acquire = $postgres
+            ? "SELECT pg_try_advisory_lock(hashtext(current_database() || ':' || current_schema()), $lockId) AS acquired"
+            : "SELECT GET_LOCK(CONCAT('tc:$name:', MD5(DATABASE())), 0) AS acquired";
+        $release = $postgres
+            ? "SELECT pg_advisory_unlock(hashtext(current_database() || ':' || current_schema()), $lockId)"
+            : "SELECT RELEASE_LOCK(CONCAT('tc:$name:', MD5(DATABASE())))";
+        $query = static function (string $sql): array {
+            if (self::$pdo !== null) { return self::$pdo->query($sql)->fetch(\PDO::FETCH_ASSOC) ?: []; }
+            $result = \DBselect($sql);
+            if ($result === false) { throw new \RuntimeException('Could not acquire the evaluation database lock.'); }
+            return \DBfetch($result) ?: [];
+        };
+        $row = $query($acquire);
+        if (!in_array($row['acquired'] ?? null, [true, 1, '1', 't'], true)) {
+            throw new \RuntimeException('Another '.$name.' evaluation is running. Try again after it finishes.');
+        }
+        try { return $fn(); }
+        finally { $query($release); }
     }
 
     /**
@@ -642,7 +721,7 @@ final class CorrelationStore {
             // Sessionless callers (the HTTP-agent eval endpoint) have no
             // authorized user for the API facade; fall back to a direct DB
             // write, which needs no user session. Mirrors the reference module.
-            \DB::update('module', [[
+            $saved = \DB::update('module', [[
                 'values' => [
                     'config' => $json
                 ],
@@ -650,6 +729,7 @@ final class CorrelationStore {
                     'moduleid' => $moduleid
                 ]
             ]]);
+            if ($saved === false) { throw new \RuntimeException('The module configuration could not be persisted.'); }
         }
     }
 
@@ -666,7 +746,24 @@ final class CorrelationStore {
     public static function transaction(callable $fn) {
         global $DB;
 
-        if (self::$pdo !== null || !function_exists('DBstart')) {
+        if (self::$pdo !== null) {
+            $pdo = self::$pdo;
+            if ($pdo->inTransaction()) { return $fn(); }
+            $pdo->beginTransaction();
+            try {
+                $statement = $pdo->prepare('SELECT moduleid FROM module WHERE id = :id FOR UPDATE');
+                $statement->execute([':id' => self::MODULE_ID]);
+                if (!$statement->fetch()) { throw new \RuntimeException('The module configuration is missing.'); }
+                $result = $fn();
+                $pdo->commit();
+                return $result;
+            }
+            catch (\Throwable $e) {
+                if ($pdo->inTransaction()) { $pdo->rollBack(); }
+                throw $e;
+            }
+        }
+        if (!function_exists('DBstart')) {
             return $fn();
         }
         // Already inside one (and holding the lock): Zabbix transactions do not nest.

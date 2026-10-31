@@ -46,6 +46,8 @@ class ReportDownload extends CController {
 
 	protected function doAction(): void {
 		set_time_limit(300);
+		// The authenticated request must not block filters or other pages behind a native PHP session lock.
+		if (session_status() === PHP_SESSION_ACTIVE) { session_write_close(); }
 
 		try {
 			$this->streamReport();
@@ -99,7 +101,8 @@ class ReportDownload extends CController {
 					[
 						'Host group', 'Host', 'Availability pct', 'State',
 						'Uptime seconds', 'Downtime seconds', 'Maintenance seconds', 'Item key',
-						'Window start UTC', 'Window end UTC'
+						'Window start UTC', 'Window end UTC', 'Coverage pct', 'Measurement source',
+						'Measurement', 'Measurement ID'
 					],
 					$helper->flattenAvailabilityRows($report['groups'], $time_from, $time_to)
 				);

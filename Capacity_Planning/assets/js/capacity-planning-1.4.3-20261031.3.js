@@ -27,13 +27,14 @@
 	};
 	const HORIZON_DAYS = 365;
 	const FORECAST_WORKER_LIMIT = 3;
-	const MODULE_VERSION = '1.4.0';
-	const CLIENT_BUILD_ID = '1.4.0-20260801.1';
+	const MODULE_VERSION = '1.4.3';
+	const CLIENT_BUILD_ID = '1.4.3-20261031.3';
 	// The backend removes at most 10,000 entries per request and the cache has a
 	// hard 100,000-entry bound. Twenty attempts leave room for fixed metadata and
 	// directory cleanup without allowing an unbounded browser loop.
 	const MAX_CACHE_CLEAR_REQUESTS = 20;
 	const GIB = 1024 * 1024 * 1024;
+	const RESOURCE_STATISTICS_NOTE = 'Baseline p95 is the sample-weighted 95th percentile of hourly or five-minute bucket averages. Exposure is the share of represented samples in buckets whose average exceeds the threshold, not exact time above it. Short spikes can be hidden by averaging; confirmed episodes provide separate duration evidence.';
 	const CACHE_OPTIONS = [
 		{seconds: 0, label: 'Off'},
 		{seconds: 900, label: '15 minutes'},
@@ -1635,7 +1636,9 @@
 					kind: 'disk', tr: finding.tr, pr: finding.pr,
 					pct_tr: finding.pct_tr || 'identity', pct_pr: finding.pct_pr,
 					os: finding.os, fs_kind: finding.kind,
-					ok: finding.status === 'OK',
+					ok: finding.current_snapshot_usable !== undefined
+						? finding.current_snapshot_usable : finding.status === 'OK',
+					byte_source: finding.byte_source,
 					current_observation_usable: finding.current_observation_usable !== false,
 					total: finding.total, used: finding.used, free: finding.free, pused: finding.pused,
 					warn_pct: finding.warn_pct ? finding.warn_pct.v : null,
@@ -2006,8 +2009,15 @@
 		}
 
 		currentObservationUsable(finding) {
-			return !!finding && finding.current_observation_usable !== false
-				&& !this.isNoDataMaintenance(finding);
+			if (!finding || finding.current_observation_usable === false || this.isNoDataMaintenance(finding)) {
+				return false;
+			}
+			// A fresh percentage-only disk snapshot can remain usable while its
+			// byte-capacity status is incomplete or stale. Resources use their own
+			// current-value status; old values are retained only as last accepted.
+			return finding.current_snapshot_usable !== undefined
+				? finding.current_snapshot_usable === true
+				: !['Stale', 'Missing', 'Invalid current value'].includes(finding.status);
 		}
 
 		observationSemantics(finding) {
@@ -2262,7 +2272,9 @@
 
 		buildRunwaySvg(rows, palette, interactive) {
 			if (!rows.length) {
-				return '<div class="cap-empty">No projected threshold crossings inside the forecast horizon (or forecasts are still loading).</div>';
+				return `<div class="cap-empty">${this.fcReady
+					? 'No threshold ETA is available for these results. Check model confidence and data coverage in the detail view.'
+					: 'Threshold forecasts are still loading.'}</div>`;
 			}
 			const margin = {top: 26, right: 40, bottom: 30, left: 230};
 			const rowHeight = 26;
@@ -2333,8 +2345,8 @@
 					kind: 'disk', id: d.id, finding: d, sev: this.severityOf(d), host: d.host,
 					resource: d.fs, current: this.currentObservationText(d, this.fmtPct(d.pused)),
 					next: fc && fc.eta ? fc.eta.next_days : null,
-					nextLabel: fc && fc.eta ? this.fmtDays(fc.eta.next_days) : '—',
-					confidence: fc ? (fc.confidence || '—') : (d.current_severity ? 'Current state' : '…'),
+					nextLabel: this.diskEtaLabel(fc && fc.eta ? fc.eta.next_days : null, fc),
+					confidence: this.diskForecastConfidence(fc),
 					action: (fc && fc.recommendation) || d.current_recommendation || ''
 				});
 			});
@@ -2431,8 +2443,11 @@
 				crit: fc && fc.eta ? fc.eta.crit_days : null,
 				critBasis: fc && fc.eta ? (fc.eta.crit_basis || '') : '',
 				full: fc && fc.eta ? fc.eta.full_days : null,
-				conf: fc ? (fc.confidence || '') : (d.current_severity ? 'Current state' : ''),
-				status: d.status || '', note: fc ? (fc.note || '') : '', reasons,
+				conf: this.diskForecastConfidence(fc),
+				information: this.diskInformation(d, fc),
+				status: d.status || '',
+				note: fc ? [this.diskProjectionBasis(fc), fc.note, this.diskAccelerationSummary(fc)]
+					.filter(Boolean).join(' · ') : '', reasons,
 				maintenance: this.maintenanceFor(d), currentUsable: this.currentObservationUsable(d),
 				action: (fc && fc.recommendation) || d.current_recommendation || ''
 			};
@@ -2478,25 +2493,31 @@
 					? `<div class="cap-usage"><span class="cap-usage-val">${this.fmtPct(r.pused)}</span>${observation}<div class="cap-usage-track"><div class="cap-usage-fill risk-${this.usageRisk(r).toLowerCase()}" style="width:${Math.min(100, Math.max(1, r.pused))}%"></div></div></div>`
 					: `<span class="cap-muted">N/A</span>${observation}`;
 				const selected = this.selected && this.selected.kind === 'disk' && this.selected.id === r.id;
-				let growth = '<span class="cap-muted">No sustained growth</span>';
+				let growth = `<span class="cap-muted">${!r.fc
+					? (this.fcReady ? 'Growth unavailable' : 'Loading growth…')
+					: (r.fc.forecast_reliable === false || r.fc.status !== 'ok' ? 'No reliable forecast'
+						: (r.fc.acceleration_unconfirmed ? 'Growth under review'
+							: (r.fc.forecast_status === 'shrinking' ? 'Declining baseline'
+								: (r.fc.forecast_status === 'stable' ? 'Stable baseline' : 'No sustained growth'))))}</span>`;
 				if (r.growth != null || r.growthPct != null) {
-					const capacityGrowth = r.growth != null ? `${this.fmtBytes(r.growth)}/day` : 'No byte trend';
+					const capacityGrowth = this.diskByteGrowthText(r.fc);
 					const percentageGrowth = r.growthPct != null
 						? `${r.growthPct >= 0 ? '+' : ''}${this.fmtPctSlope(r.growthPct)} pp/day`
 						: 'No percentage trend';
-					growth = `<div class="cap-cell-name">${this.escapeHtml(capacityGrowth)}</div><div class="cap-cell-sub">${this.escapeHtml(percentageGrowth)}</div>`;
+					growth = `<div class="cap-cell-name">${this.escapeHtml(capacityGrowth)}</div><div class="cap-cell-sub">${this.escapeHtml(percentageGrowth)}</div><div class="cap-cell-sub">${this.escapeHtml(this.diskProjectionBasis(r.fc))}</div>`;
 				}
 				return `
 				<tr class="is-clickable${selected ? ' is-selected' : ''}" data-kind="disk" data-id="${r.id}" data-detail-trigger role="button" tabindex="0" aria-haspopup="dialog" aria-label="Open capacity details for ${this.escapeHtml(`${r.host} ${r.fs}`)}">
 					<td>${this.riskPill(r.sev)}</td>
 					<td><div class="cap-cell-name">${this.escapeHtml(r.host)}${this.maintenanceBadgeHtml(r.d)}</div><div class="cap-cell-sub">${this.escapeHtml(r.fs)}${r.d.kind === 'Remote' ? ' · remote' : ''}</div></td>
+					<td class="cap-information-cell"><div class="cap-information-summary" title="${this.escapeHtml(r.information.summary)}">${this.escapeHtml(r.information.summary)}</div></td>
 					<td>${usage}</td>
 					<td class="cap-num"><div class="cap-cell-name">${this.fmtBytes(r.free)}</div>${observation}</td>
 					<td class="cap-num">${growth}</td>
-					<td class="cap-num">${this.etaCell(r.warn, this.fmtDays(r.warn))}</td>
-					<td class="cap-num">${this.etaCell(r.crit, this.fmtDays(r.crit))}</td>
-					<td class="cap-num">${this.etaCell(r.full, this.fmtDays(r.full))}</td>
-					<td>${this.escapeHtml(r.conf || (r.fc ? '' : (this.fcReady ? '—' : '…')))}${r.fc && (r.fc.accelerating || r.fc.pct_accelerating) ? ' <span title="Recent growth is accelerating">⚠</span>' : ''}</td>
+					<td class="cap-num">${this.diskEtaCell(r.warn, r.fc, 'warn')}</td>
+					<td class="cap-num">${this.diskEtaCell(r.crit, r.fc, 'crit')}</td>
+					<td class="cap-num">${this.diskEtaCell(r.full, r.fc, 'full')}</td>
+					<td class="cap-forecast-confidence" title="Confidence in the forecast; current threshold risk is assessed separately.">${this.escapeHtml(r.conf)}${this.diskAccelerationMarker(r.fc)}</td>
 				</tr>`;
 			}).join('');
 
@@ -2506,13 +2527,14 @@
 					<thead><tr>
 						<th class="cap-sortable" data-sort="risk">Risk${sortInd('risk')}</th>
 						<th class="cap-sortable" data-sort="host">Host / filesystem${sortInd('host')}</th>
+						<th>Information</th>
 						<th class="cap-sortable" data-sort="pused">Used${sortInd('pused')}</th>
 						<th class="cap-sortable cap-num" data-sort="free">Free${sortInd('free')}</th>
-						<th class="cap-sortable cap-num" data-sort="growth">Growth${sortInd('growth')}</th>
+						<th class="cap-sortable cap-num" data-sort="growth">Projected growth${sortInd('growth')}</th>
 						<th class="cap-sortable cap-num" data-sort="warn">Warning ETA${sortInd('warn')}</th>
 						<th class="cap-sortable cap-num" data-sort="crit">Critical ETA${sortInd('crit')}</th>
 						<th class="cap-sortable cap-num" data-sort="full">Full ETA${sortInd('full')}</th>
-						<th class="cap-sortable" data-sort="conf">Confidence${sortInd('conf')}</th>
+						<th class="cap-sortable" data-sort="conf" title="Confidence in the forecast; current threshold risk is assessed separately.">Forecast confidence${sortInd('conf')}</th>
 					</tr></thead>
 					<tbody>${body}</tbody>
 				</table></div>${pager}`;
@@ -2526,6 +2548,85 @@
 			if (this.diskBreach(d, 'crit')) { return 'Critical'; }
 			if (this.diskBreach(d, 'warn')) { return 'High'; }
 			return 'Healthy';
+		}
+
+		diskForecastConfidence(fc) {
+			return fc && typeof fc.confidence === 'string' && fc.confidence
+				? fc.confidence : (this.fcReady ? 'Not assessed' : 'Pending');
+		}
+
+		diskInformation(d, fc) {
+			const raw = fc && fc.information && typeof fc.information === 'object' ? fc.information : {};
+			const text = (value) => typeof value === 'string' ? value.trim() : '';
+			const pending = !fc && !this.fcReady;
+			const forecast = text(raw.forecast) || text(fc && fc.forecast_unavailable_reason)
+				|| (pending ? 'Historical assessment is still loading.' : 'A detailed forecast assessment is not available for this result.');
+			const currentReasons = (Array.isArray(d.current_reasons) ? d.current_reasons : [])
+				.map(text).filter(Boolean).join(' ');
+			return {
+				summary: text(raw.summary) || (pending ? 'Historical assessment is still loading; current observations are shown separately.'
+					: (text(fc && fc.forecast_unavailable_reason) || 'Detailed historical interpretation is unavailable. Review the current observations and model evidence.')),
+				current: text(raw.current) || currentReasons || (this.currentObservationUsable(d)
+					? 'Current observations are shown below; a current-risk explanation is not available.'
+					: 'A usable current observation is unavailable. Retained values are last accepted observations.'),
+				recent: text(raw.recent) || 'Recent behaviour cannot yet be assessed from the available interpretation.',
+				long_term: text(raw.long_term) || 'Longer-term behaviour cannot yet be assessed from the available interpretation.',
+				forecast,
+				signals: Array.isArray(raw.signals) ? raw.signals.map(text).filter(Boolean) : []
+			};
+		}
+
+		diskInformationBlocks(info) {
+			const fields = [['Current risk', info.current], ['Recent behaviour', info.recent],
+				['Longer-term behaviour', info.long_term], ['Forecast assessment', info.forecast]];
+			return `<dl class="cap-information-grid">${fields.map(([label, value]) =>
+				`<div><dt>${label}</dt><dd>${this.escapeHtml(value)}</dd></div>`).join('')}</dl>`
+				+ (info.signals.length ? `<div class="cap-information-signals"><b>Observed signals</b><ul>${info.signals.map((signal) => `<li>${this.escapeHtml(signal)}</li>`).join('')}</ul></div>` : '');
+		}
+
+		diskInformationDetail(d, fc) {
+			const info = this.diskInformation(d, fc);
+			return `<section class="cap-detail-information" aria-label="Filesystem information"><p>${this.escapeHtml(info.summary)}</p>${this.diskInformationBlocks(info)}</section>`;
+		}
+
+		diskEtaUnavailableReason(fc, target) {
+			if (!fc) { return ''; }
+			if (Array.isArray(fc.forecast_reason_codes) && fc.forecast_reason_codes.includes('missing_free_space_evidence')) {
+				return 'Current free-space evidence is unavailable; configured absolute thresholds and a byte-based fill date cannot be assessed.';
+			}
+			if (target === 'full' && (fc.projection_basis !== 'used_bytes_fixed_capacity' || fc.byte_source !== 'used')) {
+				return 'A byte-based fill date cannot be assessed without a qualified measured used-byte growth model. Percentage history alone is insufficient.';
+			}
+			return '';
+		}
+
+		diskEtaLabel(days, fc, target = 'threshold') {
+			if (days != null && Number.isFinite(Number(days))) { return this.fmtDays(days); }
+			if (fc && fc.forecast_reliable !== false && ['stable', 'shrinking'].includes(fc.forecast_status)
+					&& !this.diskEtaUnavailableReason(fc, target)) { return 'No rising trend'; }
+			return !fc && !this.fcReady ? 'Pending' : 'Not projected';
+		}
+
+		diskEtaExplanation(fc, target = 'threshold') {
+			const unavailable = this.diskEtaUnavailableReason(fc, target);
+			if (fc && typeof fc.forecast_unavailable_reason === 'string' && fc.forecast_unavailable_reason) {
+				return [fc.forecast_unavailable_reason, unavailable].filter((value, index, all) => value && all.indexOf(value) === index).join(' ');
+			}
+			if (unavailable) { return unavailable; }
+			if (fc && fc.information && typeof fc.information.forecast === 'string' && fc.information.forecast) {
+				return fc.information.forecast;
+			}
+			if (fc && ['stable', 'shrinking'].includes(fc.forecast_status)) {
+				return `The qualified model is ${fc.forecast_status}; no growing-usage threshold crossing is projected.`;
+			}
+			return !fc && !this.fcReady ? 'Historical assessment is still loading.'
+				: 'No qualified threshold forecast is available. Open the Information section for the evidence and limitations.';
+		}
+
+		diskEtaCell(days, fc, target = 'threshold') {
+			const label = this.diskEtaLabel(days, fc, target);
+			return days != null && Number.isFinite(Number(days)) ? this.etaCell(days, label)
+				: `<span class="cap-muted" title="${this.escapeHtml(this.diskEtaExplanation(fc, target))}">${this.escapeHtml(label)}</span>`;
 		}
 
 		// ---- CPU & memory tab ------------------------------------------------------
@@ -2602,13 +2703,14 @@
 
 			const pager = this.pagerHtml('resources', page, `${label} metrics`);
 			this.elements.resourcesBody.innerHTML = `
+				<p class="cap-card-subtitle">${RESOURCE_STATISTICS_NOTE}</p>
 				${pager}<div class="cap-table-scroll cap-table-window"><table class="cap-table" data-table="resources">
 					<thead><tr>
 						<th class="cap-sortable" data-sort="risk">Risk${sortInd('risk')}</th>
 						<th class="cap-sortable" data-sort="host">Host / resource${sortInd('host')}</th>
 						<th class="cap-sortable cap-num" data-sort="current">Current / last accepted${sortInd('current')}</th>
-						<th class="cap-sortable cap-num" data-sort="p95">p95 / average${sortInd('p95')}</th>
-						<th class="cap-sortable cap-num" data-sort="peak">Peak / exposure${sortInd('peak')}</th>
+						<th class="cap-sortable cap-num" data-sort="p95">Bucket p95 / average${sortInd('p95')}</th>
+						<th class="cap-sortable cap-num" data-sort="peak">Peak / bucket exposure${sortInd('peak')}</th>
 						<th class="cap-sortable cap-num" data-sort="episodes">Confirmed episodes / days${sortInd('episodes')}</th>
 						<th class="cap-sortable cap-num" data-sort="longest">Longest / total${sortInd('longest')}</th>
 						<th>Baseline / saturation · confidence</th>
@@ -2849,7 +2951,8 @@
 				els.diskDetailSubtitle.textContent = fc && fc.status === 'denied'
 					? 'This item is not readable with your permissions.'
 					: (this.fcReady ? 'No forecast or current-state assessment is available.' : 'The forecast is still loading…');
-				els.diskDetailStats.innerHTML = maintenanceDetail;
+				els.diskDetailStats.innerHTML = maintenanceDetail
+					+ (fc && fc.status === 'denied' ? '' : this.diskInformationDetail(d, fc));
 				els.diskDetailLegend.innerHTML = '';
 				els.diskDetailSurface.innerHTML = '<div class="cap-empty">No chart data.</div>';
 				this.detailGeom = null;
@@ -2874,7 +2977,7 @@
 					modelParts.push(`used-percentage window ${pctWindowLabel}${this.modelWindowEvidence(pctSel)}`);
 				}
 				els.diskDetailSubtitle.textContent =
-					`Historical disk-growth evidence${Array.isArray(fc.series) && fc.series.length ? ' with a projected trend' : ''}. `
+					`Historical disk-growth evidence${fc.growth_day != null || fc.growth_pct_day != null ? ' with a projected trend' : ''}. `
 					+ `${modelParts.length ? modelParts.join(' · ') : 'No model window was selected'}`
 					+ `${fc.source === 'history' ? ' — short raw-history fallback.' : '.'}`;
 			}
@@ -2893,32 +2996,38 @@
 			const basis = (value) => value ? ` · basis <b>${this.escapeHtml(value)}</b>` : '';
 			const pctTrend = fc && fc.growth_pct_day != null
 				? `${fc.growth_pct_day >= 0 ? '+' : ''}${this.fmtPctSlope(fc.growth_pct_day)} pp/day`
-				: 'no sustained percentage growth';
-			const pctOrigin = fc && fc.pct_sel
-				? (fc.pct_series_direct ? ' · direct percentage history' : ' · derived percentage history')
-				: '';
+				: (fc && fc.forecast_reliable === false ? 'no reliable forecast'
+					: (fc && fc.acceleration_unconfirmed ? 'no positive baseline projection'
+						: (fc && fc.forecast_status === 'shrinking' ? 'declining baseline'
+							: (fc && fc.forecast_status === 'stable' ? 'stable baseline' : 'no sustained percentage growth'))));
 			const stats = [
 				maintenanceDetail,
 				`Overall risk: <b>${this.escapeHtml(this.severityOf(d))}</b> · data status: <b>${this.escapeHtml(d.status || 'Unknown')}</b>`,
 				`${this.currentObservationUsable(d) ? 'Now' : 'Last accepted'}: <b>${this.fmtPctDetail(d.pused)}</b> used, <b>${this.fmtBytes(d.free)}</b> free · usable capacity <b>${this.fmtBytes(usable)}</b>${reportedTotal}`,
 				hasModel
-					? `Used-capacity trend: <b>${fc.growth_day != null ? this.fmtBytes(fc.growth_day) + '/day' : 'no sustained byte growth'}</b> · window <b>${this.escapeHtml(windowLabel)}</b> · source <b>${this.escapeHtml(fc.source || 'n/a')}</b>${fc.accelerating ? ' (accelerating)' : ''}`
+					? `Projected used-capacity growth: <b>${this.escapeHtml(this.diskByteGrowthText(fc))}</b> · window <b>${this.escapeHtml(windowLabel)}</b> · source <b>${this.escapeHtml(fc.source || 'n/a')}</b>${fc.accelerating ? ' (accelerating)' : ''}`
 					: 'Growth model: <b>unavailable</b>',
 				hasModel
-					? `Used-percentage trend: <b>${this.escapeHtml(pctTrend)}</b> · window <b>${this.escapeHtml(pctWindowLabel)}</b> · source <b>${this.escapeHtml(fc.pct_source || 'n/a')}</b> · confidence <b>${this.escapeHtml(fc.pct_confidence || 'n/a')}</b>${pctOrigin}`
+					? `Projected percentage growth: <b>${this.escapeHtml(pctTrend)}</b> · window <b>${this.escapeHtml(pctWindowLabel)}</b> · basis <b>${this.escapeHtml(this.diskProjectionBasis(fc))}</b> · confidence <b>${this.escapeHtml(fc.pct_confidence || 'n/a')}</b>`
 					: '',
-				`Warning: <b>${this.fmtDays(eta.warn_days)}</b>${eta.warn_date ? ` (${this.fmtDate(eta.warn_date)})` : ''}${basis(eta.warn_basis)}`,
-				`Critical: <b>${this.fmtDays(eta.crit_days)}</b>${eta.crit_date ? ` (${this.fmtDate(eta.crit_date)})` : ''}${basis(eta.crit_basis)}`,
-				`Full: <b>${this.fmtDays(eta.full_days)}</b>${eta.full_date ? ` (${this.fmtDate(eta.full_date)})` : ''}`,
-				fc && fc.confidence ? `Confidence: <b>${this.escapeHtml(fc.confidence)}</b>` : '',
+				fc && fc.observed_growth_pct_day != null
+					? `Observed percentage-history trend: <b>${this.fmtPctSlope(fc.observed_growth_pct_day)} pp/day</b> · ${fc.pct_series_direct ? 'direct' : 'derived'} history · source <b>${this.escapeHtml(fc.pct_source || 'n/a')}</b> (historical context)`
+					: '',
+				this.diskAccelerationSummary(fc)
+					? `Acceleration review: <b>${this.escapeHtml(this.diskAccelerationSummary(fc))}</b>` : '',
+				`Warning: <b>${this.diskEtaCell(eta.warn_days, fc, 'warn')}</b>${eta.warn_date ? ` (${this.fmtDate(eta.warn_date)})` : ''}${basis(eta.warn_basis)}`,
+				`Critical: <b>${this.diskEtaCell(eta.crit_days, fc, 'crit')}</b>${eta.crit_date ? ` (${this.fmtDate(eta.crit_date)})` : ''}${basis(eta.crit_basis)}`,
+				`Full: <b>${this.diskEtaCell(eta.full_days, fc, 'full')}</b>${eta.full_date ? ` (${this.fmtDate(eta.full_date)})` : ''}`,
+				`Forecast confidence: <b title="Confidence in the forecast; current threshold risk is assessed separately.">${this.escapeHtml(this.diskForecastConfidence(fc))}</b>`,
 				`Thresholds: warn ${this.thresholdLabel(d.warn_pct, '%')} · crit ${this.thresholdLabel(d.crit_pct, '%')}`
 					+ `${d.warn_free && d.warn_free.v > 0 ? ` · warn free ${this.fmtBytes(d.warn_free.v)}` : ''}`
 					+ `${d.crit_free && d.crit_free.v > 0 ? ` · crit free ${this.fmtBytes(d.crit_free.v)}` : ''}`,
-				currentReasons.length ? `Current-state evidence: <b>${this.escapeHtml(currentReasons.join('; '))}</b>` : '',
+				currentReasons.length ? `Assessment evidence: <b>${this.escapeHtml(currentReasons.join('; '))}</b>` : '',
 				fc && fc.note ? `Data note: <b>${this.escapeHtml(fc.note)}</b>` : '',
 				recommendation ? `Assessment: <b>${this.escapeHtml(recommendation)}</b>` : ''
 			].filter(Boolean);
-			els.diskDetailStats.innerHTML = stats.map((s) => s === maintenanceDetail ? s : `<span>${s}</span>`).join('');
+			els.diskDetailStats.innerHTML = this.diskInformationDetail(d, fc)
+				+ stats.map((s) => s === maintenanceDetail ? s : `<span>${s}</span>`).join('');
 
 			if (hasModel) {
 				const spec = this.diskChartSpec(d, fc);
@@ -2947,17 +3056,60 @@
 			return d.os === 'Windows' && d.total != null && d.total > 0 ? d.total : null;
 		}
 
+		diskProjectionBasis(fc) {
+			if (!fc) { return ''; }
+			return ({used_bytes_fixed_capacity: 'Used bytes at unchanged capacity',
+				percentage_only: 'Percentage-history model',
+				unavailable: 'Projection unavailable'})[fc.projection_basis] || 'Historical growth model';
+		}
+
+		diskByteGrowthText(fc) {
+			if (!fc || !fc.sel || (fc.byte_source != null && fc.byte_source !== 'used')) {
+				return 'Byte growth unavailable';
+			}
+			if (fc.forecast_reliable === false) { return 'No reliable byte forecast'; }
+			if (fc.growth_day == null && fc.acceleration_unconfirmed) { return 'No positive baseline projection'; }
+			if (fc.growth_day == null && fc.forecast_status === 'shrinking') { return 'Declining baseline'; }
+			if (fc.growth_day == null && fc.forecast_status === 'stable') { return 'Stable baseline'; }
+			return fc.growth_day != null ? `${this.fmtBytes(fc.growth_day)}/day` : 'No sustained byte growth';
+		}
+
+		diskAccelerationSummary(fc) {
+			if (!fc || fc.acceleration_unconfirmed !== true) { return ''; }
+			const evidence = fc.acceleration_evidence || {};
+			const formatRate = (value) => evidence.unit === 'bytes/day'
+				? `${this.fmtBytes(value)}/day` : `${this.fmtPctSlope(value)} pp/day`;
+			const parts = [fc.acceleration_note || 'Faster monthly growth is unconfirmed by recent observations.'];
+			if (evidence.candidate_rate != null && Number.isFinite(Number(evidence.candidate_rate))) {
+				parts.push(`Observed monthly candidate: ${formatRate(evidence.candidate_rate)}`);
+			}
+			if (evidence.recent_net_rate != null && Number.isFinite(Number(evidence.recent_net_rate))) {
+				const period = ({'1w': 'Recent 1-week', '2w': 'Recent 2-week'})[evidence.recent_window] || 'Recent';
+				parts.push(`${period} net growth: ${formatRate(evidence.recent_net_rate)}`);
+			}
+			return parts.join(' · ');
+		}
+
+		diskAccelerationMarker(fc) {
+			const review = this.diskAccelerationSummary(fc);
+			if (review) {
+				return ` <span title="${this.escapeHtml(review)}">⚠</span><div class="cap-cell-sub">Acceleration unconfirmed</div>`;
+			}
+			return fc && (fc.accelerating || fc.pct_accelerating)
+				? ' <span title="Recent growth acceleration is confirmed by recent observations">⚠</span>' : '';
+		}
+
 		diskChartSpec(d, fc) {
-			// Chart in percent when a capacity is known; otherwise raw GiB.
+			// Direct percentage history remains usable even without byte capacity.
 			const capacity = this.diskUsableCapacity(d);
-			const asPct = capacity != null && capacity > 0;
-			const scale = asPct ? 100 / capacity : 1 / GIB;
+			const asPct = (capacity != null && capacity > 0)
+				|| d.pused != null || (Array.isArray(fc.pct_series) && fc.pct_series.length > 0);
+			const scale = capacity != null && capacity > 0 ? 100 / capacity : 1 / GIB;
 			const hasPctSeries = asPct && Array.isArray(fc.pct_series) && fc.pct_series.length > 0;
-			const chartSeries = hasPctSeries ? fc.pct_series : (fc.series || []);
+			const chartSeries = hasPctSeries ? fc.pct_series
+				: (asPct && capacity == null ? [] : (fc.series || []));
 			const chartScale = hasPctSeries ? 1 : scale;
-			const series = chartSeries.map((p) => ({
-				clock: p[0], min: p[1] * chartScale, avg: p[2] * chartScale, max: p[3] * chartScale
-			}));
+			const series = this.chartSeries(chartSeries, chartScale);
 			const currentUsable = this.currentObservationUsable(d);
 			const currentValue = !currentUsable
 				? null
@@ -2988,12 +3140,12 @@
 					thresholds.push({value: d.crit_pct.v, label: `Critical ${this.trimNum(d.crit_pct.v)}%`,
 						kind: 'crit', markerId: 'crit-pct', ...marker('crit_pct_days', 'crit_pct_date', 'used % model')});
 				}
-				if (d.warn_free && d.warn_free.v > 0) {
+				if (capacity != null && d.warn_free && d.warn_free.v > 0) {
 					const value = Math.max(0, Math.min(100, (capacity - d.warn_free.v) / capacity * 100));
 					thresholds.push({value, label: `Warning free ${this.fmtBytes(d.warn_free.v)} (${this.trimNum(value)}% used)`,
 						kind: 'warn', markerId: 'warn-free', ...marker('warn_free_days', 'warn_free_date', 'absolute free-space model')});
 				}
-				if (d.crit_free && d.crit_free.v > 0) {
+				if (capacity != null && d.crit_free && d.crit_free.v > 0) {
 					const value = Math.max(0, Math.min(100, (capacity - d.crit_free.v) / capacity * 100));
 					thresholds.push({value, label: `Critical free ${this.fmtBytes(d.crit_free.v)} (${this.trimNum(value)}% used)`,
 						kind: 'crit', markerId: 'crit-free', ...marker('crit_free_days', 'crit_free_date', 'absolute free-space model')});
@@ -3005,7 +3157,7 @@
 				yMax: asPct ? 100 : null,
 				series, currentValue, slope, thresholds,
 				projectionLabel: currentUsable
-					? `Projected growth (${asPct && fc.growth_pct_day != null ? 'used % basis' : 'used-capacity basis'})`
+					? `Projected growth (${this.diskProjectionBasis(fc)})`
 					: ''
 			};
 		}
@@ -3059,9 +3211,10 @@
 				maintenanceDetail,
 				`Overall risk: <b>${this.escapeHtml(this.severityOf(r))}</b> · data status: <b>${this.escapeHtml(r.status || 'Unknown')}</b>`,
 				`${this.currentObservationUsable(r) ? 'Now' : 'Last accepted'}: <b>${this.fmtPct(r.current)}</b>`,
-				sel ? `Average: <b>${this.fmtPct(sel.avg)}</b> · p95: <b>${this.fmtPct(sel.p95)}</b> · peak: <b>${this.fmtPct(sel.peak)}</b>` : '',
-				sel && sel.above_warn != null ? `Time above review: <b>${this.fmtPct(sel.above_warn)}</b>` : '',
-				sel && sel.above_crit != null ? `Time above alarm: <b>${this.fmtPct(sel.above_crit)}</b>` : '',
+				sel ? `Average: <b>${this.fmtPct(sel.avg)}</b> · bucket-average p95: <b>${this.fmtPct(sel.p95)}</b> · peak: <b>${this.fmtPct(sel.peak)}</b>` : '',
+				sel && sel.above_warn != null ? `Above-review bucket exposure: <b>${this.fmtPct(sel.above_warn)}</b>` : '',
+				sel && sel.above_crit != null ? `Above-alarm bucket exposure: <b>${this.fmtPct(sel.above_crit)}</b>` : '',
+				sel ? RESOURCE_STATISTICS_NOTE : '',
 				(fc && fc.baseline_severity) || saturationSeverity
 					? `Baseline risk: <b>${this.escapeHtml((fc && fc.baseline_severity) || 'n/a')}</b> · saturation risk: <b>${this.escapeHtml(saturationSeverity || 'n/a')}</b>`
 					: '',
@@ -3101,7 +3254,7 @@
 					title: `${r.rtype} utilization (%)`,
 					unit: '%',
 					yMax: 100,
-					series: (fc.series || []).map((p) => ({clock: p[0], min: p[1], avg: p[2], max: p[3]})),
+					series: this.chartSeries(fc.series || []),
 					currentValue: this.currentObservationUsable(r) ? r.current : null,
 					slope: null,
 					thresholds,
@@ -3153,8 +3306,8 @@
 			const palette = this.getPalette();
 			const built = this.buildUsageSvg(spec, palette, true);
 			legendEl.innerHTML = [
-				`<span class="cap-legend-item"><span class="cap-legend-swatch" style="background:${palette.line}"></span>Daily average</span>`,
-				`<span class="cap-legend-item"><span class="cap-legend-swatch is-band" style="background:${palette.line}"></span>Daily min–max</span>`,
+				`<span class="cap-legend-item"><span class="cap-legend-swatch" style="background:${palette.line}"></span>Historical average (daily or grouped days)</span>`,
+				`<span class="cap-legend-item"><span class="cap-legend-swatch is-band" style="background:${palette.line}"></span>Historical min–max; missing days are gaps</span>`,
 				spec.slope != null ? `<span class="cap-legend-item"><span class="cap-legend-swatch" style="background:${palette.projection}"></span>${this.escapeHtml(spec.projectionLabel)}</span>` : '',
 				built.geom.patternDrawn ? `<span class="cap-legend-item"><span class="cap-legend-swatch" style="background:${palette.projection};opacity:0.55"></span>Possible path (history pattern)</span>` : '',
 				...spec.thresholds.map((t) => `<span class="cap-legend-item"><span class="cap-legend-swatch" style="background:${t.kind === 'crit' ? palette.crit : palette.warn}"></span>${this.escapeHtml(t.label)}</span>`)
@@ -3507,6 +3660,27 @@
 			return amp * base + seam;
 		}
 
+		chartSeries(points, scale = 1) {
+			return points.map((p) => ({
+				clock: p[0], min: p[1] * scale, avg: p[2] * scale, max: p[3] * scale,
+				from: p[4] != null && Number.isFinite(Number(p[4])) ? Number(p[4]) : p[0],
+				to: p[5] != null && Number.isFinite(Number(p[5])) ? Number(p[5]) : p[0] + 86400
+			}));
+		}
+
+		historySegments(series) {
+			const segments = [];
+			series.forEach((point) => {
+				const previous = segments.length ? segments[segments.length - 1] : null;
+				const last = previous && previous[previous.length - 1];
+				if (!last || (point.from ?? point.clock) > (last.to ?? last.clock + 86400) + 1) {
+					segments.push([point]);
+				}
+				else { previous.push(point); }
+			});
+			return segments;
+		}
+
 		buildUsageSvg(spec, palette, interactive) {
 			const margin = {top: 26, right: 30, bottom: 64, left: 56};
 			const height = 380;
@@ -3581,22 +3755,20 @@
 				svg += `<text x="${lx}" y="${ly}" font-size="10" fill="${palette.axisText}" transform="rotate(45 ${lx} ${ly})" text-anchor="${anchor}" data-axis-edge="${edge}">${this.escapeHtml(this.fmtDate(t))}</text>`;
 			}
 
-			// Min–max band.
-			if (series.length > 1) {
-				const upper = series.map((p) => `${x(p.clock)},${y(p.max)}`);
-				const lower = series.slice().reverse().map((p) => `${x(p.clock)},${y(p.min)}`);
-				svg += `<polygon points="${upper.join(' ')} ${lower.join(' ')}" fill="${palette.band}" stroke="none" />`;
-			}
-
-			// Average line.
-			const avgPoints = series.map((p) => `${x(p.clock)},${y(p.avg)}`);
-			if (avgPoints.length > 1) {
-				svg += `<polyline points="${avgPoints.join(' ')}" fill="none" stroke="${palette.line}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />`;
-			}
-			else {
-				const [px, py] = avgPoints[0].split(',');
-				svg += `<circle cx="${px}" cy="${py}" r="3.5" fill="${palette.line}" />`;
-			}
+			// Never draw an apparent observation through absent calendar days.
+			this.historySegments(series).forEach((segment) => {
+				if (segment.length > 1) {
+					const upper = segment.map((p) => `${x(p.clock)},${y(p.max)}`);
+					const lower = segment.slice().reverse().map((p) => `${x(p.clock)},${y(p.min)}`);
+					svg += `<polygon data-role="history-band" points="${upper.join(' ')} ${lower.join(' ')}" fill="${palette.band}" stroke="none" />`;
+					const avgPoints = segment.map((p) => `${x(p.clock)},${y(p.avg)}`);
+					svg += `<polyline data-role="history-average" points="${avgPoints.join(' ')}" fill="none" stroke="${palette.line}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />`;
+				}
+				else {
+					const point = segment[0];
+					svg += `<circle data-role="history-average" cx="${x(point.clock)}" cy="${y(point.avg)}" r="3.5" fill="${palette.line}" />`;
+				}
+			});
 
 			// Today divider.
 			if (nowSec > tMin && nowSec < tMax) {
@@ -3699,14 +3871,15 @@
 			const unit = spec.unit === '%' ? '%' : spec.unit;
 			let html = `<div class="cap-tt-title">${this.escapeHtml(this.fmtDate(t))}</div>`;
 			if (t <= geom.nowSec && geom.series.length) {
-				let nearest = geom.series[0];
-				let bestDist = Math.abs(nearest.clock - t);
-				geom.series.forEach((p) => {
-					const dist = Math.abs(p.clock - t);
-					if (dist < bestDist) { nearest = p; bestDist = dist; }
-				});
-				html += `<div class="cap-tt-row">Average<span class="cap-tt-val">${this.trimNum(nearest.avg)}${unit}</span></div>`;
-				html += `<div class="cap-tt-row">Min – max<span class="cap-tt-val">${this.trimNum(nearest.min)} – ${this.trimNum(nearest.max)}${unit}</span></div>`;
+				const point = geom.series.find((p) => t >= (p.from ?? p.clock) && t < (p.to ?? p.clock + 86400));
+				if (point) {
+					const from = this.fmtDate(point.from ?? point.clock);
+					const to = this.fmtDate((point.to ?? point.clock + 86400) - 1);
+					html = `<div class="cap-tt-title">${this.escapeHtml(from === to ? from : `${from} – ${to}`)}</div>`;
+					html += `<div class="cap-tt-row">Interval average<span class="cap-tt-val">${this.trimNum(point.avg)}${unit}</span></div>`;
+					html += `<div class="cap-tt-row">Min – max<span class="cap-tt-val">${this.trimNum(point.min)} – ${this.trimNum(point.max)}${unit}</span></div>`;
+				}
+				else { html += '<div class="cap-tt-row">No observations for this date</div>'; }
 			}
 			else if (spec.slope != null && spec.currentValue != null) {
 				let projected = spec.currentValue + spec.slope * (t - geom.nowSec) / 86400;
@@ -3738,15 +3911,16 @@
 		exportActionsCsv() {
 			const rows = [['Severity', 'Category', 'Host', 'Resource', 'Current / last accepted',
 				'Observation semantics', 'Maintenance / current state', 'Next threshold',
-				'Critical threshold', 'Full', 'Confidence', 'Evidence', 'Action']];
+				'Critical threshold', 'Full', 'Confidence', 'Evidence', 'Action', 'Information']];
 			this.visibleDisks().forEach((d) => {
 				const fc = this.fc.get(d.id);
 				const reasons = this.findingReasons(d, fc);
 				rows.push([this.severityOf(d), 'Filesystem', d.host, d.fs, this.fmtPct(d.pused),
 					this.observationSemantics(d), this.currentStateExplanation(d, reasons),
-					fc && fc.eta ? this.fmtDays(fc.eta.next_days) : '', fc && fc.eta ? this.fmtDays(fc.eta.crit_days) : '',
-					fc && fc.eta ? this.fmtDays(fc.eta.full_days) : '', fc ? fc.confidence || '' : (d.current_severity ? 'Current state' : ''),
-					reasons.join('; '), (fc && fc.recommendation) || d.current_recommendation || '']);
+					this.diskEtaLabel(fc && fc.eta ? fc.eta.next_days : null, fc),
+					this.diskEtaLabel(fc && fc.eta ? fc.eta.crit_days : null, fc, 'crit'),
+					this.diskEtaLabel(fc && fc.eta ? fc.eta.full_days : null, fc, 'full'), this.diskForecastConfidence(fc),
+					reasons.join('; '), (fc && fc.recommendation) || d.current_recommendation || '', this.diskInformation(d, fc).summary]);
 			});
 			this.visibleResources().forEach((r) => {
 				const fc = this.fc.get(r.id);
@@ -3754,7 +3928,7 @@
 				rows.push([this.severityOf(r), r.rtype, r.host, r.metric || r.rtype, this.fmtPct(r.current),
 					this.observationSemantics(r), this.currentStateExplanation(r, reasons),
 					'', '', '', fc ? fc.confidence || '' : (r.current_severity ? 'Current state' : ''),
-					reasons.join('; '), (fc && fc.recommendation) || r.current_recommendation || '']);
+					reasons.join('; '), (fc && fc.recommendation) || r.current_recommendation || '', '']);
 			});
 			this.downloadCsv(rows, 'capacity-actions');
 		}
@@ -3762,12 +3936,15 @@
 		exportDisksCsv() {
 			const rows = [['Severity', 'Host', 'OS', 'Filesystem', 'Kind', 'Reported total GiB', 'Usable GiB', 'Used GiB', 'Free GiB',
 				'Used %', 'Observation semantics', 'Warn %', 'Critical %', 'Warn free GiB', 'Critical free GiB', 'Growth GiB/day',
-				'Used percentage growth pp/day', 'Used-capacity model window', 'Used-percentage model window',
+				'Projected percentage growth pp/day', 'Used-capacity model window', 'Used-percentage model window',
 				'Used-percentage source', 'Used-percentage confidence', 'Direct percentage history',
-				'Confidence', 'Accelerating', 'Days to warning', 'Warning date', 'Warning basis',
+				'Forecast confidence', 'Confirmed acceleration', 'Days to warning', 'Warning date', 'Warning basis',
 				'Days to critical', 'Critical date', 'Critical basis', 'Days to full', 'Full date', 'Next threshold basis',
 				'Data status', 'Expected maintenance gap', 'Maintenance / current state', 'Analysis note',
-				'Current-state evidence', 'Item key', 'Recommendation']];
+				'Current-state evidence', 'Item key', 'Recommendation', 'Projection basis', 'Observed percentage-history growth pp/day',
+				'Acceleration unconfirmed', 'Acceleration review', 'Observed monthly candidate growth', 'Candidate growth unit',
+				'Information', 'Current risk', 'Recent behaviour', 'Longer-term behaviour', 'Forecast assessment', 'Observed signals',
+				'Forecast status', 'Forecast reason codes', 'Warning ETA assessment', 'Critical ETA assessment', 'Full ETA assessment']];
 			this.visibleDisks().map((d) => this.diskRow(d)).sort((a, b) => b.risk - a.risk).forEach((r) => {
 				const d = r.d;
 				const fc = r.fc;
@@ -3783,7 +3960,7 @@
 					fc ? this.selectedLabel(fc) : '', fc ? this.percentageSelectedLabel(fc) : '',
 					fc ? fc.pct_source || '' : '', fc ? fc.pct_confidence || '' : '',
 					fc && fc.pct_sel ? (fc.pct_series_direct ? 'Yes' : 'No') : '',
-					fc ? fc.confidence || '' : '',
+					this.diskForecastConfidence(fc),
 					fc && (fc.accelerating || fc.pct_accelerating) ? 'Yes' : 'No',
 					fc && fc.eta && fc.eta.warn_days != null ? fc.eta.warn_days : '',
 					fc && fc.eta && fc.eta.warn_date ? this.fmtIsoDate(fc.eta.warn_date) : '',
@@ -3795,7 +3972,15 @@
 					fc && fc.eta && fc.eta.full_date ? this.fmtIsoDate(fc.eta.full_date) : '',
 					fc && fc.eta ? fc.eta.next_basis || '' : '', d.status, d.expected_gap ? 'Yes' : 'No',
 					this.maintenanceSummary(d), fc ? fc.note || '' : '', this.currentStateExplanation(d, r.reasons),
-					d.item_key || '', (fc && fc.recommendation) || d.current_recommendation || '']);
+					d.item_key || '', (fc && fc.recommendation) || d.current_recommendation || '',
+					this.diskProjectionBasis(fc), fc && fc.observed_growth_pct_day != null ? fc.observed_growth_pct_day : '',
+					fc ? (fc.acceleration_unconfirmed ? 'Yes' : 'No') : '', this.diskAccelerationSummary(fc),
+					fc && fc.acceleration_evidence ? fc.acceleration_evidence.candidate_rate ?? '' : '',
+					fc && fc.acceleration_evidence ? fc.acceleration_evidence.unit || '' : '',
+					r.information.summary, r.information.current, r.information.recent, r.information.long_term,
+					r.information.forecast, r.information.signals.join('; '), fc ? fc.forecast_status || '' : '',
+					fc && Array.isArray(fc.forecast_reason_codes) ? fc.forecast_reason_codes.join('; ') : '',
+					this.diskEtaLabel(r.warn, fc, 'warn'), this.diskEtaLabel(r.crit, fc, 'crit'), this.diskEtaLabel(r.full, fc, 'full')]);
 			});
 			this.downloadCsv(rows, 'capacity-filesystems');
 		}
@@ -3804,8 +3989,8 @@
 			const rows = [['Severity', 'Baseline severity', 'Saturation severity', 'Analysis confidence',
 				'Host', 'OS', 'Resource', 'Provisioned', 'Unit', 'Current %', 'Observation semantics',
 				'Expected maintenance gap', 'Maintenance / current state', 'Window', 'Baseline coverage %',
-				'Baseline source', 'Analysis note', 'Average %', 'p95 %',
-				'Peak %', 'Above review %', 'Above alarm %', 'Confirmed episodes', 'Confirmed episode days',
+				'Baseline source', 'Analysis note', 'Average %', 'Bucket-average p95 %',
+				'Peak %', 'Above-review bucket exposure %', 'Above-alarm bucket exposure %', 'Confirmed episodes', 'Confirmed episode days',
 				'Long episodes', 'Critical episodes', 'Longest episode minutes', 'Total episode minutes',
 				'Ongoing episode minutes', 'Near-full peak observations', 'Near-full peak days',
 				'Duration-unknown peaks', 'Saturation threshold %', 'Near-full threshold %',
@@ -3874,6 +4059,23 @@
 				this.buildFileName(prefix, 'csv'));
 		}
 
+		diskReportRow(r) {
+			return `<tr>
+				<td>${this.riskPill(r.sev)}</td><td>${this.escapeHtml(r.host)}${this.maintenanceBadgeHtml(r.d)}</td><td>${this.escapeHtml(r.fs)}</td>
+				<td class="cap-information-cell"><details><summary>${this.escapeHtml(r.information.summary)}</summary>${this.diskInformationBlocks(r.information)}</details></td>
+				<td>${this.escapeHtml(this.currentObservationText(r.d, this.fmtPct(r.pused)))}</td>
+				<td>${this.escapeHtml(this.currentObservationText(r.d, this.fmtBytes(r.free)))}</td><td>${this.fmtBytes(r.usable)}</td>
+				<td>${r.growth != null ? this.fmtBytes(r.growth) + '/day' : '—'} / ${r.growthPct != null ? `${r.growthPct >= 0 ? '+' : ''}${this.fmtPctSlope(r.growthPct)} pp/day` : '—'}</td>
+				<td>${this.escapeHtml(`${r.modelWindow || '—'} / ${r.pctWindow || '—'} · ${r.pctSource || '—'}${r.pctWindow && r.pctWindow !== 'n/a' ? (r.pctSeriesDirect ? ' (direct)' : ' (derived)') : ''}`)}</td>
+				<td>${this.diskEtaCell(r.warn, r.fc, 'warn')}${r.warnBasis ? ` / ${this.escapeHtml(r.warnBasis)}` : ''}</td>
+				<td>${this.diskEtaCell(r.crit, r.fc, 'crit')}${r.critBasis ? ` / ${this.escapeHtml(r.critBasis)}` : ''}</td>
+				<td>${this.diskEtaCell(r.full, r.fc, 'full')}</td><td>${this.escapeHtml(r.conf)}</td><td>${this.escapeHtml(r.status || '—')}</td>
+				<td>${this.escapeHtml(this.maintenanceSummary(r.d) || '—')}</td>
+				<td>${this.escapeHtml(this.currentStateExplanation(r.d, r.reasons) || '—')}</td>
+				<td>${this.escapeHtml([r.reasons.join('; '), r.note].filter(Boolean).join(' · ') || '—')}</td><td>${this.escapeHtml(r.action || '—')}</td>
+			</tr>`;
+		}
+
 		buildReportHtml() {
 			const metaText = this.escapeHtml(this.elements.meta.textContent || '');
 			const filterText = this.escapeHtml([this.elements.filterSummary.textContent || '',
@@ -3893,13 +4095,13 @@
 			const runwaySvg = this.buildRunwaySvg(this.runwayRows(), PALETTE_LIGHT, false);
 			const distSvg = this.buildDistributionSvg(counts, PALETTE_LIGHT);
 
-			const diskRows = this.visibleDisks().map((d) => this.diskRow(d)).sort((a, b) => b.risk - a.risk).slice(0, 500);
-			const diskTable = diskRows.length ? `<div class="table-scroll"><table><thead><tr><th>Risk</th><th>Host</th><th>Filesystem</th><th>Current / last accepted used</th><th>Current / last accepted free</th><th>Usable capacity</th><th>Growth (capacity / percentage)</th><th>Model evidence (capacity / percentage)</th><th>Warning ETA / basis</th><th>Critical ETA / basis</th><th>Full ETA</th><th>Confidence</th><th>Data status</th><th>Maintenance</th><th>Current-state explanation</th><th>Evidence / note</th><th>Assessment</th></tr></thead><tbody>${
-				diskRows.map((r) => `<tr><td>${this.riskPill(r.sev)}</td><td>${this.escapeHtml(r.host)}${this.maintenanceBadgeHtml(r.d)}</td><td>${this.escapeHtml(r.fs)}</td><td>${this.escapeHtml(this.currentObservationText(r.d, this.fmtPct(r.pused)))}</td><td>${this.escapeHtml(this.currentObservationText(r.d, this.fmtBytes(r.free)))}</td><td>${this.fmtBytes(r.usable)}</td><td>${r.growth != null ? this.fmtBytes(r.growth) + '/day' : '—'} / ${r.growthPct != null ? `${r.growthPct >= 0 ? '+' : ''}${this.fmtPctSlope(r.growthPct)} pp/day` : '—'}</td><td>${this.escapeHtml(`${r.modelWindow || '—'} / ${r.pctWindow || '—'} · ${r.pctSource || '—'}${r.pctWindow && r.pctWindow !== 'n/a' ? (r.pctSeriesDirect ? ' (direct)' : ' (derived)') : ''}`)}</td><td>${this.fmtDays(r.warn)}${r.warnBasis ? ` / ${this.escapeHtml(r.warnBasis)}` : ''}</td><td>${this.fmtDays(r.crit)}${r.critBasis ? ` / ${this.escapeHtml(r.critBasis)}` : ''}</td><td>${this.fmtDays(r.full)}</td><td>${this.escapeHtml(r.conf || '—')}</td><td>${this.escapeHtml(r.status || '—')}</td><td>${this.escapeHtml(this.maintenanceSummary(r.d) || '—')}</td><td>${this.escapeHtml(this.currentStateExplanation(r.d, r.reasons) || '—')}</td><td>${this.escapeHtml([r.reasons.join('; '), r.note].filter(Boolean).join(' · ') || '—')}</td><td>${this.escapeHtml(r.action || '—')}</td></tr>`).join('')
+			const diskRows = this.visibleDisks().map((d) => this.diskRow(d)).sort((a, b) => b.risk - a.risk);
+			const diskTable = diskRows.length ? `<div class="table-scroll"><table><thead><tr><th>Risk</th><th>Host</th><th>Filesystem</th><th>Information</th><th>Current / last accepted used</th><th>Current / last accepted free</th><th>Usable capacity</th><th>Growth (capacity / percentage)</th><th>Model evidence (capacity / percentage)</th><th>Warning ETA / basis</th><th>Critical ETA / basis</th><th>Full ETA</th><th>Forecast confidence</th><th>Data status</th><th>Maintenance</th><th>Current-state explanation</th><th>Evidence / note</th><th>Assessment</th></tr></thead><tbody>${
+				diskRows.map((r) => this.diskReportRow(r)).join('')
 			}</tbody></table></div>` : '<p>No filesystem findings.</p>';
 
-			const resRows = this.visibleResources().map((r) => this.resourceRow(r)).sort((a, b) => b.risk - a.risk).slice(0, 500);
-			const resTable = resRows.length ? `<div class="table-scroll"><table class="resource-table"><thead><tr><th>Risk</th><th>Baseline / saturation</th><th>Host</th><th>Resource</th><th>Window / source</th><th>Current / last accepted</th><th>Maintenance</th><th>Current-state explanation</th><th>Avg</th><th>p95</th><th>Peak</th><th>Above review</th><th>Above alarm</th><th>Confirmed episodes / days</th><th>Longest</th><th>Total duration</th><th>Near-full peaks / days</th><th>Confidence</th><th>Regime</th><th>Pre-change saturation</th><th>Evidence / note</th><th>Assessment</th></tr></thead><tbody>${
+			const resRows = this.visibleResources().map((r) => this.resourceRow(r)).sort((a, b) => b.risk - a.risk);
+			const resTable = resRows.length ? `<p class="meta">${RESOURCE_STATISTICS_NOTE}</p><div class="table-scroll"><table class="resource-table"><thead><tr><th>Risk</th><th>Baseline / saturation</th><th>Host</th><th>Resource</th><th>Window / source</th><th>Current / last accepted</th><th>Maintenance</th><th>Current-state explanation</th><th>Avg</th><th>Bucket p95</th><th>Peak</th><th>Above-review bucket exposure</th><th>Above-alarm bucket exposure</th><th>Confirmed episodes / days</th><th>Longest</th><th>Total duration</th><th>Near-full peaks / days</th><th>Confidence</th><th>Regime</th><th>Pre-change saturation</th><th>Evidence / note</th><th>Assessment</th></tr></thead><tbody>${
 				resRows.map((row) => `<tr><td>${this.riskPill(row.sev)}</td><td>${this.escapeHtml(row.baselineSeverity || '—')} / ${this.escapeHtml(row.saturationSeverity || '—')}</td><td>${this.escapeHtml(row.host)}${this.maintenanceBadgeHtml(row.r)}</td><td>${this.escapeHtml(row.rtype)}</td><td>${this.escapeHtml(row.window || '—')} / ${this.escapeHtml(row.selectedSource || '—')}</td><td>${this.escapeHtml(this.currentObservationText(row.r, this.fmtPct(row.current)))}</td><td>${this.escapeHtml(this.maintenanceSummary(row.r) || '—')}</td><td>${this.escapeHtml(this.currentStateExplanation(row.r, row.reasons) || '—')}</td><td>${this.fmtPct(row.avg)}</td><td>${this.fmtPct(row.p95)}</td><td>${this.fmtPct(row.peak)}</td><td>${this.fmtPct(row.aboveWarn)}</td><td>${this.fmtPct(row.aboveCrit)}</td><td>${this.countDaysLabel(row.episodes, row.episodeDays)}</td><td>${this.fmtDurationMinutes(row.longest)}</td><td>${this.fmtDurationMinutes(row.totalDuration)}</td><td>${this.countDaysLabel(row.nearFullCount, row.nearFullDays)}</td><td>${this.escapeHtml(row.confidence || '—')}</td><td>${this.escapeHtml(this.regimeSummary(row.regime) || '—')}</td><td>${this.escapeHtml(this.historicalSaturationSummary(row.historicalSaturation) || '—')}</td><td>${this.escapeHtml([row.reasons.join('; '), row.note].filter(Boolean).join(' · ') || '—')}</td><td>${this.escapeHtml(row.action || '—')}</td></tr>`).join('')
 			}</tbody></table></div>` : '<p>No CPU/memory findings.</p>';
 
@@ -3913,6 +4115,7 @@
 				.stat .v{font-size:24px;font-weight:700;} .stat .l{font-size:10px;color:#5c6b7a;text-transform:uppercase;letter-spacing:0.06em;margin-top:4px;}
 				table{width:100%;border-collapse:collapse;} th,td{border-bottom:1px solid #e7edf4;padding:8px 10px;text-align:left;font-size:13px;}
 				th{font-weight:700;} .table-scroll{overflow-x:auto}.resource-table{min-width:2200px} svg{max-width:100%;height:auto;}
+				.cap-information-cell{min-width:280px;max-width:360px;line-height:1.45;overflow-wrap:anywhere}.cap-information-cell summary{cursor:pointer}.cap-information-grid{margin:12px 0}.cap-information-grid dt{font-weight:bold}.cap-information-grid dd{margin:4px 0 12px}.cap-information-signals ul{padding-left:20px}.cap-muted{color:#5c6b7a}
 				.cap-risk-pill{display:inline-block;min-width:62px;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:700;text-align:center;color:#fff;}
 				.cap-risk-pill.risk-watch{color:#101828;}
 				.cap-maintenance-badge{display:inline-block;margin-left:6px;padding:1px 6px;border:1px solid #f79009;border-radius:999px;background:#fff4e5;color:#934c00;font-size:10px;font-weight:700;white-space:nowrap;}
@@ -3959,7 +4162,7 @@
 						if (finding.crit && finding.crit.v != null) { thresholds.push({value: finding.crit.v, label: `Alarm ${this.trimNum(finding.crit.v)}%`, kind: 'crit'}); }
 						svgs.push(this.buildUsageSvg({
 							title: `${finding.rtype} utilization (%)`, unit: '%', yMax: 100,
-							series: (fc.series || []).map((p) => ({clock: p[0], min: p[1], avg: p[2], max: p[3]})),
+							series: this.chartSeries(fc.series || []),
 							currentValue: this.currentObservationUsable(finding) ? finding.current : null,
 							slope: null, thresholds,
 							projectionLabel: ''

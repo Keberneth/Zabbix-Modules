@@ -29,6 +29,9 @@ This frontend module adds a configurable NetBox sync page under **Monitoring →
 
 ## Screenshots
 
+The screenshots below show the earlier single-page layout. Settings are now
+organized into tabs; the connection and sync options remain available.
+
 **Settings**: NetBox and Zabbix API connections, runner and scheduling.
 
 ![NetBox Sync settings](docs/images/01-settings.jpg)
@@ -81,16 +84,40 @@ in `samples/`.
 
 ## Secrets
 
-The module supports both:
+The **Vault / secret reference** fields support a direct HashiCorp Vault KV v2
+lookup, for example `vault:secret/data/netbox#api_token`. Configure the Vault
+address and authentication credential in the server environment; only the
+secret path and key are saved in module settings. Native Zabbix `{$MACRO}`
+references are not expanded.
 
-- stored secrets in module settings
-- environment-variable secrets, similar to the AI module pattern
+The fields also accept `env:NAME`, a bare environment variable name for
+compatibility, or `file:NAME` for secrets supplied by Vault Agent or another
+deployment mechanism.
 
-Supported env settings:
+The underlying configuration keys remain:
 
 - `netbox[token_env]`
 - `zabbix_api[token_env]`
 - `runner[shared_secret_env]`
+
+Alternatively, use `env:NETBOX_API_TOKEN` or `file:netbox-token`. Files are resolved
+only below the server-admin-configured `NETBOXSYNC_SECRET_DIR`; a file reference
+is a logical filename, never an arbitrary path. See [Vault setup](INSTALL.md#vault-backed-api-tokens)
+for a deployment example and environment-variable allowlisting.
+
+When upgrading from 0.2.x, existing custom environment-variable names must be
+added to `NETBOXSYNC_ALLOWED_SECRET_ENV_VARS` for PHP-FPM and the CLI service.
+The documented token names and `NETBOXSYNC_SECRET_*` names are already allowed.
+
+Selecting a reference removes the corresponding stored inline secret when
+settings are saved. An unavailable reference fails with an error instead of
+falling back to an old token. Enter either a new inline token or a reference.
+Stored inline secrets remain supported for compatibility and are stored in the
+Zabbix module configuration database without module-side encryption.
+
+Secrets are never returned to the settings page. PHP-FPM and the CLI service
+need access separately: testing a connection in the browser verifies the PHP
+frontend environment; CLI `--check` verifies the unattended Zabbix API token.
 
 Interactive **Run now** requests use the logged-in Zabbix frontend session.
 Unattended CLI runs use `zabbix_api[url]` plus a dedicated Zabbix API token, so
@@ -134,33 +161,65 @@ isolate changes — e.g. filter OS = `Windows Server 2019` + `Windows Server
 
 ## Configuration reference
 
-All settings live on **Monitoring → NetBox Sync → Settings**, grouped into cards.
+All settings live on **Monitoring → NetBox Sync → Settings**, grouped into tabs:
+
+| Tab | Contents |
+| --- | --- |
+| Integrations | NetBox and Zabbix API endpoints, credentials, TLS and connection tests. |
+| Scheduling | Runner, intervals, limits, state/log directories and legacy trigger. |
+| Built-in syncs | Built-in catalogue, sources, targets and interval overrides. |
+| VMs & services | VM creation policy, item sources, units, pruning and listening services. |
+| Devices | Device creation policy and manufacturer/model/serial sources. |
+| Custom mappings | Editable mappings and insertable examples. |
+| Last run | Result, counters, messages and access to detailed logs. |
+
+**Save settings** saves all tabs together. Switching tabs preserves edits.
+**Run now** uses saved settings and requires you to save outstanding edits first.
+
+During a run, a live progress bar shows finished host attempts as a percentage
+of the hosts fetched for that run. Preparation is indeterminate until the host
+count is known; finalization remains below 100% while the run is active.
+Failed or skipped host attempts count as finished work, and errors are shown
+separately, including when a finished run reaches 100%. This is work progress,
+not a success rate or an estimate of time
+remaining. Host limits and the API token's permissions still determine the
+fetched scope.
+
+Progress is read from an atomic `state/progress.json` snapshot through the
+Super Admin-only status action. Each manual run has its own identifier so an
+older run's result cannot appear as the new run's progress. If a worker stops
+without finishing, its last snapshot is marked interrupted once the runner
+lock is free. A failed status request reports progress as unavailable without
+starting another run.
+When a run cannot start or save its summary, its error stays on the current
+page; the UI does not substitute an earlier result from Last run.
+
 Secrets (NetBox token, Zabbix API token, runner shared secret) are never echoed
 back to the page — leave the field blank to keep the stored value, or tick
 *Clear* to remove it.
 
-### Connections → NetBox
+### Integrations → NetBox
 
 | Field | Meaning |
 | --- | --- |
 | Enabled | Master switch for all NetBox writes. A run aborts early if this is off. |
 | Base URL | NetBox root, e.g. `https://netbox.example.com` (a trailing `/api` is added automatically). |
-| API token | NetBox API token. Prefer `Token environment variable` over storing it here. |
-| Token environment variable | Name of an env var read at runtime (overrides the stored token when set). |
+| API token | NetBox API token, stored inline for compatibility. Leave blank when using a reference. |
+| Vault / secret reference | For example `vault:secret/data/netbox#api_token`, `env:NETBOX_API_TOKEN` or `file:netbox-token`; read at runtime and required when configured. |
 | Verify TLS | Validate the NetBox certificate (turn off only for self-signed lab setups). |
 | Timeout | Per-request cURL timeout in seconds (5–300). |
-| **Test connection** | Runs a single `GET /status/` using the values currently in the form (blank fields fall back to the stored config) and reports success or a generic failure. |
+| **Test connection** | Runs a single `GET /status/` using the current form's token/reference, clear flag, TLS and timeout. A blank inline token keeps the stored value unless cleared. This is a connectivity check, not a check of every required NetBox permission. |
 
-### Connections → Zabbix API for unattended sync
+### Integrations → Zabbix API for unattended sync
 
 | Field | Meaning |
 | --- | --- |
 | API endpoint | Full JSON-RPC URL, for example `https://zabbix.example.com/api_jsonrpc.php`. |
 | API token | Token for a dedicated Zabbix service user with read access to the host groups being synchronized. |
-| Token environment variable | Name of an env var read at runtime; this overrides the stored token when it is present. |
+| Vault / secret reference | For example `vault:secret/data/zabbix#api_token`, `env:NETBOXSYNC_ZABBIX_API_TOKEN` or `file:zabbix-api-token`; resolved by the frontend test or CLI consumer. |
 | Verify TLS | Validate the Zabbix frontend certificate. Disable only for a controlled lab setup. |
 | Timeout | Per-request cURL timeout in seconds (5–300). |
-| **Test Zabbix API** | Verifies the endpoint and token with a bounded `host.get` request. For environment-only systemd credentials, use the CLI `--check` command from that service account. |
+| **Test Zabbix API** | Verifies the current form's credential with a bounded `host.get` request. For credentials available only to systemd, use CLI `--check` from that service account. |
 
 ### Runner and scheduling
 
@@ -170,7 +229,7 @@ back to the page — leave the field blank to keep the stored value, or tick
 | Global interval | Default seconds between runs of each sync/mapping unless it overrides it. |
 | Default prefix length | Mask used when creating a NetBox prefix for a discovered primary IP. |
 | Max hosts per run | 0 = all (capped at 50000). Otherwise processes at most this many hosts. |
-| Shared secret / env var | Legacy frontend-trigger secret. It is not used by the CLI worker and does not bypass Zabbix's requirement that the module action be loaded for an authenticated user. |
+| Shared secret / reference | Legacy frontend-trigger secret. It is not used by the CLI worker and does not bypass Zabbix's requirement that the module action be loaded for an authenticated user. |
 | Lock TTL | Advisory lock lifetime preventing overlapping runs. |
 | State path / Log path | Writable directories for run state and the structured event log (see Filesystem permissions). |
 
@@ -179,6 +238,9 @@ Each row mirrors one step of the original sync scripts (VM base object, OS/EOL,
 SQL license, disks, interfaces, primary IP, listening services, device object,
 device serial). Toggle rows independently and optionally set a per-row interval
 override (`0` = use the global interval).
+VM entries also require VM sync to be enabled; listening services additionally
+require services to be enabled. Device entries require device sync to be enabled.
+Enabling a catalogue row alone does not override those switches.
 
 ### VM sync defaults
 Item keys/names used to read OS, CPU, memory, SQL version, disks, and interfaces
@@ -200,6 +262,51 @@ Reusable, code-free syncs: pick a source (item key/name, static, host name,
 agent IP), an optional JSON path + transform, a target object (VM / Device /
 Custom URL) and target field. Advanced options add a host-name regex gate
 (evaluated under ReDoS guards), relation lookups, and ensure-if-missing logic.
+
+#### Example: device serial into a custom field
+
+In **Custom mappings**, insert the device serial example. It starts disabled
+so you can adjust it before saving and enabling it.
+
+| Field | Example value |
+| --- | --- |
+| Target object | Device |
+| Mode | Patch field |
+| Source mode | Item key |
+| Source value | `fgate.device.serialnumber` |
+| Target field | `custom_fields.serial_from_zabbix` |
+| Transform | Trim |
+| On empty value | Skip |
+| Host name regex | `/^FW-/` (replace with your intended host scope) |
+
+First create a text custom field named `serial_from_zabbix` in NetBox for Device
+objects. Verify that the source item key exists and has a value on a matching
+Zabbix host; this key is specific to the template and may need changing.
+Review device naming and **Create missing** in Devices: a custom mapping can
+create its target according to those defaults. Use a narrow host-name regex,
+enable the mapping, save, run, and inspect Last run and the detailed Log.
+For example, item value `FG100F1234567890` becomes the device custom-field value
+`serial_from_zabbix = FG100F1234567890`. A missing source value is skipped.
+
+The relation example demonstrates assigning an existing NetBox device role:
+use mode **Lookup relation**, target field `role`, endpoint
+`/dcim/device-roles/`, query field `name`, and a static source matching an
+existing role name. Leave **Ensure if missing** set to **No**.
+
+## Local validation
+
+Run `php tests/SecretReferenceTest.php` and `php tests/VaultClientTest.php`
+for offline credential checks. The Vault suite uses a fake HTTP transport;
+it does not prove connectivity, certificate trust, or policy access in a live
+Vault deployment.
+Run `php tests/SyncProgressTest.php` for offline progress and concurrency checks.
+
+For browser checks, render `tests/SettingsViewFixture.php` to a temporary HTML
+file, then run `node tests/SettingsUiTest.cjs <temporary-html-file>` with
+Playwright and Chrome installed. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` when
+needed. Run `node tests/SyncProgressUiTest.cjs <temporary-html-file>` for the
+live-progress UI scenarios. These checks use the real view and JavaScript
+with mocked requests.
 
 ## Notes
 

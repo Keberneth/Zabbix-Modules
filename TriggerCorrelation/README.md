@@ -1,3 +1,23 @@
+## Version 2.2: simpler rules and predictable recovery
+
+- **Preview result** checks an unsaved rule using the runtime API token. It explains active, excluded and unavailable sources, timing, affected events and planned restorations. Preview never writes items, changes event severity, creates hosts or posts comments. **Run evaluation now** applies saved rules.
+- **Selected severities only:** an ordinary High rule discovers its High trigger only. A count rule with High and Disaster tiers discovers those two trigger levels. The state item and context item are shared by the selected levels; there is no need for an item per severity.
+- **Guided editor:** choose a combined problem or an escalation, select sources, define the result, then preview and save. Infrastructure and comment controls are under Advanced. Search/filter and Duplicate help reuse rules; duplicate drafts start disabled. Rule drafts survive a page reload in this browser tab; settings credentials are never saved to browser draft storage.
+- **Dynamic sources:** optionally follow an exact trigger name within a host group, with an optional exact trigger tag/value. Membership is refreshed each evaluation and is scoped to hosts visible to the runtime token. The dashboard and self-check compare it with the administrator's view and flag coverage differences. An empty, ambiguous or oversized selection is unavailable, not a successful recovery. Dynamic rules keep a stable receiver host for their selector.
+- **Per-rule timing:** activation and recovery delays default to zero, preserving existing behavior. Recovery delay also applies to a lower severity tier. Timers measure sampled observations, normally once per minute; unavailable sources, changed membership and gaps over three minutes reset pending continuity. The global minimum source-problem age remains a separate filter.
+- **Accurate status:** conditions matching now are shown separately from the last applied result. Missing/disabled/unknown sources retain the previous output and report the cause. Pending, failed, never-run and stale evaluations are explicit.
+- **Reliable severity restoration:** one durable event ledger coordinates overlapping rules. Recovery intent is committed before an API change. Failed changes are retained for retry; retargeted, suppressed or removed targets are reconciled. The strongest active rule contribution wins. A severity changed by an operator suspends automatic changes to that event until all owning rules release it. Deletion may remain pending until recovery succeeds. Old ambiguous baselines require review instead of an automatic guess.
+- **Backup and transfer:** Settings → Download backup exports portable rule definitions, without credentials or runtime restoration state. Keep the file outside the module. Import previews reference remapping, conflicts and capacity; unresolved mappings block the entire import. Imported rules are disabled. Review each rule, then enable and save it to provision its output. This is a rule backup, not a live recovery-ledger backup.
+- **Diagnostics:** Test runtime API checks the saved URL/token. Self-check covers both rule types, token visibility and storage headroom. A read-only check cannot prove that a future severity write will succeed.
+
+### Upgrading to 2.2
+
+Deploy the directory on every frontend node and use **Settings → Repair automatic setup** once. The module preserves existing templates and customizations, adding only its selected-severity discovery overrides and a missing Information prototype from older releases. Future rule saves also apply these narrow upgrades. Newly discovered rules create only selected severity triggers. Existing unselected triggers become lost discovery objects and retire according to the existing discovery lifetime (normally 30 days); their history is not purged immediately.
+
+The runtime token now also needs **event.get** to reconcile active/resolved events and recovery history, and **hostgroup.get** for dynamic source groups. Continue granting only the required host-group access. Source inspection uses **trigger.get**, including item/host status. Scope limits are explicit: at most 100 source triggers per rule and 1000 target problems per escalation target; an exceeded limit stops that rule rather than applying a partial selection. Recovery records must fit the module configuration's 58,000-byte safety limit, so broad changes can be refused before any event is altered.
+
+See [tests/README.md](tests/README.md) for focused offline validation. A deployment check must still verify discovery, runtime token permissions, real severity changes and recovery on the installed Zabbix version.
+
 ## Simple
 
 This module lets Zabbix create a new synthetic correlation problem when two or more selected trigger problems are active at the same time.
@@ -140,7 +160,7 @@ Zabbix API token: <dedicated API token>
 That is the whole manual setup. You do **not** import a template, create a host,
 link a template or set macros: when you save your first rule the module
 
-- imports its two templates (create-only — an existing template is never changed),
+- imports its two templates and installs the module-owned selected-severity overrides,
 - creates the **engine host** `Zabbix Correlation Engine` (its heartbeat item runs
   the evaluation once a minute),
 - generates the **evaluation shared secret**, stores only its hash and writes the
@@ -310,6 +330,8 @@ item.get
 problem.get
 history.push
 event.acknowledge
+event.get
+hostgroup.get
 ```
 
 Use the smallest host group permissions possible:
@@ -389,9 +411,10 @@ can decrypt. With no key set, behavior is unchanged (token stored verbatim).
 
 ### Receiver templates
 
-There are two receiver templates. The module imports both on demand (create-only:
-an existing template — even one you renamed — is found by its UUID and never
-modified) and links them itself; you only need them by hand for the "receiver
+There are two receiver templates. The module imports both on demand; an existing
+template, even one you renamed, is found by UUID. User customizations are kept;
+only the module-owned severity overrides and a missing Information prototype are
+added. The module links the templates itself; you only need them by hand for the "receiver
 host I manage" mode.
 
 | Template | Linked to | Contains |

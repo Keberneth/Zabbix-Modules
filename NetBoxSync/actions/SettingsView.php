@@ -39,6 +39,7 @@ class SettingsView extends CController {
             'last_summary' => $store->getLastSummary(),
             'settings_save_url' => (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.settings.save')->getUrl(),
             'run_url' => (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.run')->getUrl(),
+            'run_status_url' => (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.run.status')->getUrl(),
             'test_url' => (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.test')->getUrl(),
             'zabbix_test_url' => (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.zabbix.test')->getUrl(),
             'log_url' => (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.log')->getUrl(),

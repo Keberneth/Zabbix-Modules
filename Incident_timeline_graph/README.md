@@ -6,6 +6,17 @@ and HTML/CSV/PNG export. It appears under **Reports → Incident Timeline**.
 
 Built and tested on **Zabbix 7.0**.
 
+## Changes in 1.4.0
+
+- Failed API queries and regex evaluation errors are reported as errors instead of zero incidents.
+- Changing filters, tabs or severities cancels superseded loads; incomplete severity loads cannot be exported.
+- Drill-downs and exported reports retain scan-limit, host-filter and recovery-coverage warnings.
+- Resolved events with unavailable recovery timestamps are distinguished from ongoing problems;
+  mean time to resolve states how many recovery durations were available.
+- Severity selections survive shared links, date presets handle month ends, and UTC is explicit.
+- Charts adapt to the available width, and tabs and table sorting support keyboard use.
+- Asset filenames include the release version to prevent stale browser caches after updating.
+
 ---
 
 ## Screenshots
@@ -17,7 +28,7 @@ breakdown and trend lines. Drag on the chart to zoom, click a bar to drill into 
 
 **Top triggers** — every trigger ranked by problem count, with **average firing frequency**
 (auto‑scaled per second/minute/hour/day/week/month), **mean time to resolve**, last occurrence and
-share of total. With no filter it shows the top 100; with a filter it shows *every* matching trigger.
+share of total. With no filter it shows the top 100; with a filter it shows up to 1,000 matching triggers.
 
 ![Top triggers](docs/images/02-top-triggers.jpg)
 
@@ -42,8 +53,9 @@ substrings or full regular expressions. Below, one customer's host group with th
   - **click a bar to drill down** into that period's individual incidents (lazy‑loaded),
   - clickable legend that mirrors the severity checkboxes.
 - **Top triggers tab** — ranked by problem count, with average frequency, mean‑time‑to‑resolve,
-  last occurrence and a share bar. Sortable columns. Top 100 by default, *all matches* when filtered.
-- **Filters shared across both tabs** — host group, host, template (all substring‑matched) and
+  last occurrence and a share bar. Sortable columns. Top 100 by default, up to 1,000 when filtered;
+  the report states how many matching triggers are shown.
+- **Filters shared across both tabs** — host group, host, template (all substring-matched) and
   incident name (substring **or regex**), plus the severity checkboxes.
 - **Exports** — PNG (charts), HTML (standalone report) and CSV (incident detail, or the top‑triggers
   table). CSV is hardened against spreadsheet formula injection.
@@ -57,14 +69,16 @@ substrings or full regular expressions. Below, one customer's host group with th
 On large instances a single trigger can fire hundreds of thousands of times a month, so the module
 avoids transferring raw event rows wherever possible:
 
-- The **timeline chart never ships event rows** — it asks the database for per‑bucket **counts** per
-  severity (`event.get` with `countOutput`). A year of data is a few KB instead of megabytes.
+- The **timeline response contains bucket counts**, not event rows. Without a regex filter, it asks
+  the database for per-bucket **counts** per severity (`event.get` with `countOutput`). Regex filters
+  require a bounded server-side event scan and may therefore produce partial counts.
 - Counts load **progressively, most‑severe first** (Disaster → … → Information), each severity as its
   own small request, so users see the important data immediately even when the full load takes a
   while — and each request is small, which reduces the chance of hitting a web‑server timeout.
 - The **Top triggers** report must scan events to group them by trigger; it is capped (200k events
   per request) and shows a clear "results may be partial" warning when the cap is hit. Narrowing the
-  range or adding a filter makes it exact again.
+  range or adding a filter can reduce the scan below the cap. Absence of a scan-limit warning does
+  not prove older history is retained: results cover events still available to the signed-in user.
 
 > Note on "request limits": Zabbix's *Limit for search and filter results* setting does **not** cap
 > `event.get` calls that pass their own limit (this module paginates internally). The practical limits
@@ -94,6 +108,18 @@ avoids transferring raw event rows wherever possible:
 
 Any Zabbix user can view it; the data shown respects each user's host permissions.
 
+### Updating an existing installation
+
+Replace the module folder with the complete updated folder, including `manifest.json` and both
+versioned assets. Scan the module directory again, then reload the report. The footer should show
+**Incident Timeline 1.4.0**. If PHP opcode caching delays source updates, use your frontend's normal
+cache refresh procedure.
+
+After updating, check both tabs with your usual filters, toggle severities, open an incident bucket,
+and download an HTML/CSV report. Compare a small date range with Zabbix Problems history using the
+same UTC boundaries. Local automated checks use synthetic data; these checks on your Zabbix instance
+are still required.
+
 ---
 
 ## Usage
@@ -111,7 +137,29 @@ Any Zabbix user can view it; the data shown respects each user's host permission
 ## Notes / limits
 
 - Times are bucketed in **UTC**.
-- Maximum range ~768 days; per‑request event scan cap 200,000 (only the Top‑triggers/incident/CSV
-  paths scan rows — the timeline uses counts).
+- Maximum range ~768 days; per-request event scan cap 200,000 for Top triggers, incident/CSV detail
+  and regex-filtered timeline queries. Ordinary timeline queries use counts.
+- Host/template filter resolution is bounded to 5,000 matching hosts and reports truncation.
+- Host and template searches match both technical names and visible names.
+- Mean time to resolve uses only resolved events with available, valid recovery timestamps. Missing
+  timestamps are reported separately; ongoing events are excluded from this average.
 - Exports are HTML/CSV/PNG only (no extra PHP libraries are bundled into the frontend).
 - If the page is blank after install, check the PHP‑FPM / Nginx / Apache error log for the fatal error.
+
+## Local regression checks
+
+Run from the module directory. The fixtures use synthetic events and intercepted browser requests;
+they do not connect to a Zabbix installation.
+
+```bash
+php tests/IncidentTimelineDataTest.php
+node tests/frontend-regression.cjs
+npm ci
+npx playwright install chromium
+npm run test:browser
+```
+
+Alternatively, set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to an existing Chrome/Chromium executable.
+On Windows the browser test uses the standard Chrome installation by default. Set
+`INCIDENT_SCREENSHOT_DIR` to save optional light/dark desktop/mobile previews. Node, npm and
+Playwright are development tools only; the deployed module has no Node dependency.

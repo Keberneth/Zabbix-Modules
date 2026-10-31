@@ -1,3 +1,13 @@
+## New in 2.2
+
+Use **Preview result** before activating a rule. It shows current matches, excluded sources, proposed severity changes and restorations without applying them. **Run** applies the saved definition.
+
+The editor creates only the severity triggers selected by the result or count tiers. High alone creates High only; High plus Disaster creates those two levels. State and context remain shared items. For existing installations, run **Repair automatic setup** after deployment to install the narrow discovery upgrade; old unselected triggers retire using the discovery lifetime.
+
+Choose **Dynamic host group** to follow matching, token-visible hosts automatically; enter the exact trigger name and optionally a tag/value. Use **Timing and recovery** for per-rule stability delays. A selection that cannot be assessed holds the last result and reports an error.
+
+Use **Duplicate** to create a disabled draft, and **Settings → Rule backup and transfer** to export or preview an import. Imports resolve exact local references and start disabled; review/save before enabling. Failed severity recovery remains pending and retries automatically. Operator severity overrides are respected until all rule contributions release the event.
+
 # Building correlation rules — step by step
 
 This guide walks through building correlation/escalation rules in the

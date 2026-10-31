@@ -880,3 +880,14 @@
     outline-offset: -1px;
     border-color: var(--sr-accent);
 }
+/* Background report and export generation. No percentage is shown before the server has a total. */
+.sr-loadbar { margin: 12px 0; }
+.sr-loadbar p:empty { display: none; }
+.sr-load-actions { display: flex; gap: 8px; margin-top: 8px; }
+.sr-progress { height: 5px; overflow: hidden; border-radius: 3px; background: var(--sr-border); margin: 8px 0; }
+.sr-progress[hidden], .sr-load-actions [hidden] { display: none; }
+.sr-progress span { display: block; width: 30%; height: 100%; background: var(--sr-primary, #1476d4); animation: sr-progress 1.6s ease-in-out infinite; }
+@keyframes sr-progress { from { transform: translateX(-100%); } to { transform: translateX(440%); } }
+.sr-results-stale { opacity: 0.6; }
+.slareport [data-sr-download][aria-disabled="true"] { opacity: 0.5; cursor: wait; }
+@media (prefers-reduced-motion: reduce) { .sr-progress span { animation: none; width: 100%; opacity: 0.65; } }

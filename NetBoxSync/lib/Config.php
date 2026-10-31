@@ -276,64 +276,87 @@ class Config {
     }
 
 
-public static function sanitizeForRuntime(array $config): array {
-    $config = self::mergeWithDefaults($config);
+    public static function sanitizeForRuntime(array $config, array $sections = ['netbox', 'zabbix_api', 'runner']): array {
+        $config = self::mergeWithDefaults($config);
+        foreach ($sections as $section) {
+            if (!in_array($section, ['netbox', 'zabbix_api', 'runner'], true)) {
+                throw new \InvalidArgumentException('Unknown credential section.');
+            }
+            $key = $section === 'runner' ? 'shared_secret' : 'token';
+            $config[$section][$key] = self::resolveSectionSecret($config[$section], $key);
+        }
+        return $config;
+    }
 
-    $config['netbox']['token'] = self::resolveRuntimeSecret(
-        (string) ($config['netbox']['token_env'] ?? ''),
-        (string) ($config['netbox']['token'] ?? '')
-    );
+    /** Resolve only the credential needed by this consumer. References never fall back. */
+    public static function resolveSectionSecret(array $section, string $key = 'token'): string {
+        $reference = trim((string) ($section[$key.'_env'] ?? ''));
+        $inline = trim((string) ($section[$key] ?? ''));
+        if ($reference === '' && SecretReference::isExplicitReference($inline)) {
+            $reference = $inline;
+        }
+        if ($reference !== '') {
+            return SecretReference::resolve($reference);
+        }
+        return $inline === '' ? '' : SecretReference::validateValue($inline);
+    }
 
-    $config['zabbix_api']['token'] = self::resolveRuntimeSecret(
-        (string) ($config['zabbix_api']['token_env'] ?? ''),
-        (string) ($config['zabbix_api']['token'] ?? '')
-    );
-
-    $config['runner']['shared_secret'] = self::resolveRuntimeSecret(
-        (string) ($config['runner']['shared_secret_env'] ?? ''),
-        (string) ($config['runner']['shared_secret'] ?? '')
-    );
-
-    return $config;
-}
+    /** Shared by saving and connection tests; does not read the selected secret. */
+    public static function buildSecretSettings(array $posted, array $current, string $key = 'token'): array {
+        $input = trim((string) ($posted[$key] ?? ''));
+        $reference = trim((string) ($posted[$key.'_env'] ?? ''));
+        SecretReference::rejectMacro($input);
+        if (SecretReference::isExplicitReference($input)) {
+            $input_reference = SecretReference::normalize($input);
+            if ($reference !== '' && SecretReference::normalize($reference) !== $input_reference) {
+                throw new \InvalidArgumentException('Choose only one secret reference for '.$key.'.');
+            }
+            $reference = $input_reference;
+            $input = '';
+        }
+        if ($reference !== '') {
+            $reference = SecretReference::normalize($reference);
+            if ($input !== '') {
+                throw new \InvalidArgumentException('Choose either a stored credential or a secret reference, not both.');
+            }
+            return [$key => '', $key.'_env' => $reference];
+        }
+        $value = Util::truthy($posted['clear_'.$key] ?? false)
+            ? '' : ($input !== '' ? $input : (string) ($current[$key] ?? ''));
+        if ($value !== '') {
+            $value = SecretReference::validateValue($value);
+        }
+        return [$key => $value, $key.'_env' => ''];
+    }
 
     public static function buildFromPost(array $post, array $current_config): array {
         $current_config = self::mergeWithDefaults($current_config);
         $new_config = self::defaults();
+        $netbox_secret = self::buildSecretSettings($post['netbox'] ?? [], $current_config['netbox']);
+        $zabbix_secret = self::buildSecretSettings($post['zabbix_api'] ?? [], $current_config['zabbix_api']);
+        $runner_secret = self::buildSecretSettings($post['runner'] ?? [], $current_config['runner'], 'shared_secret');
 
         $new_config['netbox'] = [
             'enabled' => Util::truthy($post['netbox']['enabled'] ?? false),
             'url' => Util::cleanUrl($post['netbox']['url'] ?? ''),
-            'token' => self::preserveSecret(
-                $post['netbox']['token'] ?? '',
-                $current_config['netbox']['token'] ?? '',
-                $post['netbox']['clear_token'] ?? false
-            ),
-            'token_env' => Util::cleanString($post['netbox']['token_env'] ?? '', 128),
+            'token' => $netbox_secret['token'],
+            'token_env' => $netbox_secret['token_env'],
             'verify_peer' => Util::truthy($post['netbox']['verify_peer'] ?? false),
             'timeout' => Util::cleanInt($post['netbox']['timeout'] ?? 15, 15, 5, 300)
         ];
 
         $new_config['zabbix_api'] = [
             'url' => Util::cleanUrl($post['zabbix_api']['url'] ?? ''),
-            'token' => self::preserveSecret(
-                $post['zabbix_api']['token'] ?? '',
-                $current_config['zabbix_api']['token'] ?? '',
-                $post['zabbix_api']['clear_token'] ?? false
-            ),
-            'token_env' => Util::cleanString($post['zabbix_api']['token_env'] ?? '', 128),
+            'token' => $zabbix_secret['token'],
+            'token_env' => $zabbix_secret['token_env'],
             'verify_peer' => Util::truthy($post['zabbix_api']['verify_peer'] ?? false),
             'timeout' => Util::cleanInt($post['zabbix_api']['timeout'] ?? 15, 15, 5, 300)
         ];
 
         $new_config['runner'] = [
             'enabled' => Util::truthy($post['runner']['enabled'] ?? false),
-            'shared_secret' => self::preserveSecret(
-                $post['runner']['shared_secret'] ?? '',
-                $current_config['runner']['shared_secret'] ?? '',
-                $post['runner']['clear_shared_secret'] ?? false
-            ),
-            'shared_secret_env' => Util::cleanString($post['runner']['shared_secret_env'] ?? '', 128),
+            'shared_secret' => $runner_secret['shared_secret'],
+            'shared_secret_env' => $runner_secret['shared_secret_env'],
             'state_path' => Util::cleanPath($post['runner']['state_path'] ?? '', 2048),
             'log_path' => Util::cleanPath($post['runner']['log_path'] ?? '', 2048),
             'global_interval_seconds' => Util::cleanInt($post['runner']['global_interval_seconds'] ?? 3600, 3600, 60, 86400 * 30),
@@ -471,29 +494,6 @@ public static function sanitizeForRuntime(array $config): array {
         return ['id' => $id, 'enabled' => false, 'interval_seconds' => 0];
     }
 
-
-private static function resolveRuntimeSecret(string $env_name, string $stored_value): string {
-    $env_name = trim($env_name);
-
-    if ($env_name !== '') {
-        $env_value = getenv($env_name);
-        if ($env_value !== false && trim((string) $env_value) !== '') {
-            return trim((string) $env_value);
-        }
-    }
-
-    return trim($stored_value);
-}
-
-    private static function preserveSecret($new_value, string $current_value, $clear_flag): string {
-        if (Util::truthy($clear_flag)) {
-            return '';
-        }
-
-        $new_value = Util::cleanString($new_value ?? '', 4096);
-
-        return $new_value !== '' ? $new_value : $current_value;
-    }
 
     private static function decodeConfig($value): array {
         if (is_array($value)) {

@@ -141,6 +141,38 @@ $render_tier = static function () use ($h, $severity_options): string {
     return ob_get_clean();
 };
 
+$render_source_options = static function (string $prefix) use ($h): string {
+    ob_start(); ?>
+    <div class="tc-source-options" data-source-prefix="<?= $h($prefix) ?>">
+        <label class="ai-label" for="<?= $h($prefix) ?>-source-mode"><?= $h(_('Choose sources')) ?></label>
+        <select class="ai-input tc-source-mode" id="<?= $h($prefix) ?>-source-mode">
+            <option value="static"><?= $h(_('Selected hosts and triggers')) ?></option>
+            <option value="group"><?= $h(_('Follow matching triggers in a host group')) ?></option>
+        </select>
+        <div class="tc-dynamic-source ai-hidden ai-repeat-grid ai-settings-grid">
+            <div class="ai-span-2 tc-typeahead ai-searchable-dropdown">
+                <label class="ai-label" for="<?= $h($prefix) ?>-source-group"><?= $h(_('Host group')) ?></label>
+                <input class="ai-input tc-source-group" id="<?= $h($prefix) ?>-source-group" autocomplete="off" placeholder="<?= $h(_('Select a host group')) ?>">
+                <input type="hidden" class="tc-source-groupid"><div class="ai-dropdown-list ai-hidden"></div>
+            </div>
+            <div class="ai-span-2"><label class="ai-label" for="<?= $h($prefix) ?>-source-trigger"><?= $h(_('Exact trigger name')) ?></label><input class="ai-input tc-source-trigger" id="<?= $h($prefix) ?>-source-trigger"></div>
+            <div><label class="ai-label" for="<?= $h($prefix) ?>-source-tag"><?= $h(_('Trigger tag (optional)')) ?></label><input class="ai-input tc-source-tag" id="<?= $h($prefix) ?>-source-tag"></div>
+            <div><label class="ai-label" for="<?= $h($prefix) ?>-source-tag-value"><?= $h(_('Tag value')) ?></label><input class="ai-input tc-source-tag-value" id="<?= $h($prefix) ?>-source-tag-value"></div>
+            <p class="ai-muted ai-span-3"><?= $h(_('Matches hosts visible to the evaluation token in this group, using the exact trigger name and optional trigger tag. No regular expressions. Membership is resolved on every evaluation; preview shows the current sources. An unavailable or empty selection needs attention.')) ?></p>
+        </div>
+    </div>
+    <?php return ob_get_clean();
+};
+$render_timing = static function (string $prefix) use ($h): string {
+    ob_start(); ?>
+    <details class="tc-advanced"><summary><?= $h(_('Timing and recovery')) ?></summary>
+        <div class="ai-repeat-grid ai-settings-grid">
+            <div><label class="ai-label" for="<?= $h($prefix) ?>-activation"><?= $h(_('Condition must stay true (seconds)')) ?></label><input class="ai-input" id="<?= $h($prefix) ?>-activation" type="number" min="0" max="86400" value="0"></div>
+            <div><label class="ai-label" for="<?= $h($prefix) ?>-recovery"><?= $h(_('Recovery or lower severity must stay stable (seconds)')) ?></label><input class="ai-input" id="<?= $h($prefix) ?>-recovery" type="number" min="0" max="86400" value="0"></div>
+        </div><p class="ai-muted"><?= $h(_('Zero applies the result at the next evaluation. Delays help avoid repeated changes when a condition fluctuates. A gap of more than three minutes between observations restarts a pending timer.')) ?></p>
+    </details>
+    <?php return ob_get_clean();
+};
 $render_starget = static function () use ($h): string {
     ob_start();
     ?>
@@ -193,6 +225,7 @@ $render_starget = static function () use ($h): string {
 ob_start();
 ?>
 <div id="tc-root" class="ai-page tc-page" data-ai-theme="<?= $h($ai_theme) ?>" data-active-tab="dashboard"
+    data-user-id="<?= $h(CWebUser::$data['userid'] ?? '') ?>"
     data-csrf-field-name="<?= $h($csrf_field) ?>"
     data-url-rules-get="<?= $h($url('triggercorrelation.rules.get')) ?>"
     data-url-rule-save="<?= $h($url('triggercorrelation.rule.save')) ?>"
@@ -209,6 +242,11 @@ ob_start();
     data-url-selfcheck="<?= $h($url('triggercorrelation.selfcheck')) ?>"
     data-url-setup="<?= $h($url('triggercorrelation.setup')) ?>"
     data-url-dashboard="<?= $h($url('triggercorrelation.dashboard.data')) ?>"
+    data-url-preview="<?= $h($url('triggercorrelation.preview')) ?>"
+    data-url-export="<?= $h($url('triggercorrelation.rules.export')) ?>"
+    data-url-import="<?= $h($url('triggercorrelation.rules.import')) ?>"
+    data-csrf-preview="<?= $h(CCsrfTokenHelper::get('triggercorrelation.preview')) ?>"
+    data-csrf-import="<?= $h(CCsrfTokenHelper::get('triggercorrelation.rules.import')) ?>"
     data-url-problems="<?= $h((new CUrl('zabbix.php'))->setArgument('action', 'problem.view')->setArgument('filter_set', 1)->getUrl()) ?>"
     data-csrf-setup="<?= $h(CCsrfTokenHelper::get('triggercorrelation.setup')) ?>"
     data-csrf-rule-save="<?= $h(CCsrfTokenHelper::get('triggercorrelation.rule.save')) ?>"
@@ -224,12 +262,18 @@ ob_start();
             <p class="ai-muted"><?= $h(_('Correlate trigger problems across hosts: raise one combined problem when related triggers fire together, or escalate existing problems while a condition holds.')) ?></p>
         </div>
         <div class="ai-header-actions">
-            <button type="button" class="btn" id="tc-test-api"><?= $h(_('Test API')) ?></button>
+            <button type="button" class="btn" id="tc-test-api"><?= $h(_('Test saved runtime API')) ?></button>
             <button type="button" class="btn" id="tc-run-all"><?= $h(_('Run evaluation now')) ?></button>
         </div>
     </div>
 
     <div id="tc-status" class="ai-status ai-hidden" role="status" aria-live="polite"></div>
+    <div class="tc-outcome-choice" aria-label="<?= $h(_('Create a rule')) ?>">
+        <strong><?= $h(_('What should happen?')) ?></strong>
+        <button type="button" class="btn" data-new-kind="correlation"><?= $h(_('Create one combined problem')) ?></button>
+        <button type="button" class="btn" data-new-kind="severity"><?= $h(_('Raise existing problem severity')) ?></button>
+    </div>
+    <div id="tc-draft-notice" class="ai-note-box ai-hidden" role="status"></div>
 
     <nav class="ai-settings-tabs" role="tablist" aria-label="<?= $h(_('Sections')) ?>">
         <button type="button" role="tab" class="ai-settings-tab is-active" data-tab="dashboard" aria-selected="true" tabindex="0"><?= $h(_('Dashboard')) ?></button>
@@ -244,6 +288,7 @@ ob_start();
 
     <!-- ── DASHBOARD ─────────────────────────────────────────────────── -->
     <section class="ai-card ai-tab-section tc-dash" data-tab="dashboard">
+        <div class="tc-filters"><label for="tc-dashboard-search"><?= $h(_('Find a rule or host')) ?></label><input class="ai-input" id="tc-dashboard-search" type="search"><label for="tc-dashboard-state"><?= $h(_('Show')) ?></label><select class="ai-input" id="tc-dashboard-state"><option value="all"><?= $h(_('All rules')) ?></option><option value="active"><?= $h(_('Active')) ?></option><option value="attention"><?= $h(_('Needs attention')) ?></option><option value="disabled"><?= $h(_('Disabled')) ?></option></select></div>
         <div class="ai-section-header tc-dash-header">
             <h2><?= $h(_('Live overview')) ?>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-dashboard" title="<?= $h(_('Help')) ?>">?</button>
@@ -268,6 +313,7 @@ ob_start();
 
     <!-- ── RULES ─────────────────────────────────────────────────────── -->
     <section class="ai-card ai-tab-section" data-tab="rules">
+        <div class="tc-filters"><label for="tc-rules-search"><?= $h(_('Find a rule or host')) ?></label><input class="ai-input tc-list-search" id="tc-rules-search" type="search" data-list-kind="correlation"><label for="tc-rules-state"><?= $h(_('Show')) ?></label><select class="ai-input tc-list-state" id="tc-rules-state" data-list-kind="correlation"><option value="all"><?= $h(_('All rules')) ?></option><option value="active"><?= $h(_('Active')) ?></option><option value="attention"><?= $h(_('Needs attention')) ?></option><option value="disabled"><?= $h(_('Disabled')) ?></option></select><span class="tc-filter-count" data-list-kind="correlation" aria-live="polite"></span></div>
         <div class="ai-section-header">
             <h2><?= $h(_('Correlation rules')) ?></h2>
             <button type="button" class="ai-faq-toggle" data-faq-target="faq-rules" title="<?= $h(_('Help')) ?>">?</button>
@@ -303,7 +349,7 @@ ob_start();
                                 : (string) (($rule['output']['receiver_host_name'] ?? '') ?: ($rule['output']['receiver_host'] ?? '') ?: ($settings['receiver_host'] ?? ''));
                             $last_err = (string) ($rule['last_error'] ?? '');
                             ?>
-                            <tr>
+                            <tr data-rule-row="correlation" data-id="<?= $h($rid) ?>">
                                 <td><?= ($rule['enabled'] ?? true) ? $h(_('Enabled')) : '<span class="ai-muted">'.$h(_('Disabled')).'</span>' ?></td>
                                 <td>
                                     <strong><?= $h($rule['name'] ?? $rid) ?></strong>
@@ -326,6 +372,7 @@ ob_start();
                                 </td>
                                 <td class="tc-row-actions">
                                     <button type="button" class="btn tc-edit" data-id="<?= $h($rid) ?>"><?= $h(_('Edit')) ?></button>
+                                    <button type="button" class="btn tc-duplicate" data-id="<?= $h($rid) ?>"><?= $h(_('Duplicate')) ?></button>
                                     <button type="button" class="btn tc-run" data-id="<?= $h($rid) ?>"><?= $h(_('Run')) ?></button>
                                     <button type="button" class="btn tc-delete" data-id="<?= $h($rid) ?>"><?= $h(_('Delete')) ?></button>
                                 </td>
@@ -342,6 +389,7 @@ ob_start();
             <h2 id="tc-editor-title"><?= $h(_('Rule editor')) ?></h2>
         </div>
         <div id="tc-rule-editor" data-rule-id="">
+            <p class="tc-steps"><?= $h(_('1. Sources → 2. Condition → 3. Result → 4. Preview and save')) ?></p>
             <div class="ai-repeat-grid ai-settings-grid">
                 <div>
                     <label class="ai-label"><?= $h(_('Enabled')) ?></label>
@@ -357,7 +405,7 @@ ob_start();
                 </div>
             </div>
 
-            <h3><?= $h(_('Source trigger problems')) ?>
+            <h3><?= $h(_('1. Sources')) ?>
                 <button type="button" class="ai-faq-toggle" data-faq-target="faq-conditions" title="<?= $h(_('Help')) ?>">?</button>
             </h3>
             <div id="faq-conditions" class="ai-faq-box">
@@ -365,6 +413,8 @@ ob_start();
                 <p><?= $h(_('Type a host then pick its trigger from the dropdown, or type the trigger first and the host is filled in. The selection (a hidden id) is what gets stored, so re-pick from the dropdown if you edit the text afterwards.')) ?></p>
                 <p><strong><?= $h(_('Clusters and farms')) ?></strong> — <?= $h(_('use “Add the same trigger from every host in a group”: pick the group (e.g. your cluster) and the trigger name (e.g. “is unreachable”), and one source trigger per host is added. Then the “Cluster preset” sets “1 node → High, all nodes → Disaster”.')) ?></p>
             </div>
+            <?= $render_source_options('tc') ?>
+            <div class="tc-static-sources">
             <div id="tc-conditions" class="ai-repeat-list">
                 <?= $render_condition() ?>
                 <?= $render_condition() ?>
@@ -373,10 +423,11 @@ ob_start();
                 <button type="button" class="btn" id="tc-add-condition"><?= $h(_('Add another source trigger')) ?></button>
             </div>
             <?= $render_group_add('tc-conditions') ?>
+            </div>
 
-            <h3><?= $h(_('Output & severity')) ?></h3>
+            <h3><?= $h(_('2. Condition and result')) ?></h3>
             <div class="ai-repeat-grid ai-settings-grid">
-                <div>
+                <div class="tc-output-mode-choice">
                     <label class="ai-label">
                         <?= $h(_('Output mode')) ?>
                         <button type="button" class="ai-faq-toggle" data-faq-target="faq-output-mode" title="<?= $h(_('Help')) ?>">?</button>
@@ -412,7 +463,7 @@ ob_start();
                 </div>
             </div>
             <div id="faq-output-mode" class="ai-faq-box">
-                <p><strong><?= $h(_('Automatic correlation host')) ?></strong> — <?= $h(_('recommended, nothing to set up. When you save, the module creates a correlation host for this set of source hosts (e.g. “Correlation: db01 + web01”), links the receiver template to it and keeps everything wired. Every rule over the same hosts reuses that host, and it is removed again when no rule uses it.')) ?></p>
+                <p><strong><?= $h(_('Automatic correlation host')) ?></strong> — <?= $h(_('recommended, nothing to set up. When you save, the module creates a correlation host for this set of source hosts, links the receiver template and keeps everything wired. Unused hosts are retained with their history until you choose to remove them.')) ?></p>
                 <p><strong><?= $h(_('A receiver host I manage')) ?></strong> — <?= $h(_('write to a host you manage yourself. That host must have “Template Trigger Correlation Receiver” (or the Auto Receiver template) linked; you provide its name and a Correlation ID.')) ?></p>
                 <p><strong><?= $h(_('My own trapper item')) ?></strong> — <?= $h(_('point the rule at a Zabbix trapper item you already created (on any host) that has its own trigger. The module just writes the severity number to that item. Use this when you want full control of the item and trigger, e.g. from your own template.')) ?></p>
             </div>
@@ -433,6 +484,9 @@ ob_start();
                 <strong><?= $h(_('Correlation host')) ?>:</strong>
                 <span id="tc-auto-host-label"><?= $h(_('created (or reused) automatically for these source hosts when you save')) ?></span>
             </div>
+            <p class="ai-muted" id="tc-selected-severities" aria-live="polite"></p>
+            <?= $render_timing('tc') ?>
+            <details class="tc-advanced" id="tc-output-advanced"><summary><?= $h(_('Advanced output and comments')) ?></summary>
             <div id="tc-output-receiver" class="ai-repeat-grid ai-settings-grid">
                 <div class="ai-span-2" id="tc-receiver-host-wrap">
                     <label class="ai-label">
@@ -498,8 +552,12 @@ ob_start();
                 </div>
             </div>
 
+            </details>
             <p class="ai-muted"><?= $h(_('The module writes 0 when the correlation is no longer true, so the Zabbix trigger resolves automatically.')) ?></p>
+            <div class="tc-rule-summary" id="tc-rule-summary" aria-live="polite"></div>
+            <div id="tc-preview-correlation" class="tc-preview ai-hidden" tabindex="-1"></div>
             <div class="ai-section-actions">
+                <button type="button" class="btn" id="tc-preview-rule"><?= $h(_('Preview result')) ?></button>
                 <button type="button" class="btn" id="tc-save-rule"><?= $h(_('Save rule')) ?></button>
                 <button type="button" class="btn" id="tc-reset-rule"><?= $h(_('New correlation rule')) ?></button>
             </div>
@@ -508,12 +566,13 @@ ob_start();
 
     <!-- ── SEVERITY ESCALATION ───────────────────────────────────────── -->
     <section class="ai-card ai-tab-section" data-tab="severity">
+        <div class="tc-filters"><label for="tc-severity-search"><?= $h(_('Find a rule or host')) ?></label><input class="ai-input tc-list-search" id="tc-severity-search" type="search" data-list-kind="severity"><label for="tc-severity-state"><?= $h(_('Show')) ?></label><select class="ai-input tc-list-state" id="tc-severity-state" data-list-kind="severity"><option value="all"><?= $h(_('All rules')) ?></option><option value="active"><?= $h(_('Active')) ?></option><option value="attention"><?= $h(_('Needs attention')) ?></option><option value="disabled"><?= $h(_('Disabled')) ?></option></select><span class="tc-filter-count" data-list-kind="severity" aria-live="polite"></span></div>
         <div class="ai-section-header">
             <h2><?= $h(_('Severity escalation rules')) ?></h2>
             <button type="button" class="ai-faq-toggle" data-faq-target="faq-severity" title="<?= $h(_('Help')) ?>">?</button>
         </div>
         <div id="faq-severity" class="ai-faq-box">
-            <p><strong><?= $h(_('What is this?')) ?></strong> <?= $h(_('Like correlation, but instead of raising a NEW problem this RAISES THE SEVERITY of one or more existing problems while the source condition holds — then restores their original severity when it clears. It changes the problem (event) severity through Zabbix problem updates, never the trigger configuration, so it is fully reversible and adds the same explanatory comments.')) ?></p>
+            <p><strong><?= $h(_('What is this?')) ?></strong> <?= $h(_('Raise existing problem severities while a source condition holds. When it clears, the module reconciles the original severity with other active rules, preserves operator overrides and retries failed recovery. It changes event severity through problem updates, leaving trigger configuration intact.')) ?></p>
             <p><?= $h(_('Example: when “demo-sccm01: SSMS service is down” is active, raise “Current month CU not installed” to High — on just that host, a host group, or every host that currently has that problem.')) ?></p>
         </div>
         <?php if (!$severity_rules): ?>
@@ -541,7 +600,7 @@ ob_start();
                             $sseverity = (int) ($srule['severity'] ?? 4);
                             $serr = (string) ($srule['last_error'] ?? '');
                             ?>
-                            <tr>
+                            <tr data-rule-row="severity" data-id="<?= $h($srid) ?>">
                                 <td><?= ($srule['enabled'] ?? true) ? $h(_('Enabled')) : '<span class="ai-muted">'.$h(_('Disabled')).'</span>' ?></td>
                                 <td><strong><?= $h($srule['name'] ?? $srid) ?></strong></td>
                                 <td>
@@ -573,6 +632,7 @@ ob_start();
                                 </td>
                                 <td class="tc-row-actions">
                                     <button type="button" class="btn sev-edit" data-id="<?= $h($srid) ?>"><?= $h(_('Edit')) ?></button>
+                                    <button type="button" class="btn sev-duplicate" data-id="<?= $h($srid) ?>"><?= $h(_('Duplicate')) ?></button>
                                     <button type="button" class="btn sev-run" data-id="<?= $h($srid) ?>"><?= $h(_('Run')) ?></button>
                                     <button type="button" class="btn sev-delete" data-id="<?= $h($srid) ?>"><?= $h(_('Delete')) ?></button>
                                 </td>
@@ -589,6 +649,7 @@ ob_start();
             <h2 id="tc-sev-editor-title"><?= $h(_('Severity escalation editor')) ?></h2>
         </div>
         <div id="tc-sev-editor" data-rule-id="">
+            <p class="tc-steps"><?= $h(_('1. Sources → 2. Condition → 3. Targets → 4. Preview and save')) ?></p>
             <div class="ai-repeat-grid ai-settings-grid">
                 <div>
                     <label class="ai-label"><?= $h(_('Enabled')) ?></label>
@@ -610,6 +671,8 @@ ob_start();
             <div id="faq-sev-conditions" class="ai-faq-box">
                 <p><?= $h(_('Pick one or more existing host triggers. When they are in problem (per the match mode), the escalation fires. A single condition is allowed — e.g. “when SSMS service is down”.')) ?></p>
             </div>
+            <?= $render_source_options('tc-sev') ?>
+            <div class="tc-static-sources">
             <div id="tc-sev-conditions" class="ai-repeat-list">
                 <?= $render_condition() ?>
             </div>
@@ -617,6 +680,8 @@ ob_start();
                 <button type="button" class="btn" id="tc-sev-add-condition"><?= $h(_('Add another source trigger')) ?></button>
             </div>
             <?= $render_group_add('tc-sev-conditions') ?>
+            </div>
+            <?= $render_timing('tc-sev') ?>
 
             <h3><?= $h(_('Match mode')) ?></h3>
             <div class="ai-repeat-grid ai-settings-grid">
@@ -664,7 +729,7 @@ ob_start();
                 </div>
             </div>
 
-            <h3><?= $h(_('Problem comments')) ?></h3>
+            <details class="tc-advanced"><summary><?= $h(_('Problem comments')) ?></summary>
             <div class="ai-repeat-grid ai-settings-grid">
                 <div class="ai-span-2">
                     <label class="ai-checkbox"><input type="checkbox" id="tc-sev-comment-target" checked> <?= $h(_('Comment each escalated problem (why its severity was raised)')) ?></label>
@@ -674,8 +739,12 @@ ob_start();
                 </div>
             </div>
 
-            <p class="ai-muted"><?= $h(_('When the source condition clears (or the rule is disabled/deleted) the original severity is restored automatically.')) ?></p>
+            </details>
+            <p class="ai-muted"><?= $h(_('When the condition clears, severity is reconciled with other active rules. Operator overrides are preserved; failed recovery stays visible and is retried.')) ?></p>
+            <div class="tc-rule-summary" id="tc-sev-summary" aria-live="polite"></div>
+            <div id="tc-preview-severity" class="tc-preview ai-hidden" tabindex="-1"></div>
             <div class="ai-section-actions">
+                <button type="button" class="btn" id="tc-sev-preview"><?= $h(_('Preview affected problems')) ?></button>
                 <button type="button" class="btn" id="tc-sev-save"><?= $h(_('Save escalation rule')) ?></button>
                 <button type="button" class="btn" id="tc-sev-reset"><?= $h(_('New escalation rule')) ?></button>
             </div>
@@ -683,6 +752,23 @@ ob_start();
     </section>
 
     <!-- ── SETTINGS ──────────────────────────────────────────────────── -->
+    <section class="ai-card ai-tab-section" data-tab="settings">
+        <h2><?= $h(_('Setup progress')) ?></h2>
+        <ol class="tc-setup-list">
+            <li><?= $h(_('API URL and runtime token')) ?> — <strong><?= !empty($settings['api_url']) && (!empty($settings['api_token_set']) || !empty($settings['api_token_env'])) ? $h(_('configured; verify the connection')) : $h(_('save these below')) ?></strong></li>
+            <li><?= $h(_('Runtime connection')) ?> — <strong id="tc-setup-api-state"><?= $h(_('not tested in this session')) ?></strong></li>
+            <li><?= $h(_('Rules')) ?> — <strong><?= count($rules) + count($severity_rules) ?> <?= $h(_('saved')) ?></strong>. <?= $h(_('Saving a rule sets up its engine and receiver.')) ?></li>
+            <li><?= $h(_('Server reachability and evaluation health')) ?> — <strong id="tc-setup-health-state"><?= $h(_('run self-check')) ?></strong></li>
+        </ol>
+        <p class="ai-muted"><?= $h(_('Preview checks a draft without applying it. Run evaluation now applies saved rules.')) ?></p>
+    </section>
+    <section class="ai-card ai-tab-section" data-tab="settings">
+        <h2><?= $h(_('Rule backup and transfer')) ?></h2>
+        <p class="ai-muted"><?= $h(_('Export contains rule definitions, without credentials or runtime state. Keep a downloaded backup outside the module; preview an import before applying it.')) ?></p>
+        <div class="ai-section-actions"><button type="button" class="btn" id="tc-export"><?= $h(_('Download backup')) ?></button><label class="ai-label" for="tc-import-file"><?= $h(_('Import JSON file')) ?></label><input type="file" id="tc-import-file" accept=".json,application/json"></div>
+        <div id="tc-import-preview" class="tc-preview ai-hidden" tabindex="-1"></div>
+        <button type="button" class="btn ai-hidden" id="tc-import-apply" disabled><?= $h(_('Apply reviewed import')) ?></button>
+    </section>
     <form id="tc-settings-form" method="post" action="<?= $h($url('triggercorrelation.settings.save')) ?>">
         <input type="hidden" name="<?= $h($csrf_field) ?>" value="<?= $h(CCsrfTokenHelper::get('triggercorrelation.settings.save')) ?>">
 
@@ -914,7 +1000,7 @@ ob_start();
     <section class="ai-card ai-tab-section" data-tab="help">
         <div class="ai-section-header"><h2><?= $h(_('Severity escalation (second feature)')) ?></h2></div>
         <div class="ai-faq-box ai-faq-visible">
-            <p><?= $h(_('The Severity escalation tab does NOT create a new problem. While a source condition holds, it RAISES THE SEVERITY of one or more existing problems, and restores their original severity when it clears (or when the rule is disabled/deleted).')) ?></p>
+            <p><?= $h(_('The Severity escalation tab raises existing problem severities while a source condition holds. When it clears, or the rule is disabled/deleted, severity is reconciled with the remaining active rules and the original baseline. Operator overrides are preserved; recovery failures remain pending for retry.')) ?></p>
             <p><strong><?= $h(_('How')) ?>:</strong> <?= $h(_('it changes each problem\'s manual event severity through a Zabbix problem update (event.acknowledge, change-severity action) — never the trigger\'s configured priority — so it is fully reversible and a re-fired problem keeps its normal priority. No receiver template, LLD or extra item is needed.')) ?></p>
             <p><strong><?= $h(_('A rule has')) ?>:</strong></p>
             <ul>
@@ -940,7 +1026,7 @@ ob_start();
             </ul>
             <p><strong><?= $h(_('Clusters')) ?></strong> — <?= $h(_('“one node down is High, all nodes down is Disaster”: use “Add the same trigger from every host in a group” with the cluster’s host group and the node-down trigger, then “Cluster preset”.')) ?></p>
             <p><strong><?= $h(_('4. Comments (optional)')) ?></strong> — <?= $h(_('tick to annotate the correlation problem and/or the source problems with the related triggers in problem.')) ?></p>
-            <p><strong><?= $h(_('5. Save')) ?></strong>, <?= $h(_('then “Run evaluation now” to test. Add as many rules as you need — one per integration/escalation.')) ?></p>
+            <p><strong><?= $h(_('5. Preview and save')) ?></strong>, <?= $h(_('use Preview result to inspect a draft without changing problems. Run evaluation now applies saved rules immediately.')) ?></p>
             <p class="ai-muted"><?= $h(_('A full step-by-step walkthrough for both modes is in SETUP_RULES.md.')) ?></p>
         </div>
     </section>

@@ -55,8 +55,7 @@ class ZabbixApiClient {
 
     /**
      * Create the unattended HTTP transport from the complete module config.
-     * Environment-backed tokens are resolved here, with the stored token used
-     * as the same fallback that Config::sanitizeForRuntime() provides.
+     * Resolve only the Zabbix credential, including Vault Agent env/file sources.
      */
     public static function fromConfig(array $config): self {
         if (!isset($config['zabbix_api']) || !is_array($config['zabbix_api'])) {
@@ -64,13 +63,7 @@ class ZabbixApiClient {
         }
 
         $api_config = $config['zabbix_api'];
-        $env_name = trim((string) ($api_config['token_env'] ?? ''));
-        if ($env_name !== '') {
-            $env_value = getenv($env_name);
-            if ($env_value !== false && trim((string) $env_value) !== '') {
-                $api_config['token'] = trim((string) $env_value);
-            }
-        }
+        $api_config['token'] = Config::resolveSectionSecret($api_config);
 
         return new self($api_config);
     }

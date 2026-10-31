@@ -3,7 +3,7 @@
   "id": "capacity_planning",
   "name": "Capacity Planning & Prediction",
   "namespace": "CapacityPlanning",
-  "version": "1.4.0",
+  "version": "1.4.3",
   "author": "Keberneth",
   "description": "Evidence-based disk, CPU and RAM capacity analysis with recurring peak episodes, maintenance-aware state, filters, secure shared caching and zoomable modal charts.",
   "actions": {
@@ -26,10 +26,10 @@
   },
   "assets": {
     "css": [
-      "capacity-planning.css"
+      "capacity-planning-1.4.3-20261031.3.css"
     ],
     "js": [
-      "capacity-planning-1.4.0-20260801.1.js"
+      "capacity-planning-1.4.3-20261031.3.js"
     ]
   },
   "config": {

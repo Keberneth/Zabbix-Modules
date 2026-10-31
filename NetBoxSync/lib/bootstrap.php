@@ -1,6 +1,8 @@
 <?php declare(strict_types = 0);
 
 require_once __DIR__.'/Util.php';
+require_once __DIR__.'/SecretReference.php';
+require_once __DIR__.'/VaultClient.php';
 require_once __DIR__.'/Config.php';
 require_once __DIR__.'/DbConnector.php';
 require_once __DIR__.'/StandaloneConfig.php';

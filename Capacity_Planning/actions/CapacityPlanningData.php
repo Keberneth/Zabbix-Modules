@@ -1171,7 +1171,7 @@ final class CapacityPlanningData extends CController {
 					break 2;
 				}
 				$rows = API::Item()->get([
-					'output' => ['itemid', 'hostid', 'name', 'key_', 'value_type', 'units', 'lastvalue',
+					'output' => ['itemid', 'hostid', 'name', 'key_', 'type', 'value_type', 'units', 'lastvalue',
 						'lastclock', 'state', 'error'],
 					'hostids' => $chunk,
 					'monitored' => true,
@@ -1225,6 +1225,7 @@ final class CapacityPlanningData extends CController {
 				'hostid' => (string) ($row['hostid'] ?? ''),
 				'name' => (string) ($row['name'] ?? ''),
 				'key' => (string) ($row['key_'] ?? ''),
+				'item_type' => isset($row['type']) ? (int) $row['type'] : null,
 				'value_type' => (int) ($row['value_type'] ?? 0),
 				'units' => (string) ($row['units'] ?? ''),
 				'lastvalue' => $this->safeFloat($row['lastvalue'] ?? null),
@@ -1921,7 +1922,10 @@ final class CapacityPlanningData extends CController {
 					? $this->usableFilesystemCapacity($os, $total, $used, $free, $pused)
 					: null;
 				[$series_item, $transform, $parameter] = $this->usedSeriesSpec(
-					$metrics, array_keys($selected_fresh), $usable_capacity);
+					$metrics, array_keys($fresh_items), $usable_capacity);
+				$byte_source = $series_item !== null
+					? ($transform === 'identity' ? 'used' : ($transform === 'invert' ? 'free' : 'percentage'))
+					: 'none';
 				// A valid percentage item is an independent, higher-fidelity history
 				// source even when used+free is the selected current byte composition.
 				// Choose pused/pfree by recency, but do not mix its lastvalue into the
@@ -1937,6 +1941,17 @@ final class CapacityPlanningData extends CController {
 				$pct_transform = $pct_series_metric === 'pfree' ? 'invert' : 'identity';
 				$pct_parameter = $pct_transform === 'invert' ? 100.0 : null;
 				$contributing_items = $selected_fresh;
+				// A measured percentage is enough to assess percentage thresholds even
+				// when byte capacity is unavailable. Keep the missing byte fields null.
+				if (!$composition_complete && $pct_series_item !== null) {
+					$pused = $pct_transform === 'invert'
+						? 100.0 - $pct_series_item['lastvalue'] : $pct_series_item['lastvalue'];
+					$contributing_items = [$pct_series_metric => $pct_series_item];
+					$series_item = $pct_series_item;
+					$transform = 'scale';
+					$parameter = null; // No byte conversion can be justified without capacity.
+					$byte_source = 'none';
+				}
 				$clocks = array_map(static fn (array $item): int => $item['lastclock'], $contributing_items);
 				$lastclock = $clocks ? min($clocks) : 0;
 
@@ -1965,13 +1980,16 @@ final class CapacityPlanningData extends CController {
 				elseif (!$composition_complete) {
 					$status = 'Incomplete';
 					$this->addQuality('Warning', $host['name'], $fs, _('Incomplete filesystem item set'),
-						_('Expected a valid fresh composition of used+available, used/available+used percentage, or Windows total+one byte component.'));
+						$pct_series_item !== null
+							? _('Only current used percentage can be assessed. Used/free bytes, byte growth and the full-capacity date are unavailable.')
+							: _('Expected a valid fresh composition of used+available, used/available+used percentage, or Windows total+one byte component.'));
 				}
 				else {
 					$status = 'OK';
 				}
 
-				$current_snapshot_usable = $current_observation_usable && $composition_complete;
+				$current_snapshot_usable = $current_observation_usable
+					&& ($composition_complete || $pct_series_item !== null);
 				$current_warn = $current_snapshot_usable
 					&& (($pused !== null && $warn_pct['v'] !== null && $pused > $warn_pct['v'])
 						|| ($free !== null && ($warn_gb['v'] ?? 0) > 0 && $free < $warn_gb['v']));
@@ -1984,7 +2002,7 @@ final class CapacityPlanningData extends CController {
 				if (!$current_observation_usable) {
 					$current_reasons[] = _('The host is in maintenance without data collection; the last accepted values were not treated as current.');
 				}
-				elseif (!$composition_complete) {
+				elseif (!$current_snapshot_usable) {
 					$current_reasons[] = _('No valid fresh filesystem composition was available for current threshold assessment.');
 				}
 				elseif ($pused !== null && $crit_pct['v'] !== null && $pused > $crit_pct['v']) {
@@ -2019,6 +2037,7 @@ final class CapacityPlanningData extends CController {
 					'pct_pr' => $pct_parameter,
 					'tr' => $transform,
 					'pr' => $parameter,
+					'byte_source' => $byte_source,
 					'total' => $total,
 					'used' => $used,
 					'free' => $free,
@@ -2036,6 +2055,7 @@ final class CapacityPlanningData extends CController {
 					'status' => $status,
 					'expected_gap' => $expected_gap,
 					'current_observation_usable' => $current_observation_usable,
+					'current_snapshot_usable' => $current_snapshot_usable,
 					'current_severity' => $current_severity,
 					'current_reasons' => $current_reasons,
 					'current_recommendation' => $this->diskRecommendation($current_severity, $kind)
@@ -2311,8 +2331,15 @@ final class CapacityPlanningData extends CController {
 				: [_('The host is in maintenance without data collection; the last accepted value was not treated as current.')];
 
 			// CPU ------------------------------------------------------------
+			// The native Unix agent's default CPU type is "user". The stock
+			// template uses this same bare key for a dependent total-utilization
+			// item, so item type must distinguish those different meanings.
+			$cpu_items = array_values(array_filter($host_items,
+				static fn (array $item): bool => !($host['os'] !== 'Windows'
+					&& $item['key'] === 'system.cpu.util'
+					&& in_array($item['item_type'] ?? null, [0, 7], true))));
 			[$cpu_item, $cpu_transform, $cpu_parameter] = $this->chooseTransformedResourceItem(
-				$host_items,
+				$cpu_items,
 				[
 					[['system.cpu.util', 'vm.cpu.util'], 'identity', null],
 					[['system.cpu.util[,idle]'], 'invert', 100.0]
@@ -2376,7 +2403,7 @@ final class CapacityPlanningData extends CController {
 			if ($cpu_item === null) {
 				$cpu_status = 'Missing';
 				$this->addQuality('Warning', $host['name'], 'CPU', _('CPU utilization item missing'),
-					_('Expected system.cpu.util, vm.cpu.util or system.cpu.util[,idle].'));
+					_('Expected a total-utilization system.cpu.util or vm.cpu.util item, or system.cpu.util[,idle]. A native non-Windows agent system.cpu.util item measures user CPU only and is excluded.'));
 			}
 			elseif ($now - $cpu_item['lastclock'] > self::STALE_RESOURCE_SECONDS) {
 				$cpu_status = 'Stale';
@@ -2428,9 +2455,11 @@ final class CapacityPlanningData extends CController {
 			];
 
 			// Memory ----------------------------------------------------------
+			// On Linux and several Unix platforms pused includes reclaimable caches;
+			// it is not equivalent to 100-pavailable and cannot establish RAM pressure.
 			$memory_keys = $host['os'] === 'Windows'
 				? ['vm.memory.util', 'vm.memory.utilization', 'vm.mem.util', 'vm.memory.size[pused]']
-				: ['vm.memory.utilization', 'vm.memory.util', 'vm.mem.util', 'vm.memory.size[pused]'];
+				: ['vm.memory.utilization', 'vm.memory.util', 'vm.mem.util'];
 			[$memory_item, $memory_transform, $memory_parameter] = $this->chooseTransformedResourceItem(
 				$host_items,
 				[
@@ -2461,7 +2490,9 @@ final class CapacityPlanningData extends CController {
 			if ($memory_item === null) {
 				$memory_status = 'Missing';
 				$this->addQuality('Warning', $host['name'], 'Memory', _('Memory utilization item missing'),
-					_('Expected vm.memory.utilization, vm.memory.util, vm.mem.util, pused or pavailable.'));
+					$host['os'] === 'Windows'
+						? _('Expected vm.memory.utilization, vm.memory.util, vm.mem.util, pused or pavailable.')
+						: _('Expected vm.memory.utilization, vm.memory.util, vm.mem.util or pavailable. pused is not used on non-Windows hosts because reclaimable memory can be counted as used.'));
 			}
 			elseif ($now - $memory_item['lastclock'] > self::STALE_RESOURCE_SECONDS) {
 				$memory_status = 'Stale';
@@ -2767,6 +2798,8 @@ final class CapacityPlanningData extends CController {
 			$pct_itemid = (string) ($entry['pct_itemid'] ?? '');
 			$kind = (string) ($entry['kind'] ?? '');
 			$tr = (string) ($entry['tr'] ?? 'identity');
+			$byte_source = (string) ($entry['byte_source']
+				?? ($tr === 'identity' ? 'used' : ($tr === 'invert' ? 'free' : 'percentage')));
 			$pct_tr = (string) ($entry['pct_tr'] ?? 'identity');
 			$rtype = (string) ($entry['rtype'] ?? '');
 			$os = (string) ($entry['os'] ?? 'Unknown');
@@ -2777,6 +2810,7 @@ final class CapacityPlanningData extends CController {
 					|| ($pct_itemid !== '' && !ctype_digit($pct_itemid))
 					|| !in_array($kind, ['disk', 'res'], true)
 					|| !in_array($tr, ['identity', 'invert', 'scale'], true)
+					|| !in_array($byte_source, ['used', 'free', 'percentage', 'none'], true)
 					|| !in_array($pct_tr, ['identity', 'invert'], true)
 					|| !in_array($rtype, ['', 'CPU', 'Memory'], true)
 					|| !in_array($os, ['Linux', 'Windows', 'Unknown'], true)
@@ -2791,6 +2825,7 @@ final class CapacityPlanningData extends CController {
 				'pct_itemid' => $kind === 'disk' ? $pct_itemid : '',
 				'kind' => $kind,
 				'tr' => $tr,
+				'byte_source' => $byte_source,
 				'pct_tr' => $kind === 'disk' ? $pct_tr : 'identity',
 				'rtype' => $rtype,
 				'os' => $os,
@@ -3394,6 +3429,8 @@ final class CapacityPlanningData extends CController {
 	 */
 	private function summarizeWindows(array $rows, int $now, ?float $warn, ?float $crit): array {
 		$result = [];
+		$rows = array_values(array_filter($rows,
+			static fn (array $row): bool => $row['clock'] < $now));
 		// WINDOWS is ordered longest-first, so the cutoffs increase monotonically
 		// and one advancing lower bound selects every nested window from sorted
 		// rows; unsorted input (never produced by callers) keeps the full scan.
@@ -3438,7 +3475,6 @@ final class CapacityPlanningData extends CController {
 			$total_num = 0;
 			$weighted_sum = 0.0;
 			$peak = null;
-			$hours = [];
 			$values = [];
 			$weights = [];
 			$above_warn_sum = 0;
@@ -3449,7 +3485,6 @@ final class CapacityPlanningData extends CController {
 				$weighted_sum += $row['avg'] * $w;
 				$values[] = $row['avg'];
 				$weights[] = $w;
-				$hours[intdiv($row['clock'], 3600)] = true;
 				if ($peak === null || $row['max'] > $peak) {
 					$peak = $row['max'];
 				}
@@ -3462,7 +3497,7 @@ final class CapacityPlanningData extends CController {
 			}
 			$first = $selected[0]['clock'];
 			$last = $selected[count($selected) - 1]['clock'];
-			$data_days = max(1, min($days, (int) ceil(($last - $first + 3600) / 86400)));
+			[$data_days, $coverage] = $this->observedWindowCoverage($selected, $cutoff, $now, $days);
 			[$slope, $r2] = $this->theilSen($this->dailyPoints($selected));
 
 			$above = static function (?float $threshold, int $sum) use ($total_num): ?float {
@@ -3476,7 +3511,7 @@ final class CapacityPlanningData extends CController {
 				'label' => $label,
 				'requested_days' => $days,
 				'days' => $data_days,
-				'cov' => min(100.0, count($hours) / ($days * 24) * 100),
+				'cov' => $coverage,
 				'n' => $total_num,
 				'avg' => $weighted_sum / $total_num,
 				'p95' => $this->weightedPercentile($values, $weights, 0.95),
@@ -3493,6 +3528,51 @@ final class CapacityPlanningData extends CController {
 			];
 		}
 		return $result;
+	}
+
+	/**
+	 * Coverage describes represented bucket time, adjusted for known sample loss.
+	 * A five-minute bucket cannot stand for its entire hour, and an old first
+	 * observation cannot turn missing intervening days into days with data.
+	 * Unknown cadence retains the bucket's observed coverage rather than inventing
+	 * an expected polling interval. Overlapping sources are capped per hour.
+	 *
+	 * @return array{0: int, 1: float} observed UTC days and estimated coverage percent
+	 */
+	private function observedWindowCoverage(array $rows, int $start, int $end, int $requested_days): array {
+		$days = [];
+		$seconds_by_hour = [];
+		foreach ($rows as $row) {
+			$clock = (int) $row['clock'];
+			$duration = max(1, (int) ($row['bucket_seconds'] ?? 3600));
+			$from = max($start, $clock);
+			$to = min($end, $clock + $duration);
+			if ($to <= $from || (int) ($row['num'] ?? 0) < 1) {
+				continue;
+			}
+			$coverage = isset($row['bucket_coverage_pct'])
+				? (float) $row['bucket_coverage_pct'] / 100
+				: (isset($row['expected_num']) && $row['expected_num'] > 0
+					? $row['num'] / $row['expected_num'] : 1.0);
+			$coverage = min(1.0, max(0.0, $coverage));
+			if ($coverage <= 0) {
+				continue;
+			}
+			$days[intdiv($clock, 86400)] = true;
+			for ($part = $from; $part < $to;) {
+				$hour = intdiv($part, 3600);
+				$part_end = min($to, ($hour + 1) * 3600);
+				$seconds_by_hour[$hour] = ($seconds_by_hour[$hour] ?? 0.0)
+					+ ($part_end - $part) * $coverage;
+				$part = $part_end;
+			}
+		}
+		$seconds = 0.0;
+		foreach ($seconds_by_hour as $hour => $observed) {
+			$available = max(0, min($end, ($hour + 1) * 3600) - max($start, $hour * 3600));
+			$seconds += min($available, $observed);
+		}
+		return [min($requested_days, count($days)), min(100.0, $seconds / max(1, $end - $start) * 100)];
 	}
 
 	/**
@@ -3619,14 +3699,19 @@ final class CapacityPlanningData extends CController {
 		return $vals[count($vals) - 1];
 	}
 
-	private function selectModelWindow(array $windows): ?string {
+	private function selectModelWindow(array $windows, bool $require_fit = true): ?string {
 		foreach ([['3m', 60, 55.0], ['6m', 90, 45.0], ['12m', 180, 45.0], ['1m', 21, 55.0], ['1w', 5, 55.0]]
 				as [$window, $min_days, $min_cov]) {
 			$stats = $windows[$window] ?? null;
 			if ($stats !== null && $stats['slope'] !== null && $stats['days'] >= $min_days
-					&& $stats['cov'] >= $min_cov) {
+					&& $stats['cov'] >= $min_cov && (!$require_fit || ($stats['r2'] ?? 0) >= 0.35)) {
 				return $window;
 			}
+		}
+		if ($require_fit) {
+			// Preserve the preferred evidence window for honest diagnostics when
+			// none has a qualified fit. Forecast confidence still rejects its ETA.
+			return $this->selectModelWindow($windows, false);
 		}
 		$best = null;
 		$best_days = -1;
@@ -3640,26 +3725,26 @@ final class CapacityPlanningData extends CController {
 		return $best;
 	}
 
-	private function forecastConfidence(?array $selected, array $windows): string {
+	private function diskTrendsOppose(?array $selected, array $windows, float $noise_floor): bool {
+		$recent = $windows['1m'] ?? null;
+		return $selected !== null && $recent !== null && $selected['slope'] !== null && $recent['slope'] !== null
+			&& abs($selected['slope']) > $noise_floor && abs($recent['slope']) > $noise_floor
+			&& $recent['days'] >= 14 && $recent['cov'] >= 45 && ($recent['r2'] ?? 0) >= 0.35
+			&& ($recent['slope'] <=> 0) !== ($selected['slope'] <=> 0);
+	}
+
+	private function forecastConfidence(?array $selected, array $windows, float $noise_floor = 0.0): string {
 		if ($selected === null) {
 			return 'Low';
 		}
-		$one_month = $windows['1m'] ?? null;
-		$agreement = true;
-		// A recent-window disagreement may veto High/Medium confidence only when
-		// the 1m window carries real evidence (mirroring the Medium quality bar).
-		// A slope through a handful of sparse points is statistically meaningless
-		// and must not demote an otherwise dense, well-fitted long-window model.
-		if ($one_month !== null && $one_month['slope'] !== null && $selected['slope'] !== null
-				&& abs($selected['slope']) > 0
-				&& $one_month['days'] >= 14 && $one_month['cov'] >= 45) {
-			$agreement = $one_month['slope'] == 0.0
-				|| ($one_month['slope'] <=> 0) === ($selected['slope'] <=> 0);
-		}
+		// Opposite signs alone are not evidence of a changed workload: the recent
+		// fit must be qualified and both rates must exceed the same noise floor.
+		$agreement = !$this->diskTrendsOppose($selected, $windows, $noise_floor);
 		if ($selected['days'] >= 60 && $selected['cov'] >= 70 && ($selected['r2'] ?? 0) >= 0.55 && $agreement) {
 			return 'High';
 		}
-		if ($selected['days'] >= 21 && $selected['cov'] >= 45 && $agreement) {
+		if ($selected['days'] >= 21 && $selected['cov'] >= 45
+				&& ($selected['r2'] ?? 0) >= 0.35 && $agreement) {
 			return 'Medium';
 		}
 		return 'Low';
@@ -3669,9 +3754,301 @@ final class CapacityPlanningData extends CController {
 	// Disk forecast (ETA to thresholds and full)
 	// -------------------------------------------------------------------------
 
+	/**
+	 * A good monthly line fit can describe a single level jump. Confirm a higher
+	 * rate with both net accumulation and a fitted slope in the same recent week
+	 * or fortnight; daily smoothness is not required for recurring batch growth.
+	 */
+	private function confirmDiskGrowthPersistence(array $windows, array $rows, int $now,
+			float $candidate, ?float $baseline, float $noise_floor): array {
+		$required = max($noise_floor, $candidate / 1.5, $baseline !== null ? $baseline * 1.5 : 0.0);
+		$evidence = ['confirmed' => false, 'candidate_rate' => $candidate, 'required_rate' => $required,
+			'confirmation_window' => null, 'recent_net_rate' => null, 'windows' => [],
+			'reason' => 'Recent net accumulation and fitted growth do not confirm the monthly rate.'];
+		foreach ([['2w', 14, 10], ['1w', 7, 5]] as [$window, $days, $min_days]) {
+			$stats = $windows[$window] ?? null;
+			if ($stats === null || $stats['slope'] === null || $stats['days'] < $min_days || $stats['cov'] < 70) {
+				continue;
+			}
+			$cutoff = $now - $days * 86400;
+			$first = null;
+			$previous = null;
+			$last = null;
+			foreach ($rows as $row) {
+				if ($row['clock'] < $cutoff) {
+					$previous = $row;
+					continue;
+				}
+				if ($row['clock'] > $now) {
+					break;
+				}
+				if ($first === null) {
+					$first = $row;
+					// Include the contiguous bucket at the cutoff so a weekly batch
+					// at the first bucket is not lost from a 7-day-minus-one-hour delta.
+					if ($previous !== null && $previous['clock'] + ($previous['bucket_seconds'] ?? 3600)
+							>= $row['clock']) {
+						$first = $previous;
+					}
+				}
+				$last = $row;
+			}
+			$span = $first !== null && $last !== null ? $last['clock'] - $first['clock'] : 0;
+			$net_rate = $span > 0 ? ($last['avg'] - $first['avg']) * 86400 / $span : null;
+			$confirmed = $net_rate !== null && $net_rate >= $required
+				&& $stats['slope'] >= $required && ($stats['r2'] ?? 0) >= 0.35;
+			$evidence['windows'][$window] = ['net_rate' => $net_rate, 'slope' => $stats['slope'],
+				'r2' => $stats['r2'], 'days' => $stats['days'], 'cov' => $stats['cov']];
+			$evidence['recent_net_rate'] = $net_rate;
+			$evidence['recent_window'] = $window;
+			if ($confirmed) {
+				$evidence['confirmed'] = true;
+				$evidence['confirmation_window'] = $window;
+				$evidence['recent_net_rate'] = $net_rate;
+				$evidence['reason'] = 'Recent net accumulation and fitted growth confirm a comparable rate.';
+				break;
+			}
+		}
+		return $evidence;
+	}
+
+	private function formatDiskObservation(float $value, bool $bytes, bool $signed = false): string {
+		$prefix = $value < 0 ? '-' : ($signed && $value > 0 ? '+' : '');
+		$value = abs($value);
+		$unit = 'pp';
+		if ($bytes) {
+			$units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+			$i = 0;
+			while ($value >= 1024 && $i < count($units) - 1) { $value /= 1024; $i++; }
+			$unit = $units[$i];
+		}
+		$decimals = !$bytes && $value > 0 && $value < 0.01 ? 6 : 2;
+		$number = rtrim(rtrim(number_format($value, $decimals, '.', ''), '0'), '.');
+		if ($value > 0 && (float) $number === 0.0) { $number = sprintf('%.3g', $value); }
+		return $prefix.($number === '' ? '0' : $number).' '.$unit;
+	}
+
+	/** Protect an older baseline when observed recent accumulation has changed. */
+	private function diskRecentPatternChange(array $windows, array $rows, int $now,
+			float $baseline, float $noise_floor): ?array {
+		$candidate = max($noise_floor * 1.5, $baseline * 1.5);
+		$week = $this->confirmDiskGrowthPersistence(['1w' => $windows['1w'] ?? null],
+			$rows, $now, $candidate, $baseline, $noise_floor);
+		$fortnight = $this->confirmDiskGrowthPersistence(['2w' => $windows['2w'] ?? null],
+			$rows, $now, $candidate, $baseline, $noise_floor);
+		$required = $week['required_rate'];
+		$week_stats = $week['windows']['1w'] ?? null;
+		$fortnight_stats = $fortnight['windows']['2w'] ?? null;
+		// A fitted, sufficiently covered quiet week can show that an earlier
+		// addition has settled. It does not prove that bursts can never recur.
+		$week_settled = $week_stats !== null && ($week_stats['r2'] ?? 0) >= 0.35
+			&& $week_stats['net_rate'] !== null && $week_stats['net_rate'] <= $required
+			&& $week_stats['slope'] <= $required;
+		// A burst week in an established fortnightly cycle is not a new regime
+		// when the observed full-cycle accumulation still matches its baseline.
+		$fortnight_compatible = $baseline > $noise_floor && $fortnight_stats !== null
+			&& $fortnight_stats['net_rate'] !== null && $fortnight_stats['net_rate'] >= $baseline / 1.5
+			&& $fortnight_stats['net_rate'] <= $required;
+		if (($fortnight['confirmed'] && !$week_settled) || ($week['confirmed'] && !$fortnight_compatible)) {
+			return ['baseline_rate' => $baseline, 'required_rate' => $required,
+				'week' => $week_stats, 'fortnight' => $fortnight_stats];
+		}
+		return null;
+	}
+
+	/** Descriptive observations and explicit forecast limitations; never changes risk. */
+	private function diskForecastInformation(array $context): array {
+		$windows = $context['windows'];
+		$rows = $context['rows'];
+		$selected = $context['selected'];
+		$bytes = $context['bytes'];
+		$floor = $context['noise_floor'];
+		$now = $context['now'];
+		$reasons = [];
+		$blocking = [];
+		$add = static function (string $code, string $message, bool $blocks = true) use (&$reasons, &$blocking): void {
+			$reasons[$code] = $message;
+			if ($blocks) { $blocking[$code] = $message; }
+		};
+		if (!$context['current_usable']) {
+			$add('current_unavailable', _('The current filesystem snapshot is unavailable or not usable; a future date cannot be anchored to current headroom.'));
+		}
+		if ($context['recent_pattern_change'] !== null) {
+			$add('recent_pattern_change', $bytes
+				? _('Observed recent accumulation is materially faster than the selected baseline. The recent growth pattern changed, so that baseline does not support a reliable fill date. This does not establish a repeating future rate.')
+				: _('Recent used-percentage increases are materially faster than the selected baseline, so it does not support a reliable percentage-threshold date. Capacity changes may contribute; this does not establish repeating byte growth.'));
+		}
+		if (!$rows) {
+			$add('no_history', _('No usable historical observations were returned.'));
+		}
+		else {
+			$stats = $selected ?? ($windows['1m'] ?? null);
+			if (($stats['days'] ?? 0) < 21) {
+				$add('insufficient_duration', sprintf(_('Only %1$d observed days are available in the candidate window; at least 21 are required for a forecast.'), $stats['days'] ?? 0));
+			}
+			if (($stats['cov'] ?? 0) < 45) {
+				$add('insufficient_coverage', sprintf(_('Candidate-window coverage is %1$s%%; at least 45%% is required for a forecast.'), $this->trimFloat($stats['cov'] ?? 0)));
+			}
+			if (!$context['history_fresh']) {
+				$add('stale_history', _('The selected history ends more than 24 hours ago.'));
+			}
+			if (!$context['recent_covered']) {
+				$week = $windows['1w'] ?? [];
+				$add('recent_coverage_gap', sprintf(_('The last seven days contain %1$d observed days and %2$s%% coverage; at least five days and 55%% coverage are required.'),
+					$week['days'] ?? 0, $this->trimFloat($week['cov'] ?? 0)));
+			}
+			if ($stats === null || $stats['slope'] === null || ($stats['r2'] ?? 0) < 0.35) {
+				$add('weak_fit', sprintf(_('The %1$s line fit is weak (R² %2$s; minimum 0.35), so it does not support a reliable future rate.'),
+					$stats['label'] ?? _('candidate-window'), $this->trimFloat($stats['r2'] ?? 0)));
+			}
+			if ($this->diskTrendsOppose($selected, $windows, $floor)) {
+				$add('opposing_trends', _('The qualified recent monthly trend opposes the selected longer trend at rates above the noise floor.'));
+			}
+		}
+		if ($context['acceleration_unconfirmed']) {
+			$monthly_only = ($context['acceleration_evidence']['baseline_window'] ?? null) === null;
+			$add($monthly_only ? 'unconfirmed_monthly_growth' : 'unconfirmed_acceleration',
+				$monthly_only
+					? _('Recent net accumulation and shorter-window fits do not corroborate the only qualified monthly growth model.')
+					: _('The higher monthly rate is unconfirmed; the longer baseline is retained with reduced confidence.'), $monthly_only);
+		}
+		$preferred = $context['preferred_window'];
+		if ($preferred !== null && $preferred !== $context['selected_window']
+				&& ($windows[$preferred]['r2'] ?? 0) < 0.35 && ($selected['r2'] ?? 0) >= 0.35) {
+			$add('fit_window_fallback', sprintf(_('The preferred %1$s window has a weak fit; the qualified %2$s window is considered instead. Forecast-quality checks still apply.'),
+				$windows[$preferred]['label'], $selected['label']), false);
+		}
+		if (!$bytes) {
+			$add('percentage_basis', _('These observations describe used percentage; changes may reflect filesystem capacity changes as well as data growth.'), false);
+		}
+		if ($context['threshold_note'] !== null) {
+			$add('missing_free_space_evidence', $context['threshold_note'], false);
+		}
+
+		$signed_rate = $selected['slope'] ?? null;
+		$status = 'unavailable';
+		if ($context['model_usable'] && $context['current_usable'] && $signed_rate !== null) {
+			$status = $signed_rate >= $floor ? 'projected' : ($signed_rate <= -$floor ? 'shrinking' : 'stable');
+		}
+		$unavailable_reason = $status === 'unavailable'
+			? _('No reliable forecast: ').($blocking ? reset($blocking) : _('No qualified growth model is available.'))
+			: null;
+
+		$current = $context['current_usable'] && $context['current_pused'] !== null
+			? sprintf(_('Current use is %1$s%%.'), $this->trimFloat($context['current_pused']))
+			: _('A usable current percentage is unavailable.');
+		if ($context['current_usable'] && $context['current_free'] !== null) {
+			$current .= ' '.sprintf(_('%1$s is free.'), $this->formatDiskObservation($context['current_free'], true));
+		}
+		if ($context['current_critical']) { $current .= ' '._('A critical threshold is breached now.'); }
+		elseif ($context['current_warning']) { $current .= ' '._('A warning threshold is breached now.'); }
+
+		$recent = $windows['1w'] ?? null;
+		$recent_text = $recent !== null && $recent['net_change'] !== null
+			? sprintf(_('Last seven days: %1$s net change across %2$d observed days (%3$s%% coverage).'),
+				$this->formatDiskObservation($recent['net_change'], $bytes, true), $recent['days'], $this->trimFloat($recent['cov']))
+			: _('Recent net change cannot be assessed from the available observations.');
+		$month = $windows['1m'] ?? null;
+		if ($month !== null && $month['net_change'] !== null) {
+			$recent_text .= ' '.sprintf(_('Last month: %1$s observed net change.'), $this->formatDiskObservation($month['net_change'], $bytes, true));
+		}
+		$long = null;
+		foreach (['12m', '6m', '3m'] as $key) {
+			if (($windows[$key]['days'] ?? 0) >= 60 && ($windows[$key]['cov'] ?? 0) >= 45) { $long = $windows[$key]; break; }
+		}
+		$long_text = $long !== null && $long['slope'] !== null
+			? sprintf(_('%1$s: %2$s observed net change; descriptive fitted rate %3$s/day (R² %4$s).'),
+				ucfirst($long['label']), $this->formatDiskObservation($long['net_change'], $bytes, true),
+				$this->formatDiskObservation($long['slope'], $bytes, true), $this->trimFloat($long['r2'] ?? 0))
+			: _('There is not enough longer-term history for a comparison.');
+
+		$recent_rows = array_values(array_filter($rows, static fn (array $row): bool => $row['clock'] >= $now - 31 * 86400));
+		$points = $this->dailyPoints($recent_rows);
+		$deltas = [];
+		for ($i = 1; $i < count($points); $i++) {
+			if ($points[$i][0] - $points[$i - 1][0] === 1.0) { $deltas[] = $points[$i][1] - $points[$i - 1][1]; }
+		}
+		$typical = $deltas ? $this->median(array_map('abs', $deltas)) : 0.0;
+		$material = $bytes ? ($context['capacity'] !== null ? $context['capacity'] * 0.01 : $floor * 31) : 1.0;
+		$limit = max($floor * 7, $material, $typical * 5);
+		$abrupt = array_values(array_filter($deltas, static fn (float $delta): bool => $delta > $limit));
+		if ($abrupt) {
+			$add('observed_abrupt_increase', sprintf($bytes
+				? _('A sharp increase of %1$s between consecutive observed daily averages was recorded. This describes reduced headroom, not a repeating future daily rate.')
+				: _('A sharp increase of %1$s between consecutive observed daily percentage averages was recorded. This describes reduced percentage headroom and may reflect a capacity change; it is not a repeating future daily rate.'),
+				$this->formatDiskObservation(max($abrupt), $bytes)), false);
+		}
+		$flat_observation = false;
+		if ($points && $month !== null && $month['net_change'] !== null) {
+			$values = array_column($points, 1);
+			$range = max($values) - min($values);
+			$flat_observation = $range > $floor && abs($month['net_change']) <= $range * 0.25
+				&& abs(($month['slope'] ?? 0) * 31) <= $range * 0.25;
+			if ($flat_observation) {
+				$recent_text .= ' '.sprintf(_('Observed daily averages fluctuate over a %1$s range with little net change; this alone does not establish a predictable future rate.'),
+					$this->formatDiskObservation($range, $bytes));
+			}
+		}
+
+		if ($status === 'projected') {
+			$forecast_text = sprintf(_('Projection uses the %1$s model at %2$s/day with %3$s confidence.'),
+				$selected['label'], $this->formatDiskObservation($signed_rate, $bytes), strtolower($context['confidence']));
+			$forecast_text .= ' '.($bytes ? _('Current usable capacity is assumed to stay fixed.')
+				: _('This percentage model does not establish a byte-based Full date.'));
+		}
+		elseif ($status === 'stable') { $forecast_text = $bytes
+			? _('Qualified history shows no meaningful growth above the noise floor. No finite future fill date is projected.')
+			: _('Qualified used-percentage history shows no meaningful growth above the noise floor. No increasing-percentage threshold date is projected; a byte-based Full date cannot be assessed.'); }
+		elseif ($status === 'shrinking') { $forecast_text = $bytes
+			? _('Qualified history shows decreasing use. No increasing-use threshold date is projected; current breaches still require attention.')
+			: _('Qualified history shows decreasing used percentage, which may reflect capacity changes. No increasing-percentage threshold date is projected; current breaches still require attention.'); }
+		else { $forecast_text = $unavailable_reason; }
+		$summary = [];
+		if ($context['current_critical']) { $summary[] = _('Critical now'); }
+		elseif ($context['current_warning']) { $summary[] = _('Warning threshold exceeded now'); }
+		if ($abrupt) { $summary[] = _('sharp recent increase observed'); }
+		elseif ($flat_observation) { $summary[] = _('fluctuating use with little net change'); }
+		if ($context['acceleration_unconfirmed']) { $summary[] = _('recent acceleration unconfirmed'); }
+		if ($status === 'unavailable') {
+			$short_reasons = [
+				'current_unavailable' => _('current headroom cannot be assessed'),
+				'no_history' => _('no usable history for a forecast'),
+				'insufficient_duration' => _('too little qualified history for a reliable date'),
+				'insufficient_coverage' => _('sparse observations prevent a reliable date'),
+				'stale_history' => _('stale history prevents a reliable date'),
+				'recent_coverage_gap' => _('recent data gaps limit forecasting'),
+				'weak_fit' => _('uneven usage prevents a reliable date'),
+				'opposing_trends' => _('recent and longer-term trends disagree'),
+				'unconfirmed_monthly_growth' => _('recent growth is not yet corroborated'),
+				'recent_pattern_change' => $bytes ? _('fill date uncertain because the recent pattern changed')
+					: _('percentage-threshold date uncertain because the recent pattern changed')
+			];
+			$summary[] = $short_reasons[array_key_first($blocking) ?? ''] ?? _('no qualified growth model is available');
+		}
+		else {
+			$summary[] = ['projected' => _('growth projection available'),
+				'stable' => $bytes ? _('stable observed use') : _('stable observed used percentage'),
+				'shrinking' => $bytes ? _('decreasing observed use') : _('decreasing observed used percentage')][$status];
+		}
+		return ['status' => $status, 'reason_codes' => array_keys($reasons), 'unavailable_reason' => $unavailable_reason,
+			'information' => ['summary' => ucfirst(implode('; ', $summary)).'.', 'current' => $current,
+				'recent' => $recent_text, 'long_term' => $long_text, 'forecast' => $forecast_text,
+				'signals' => array_values($reasons)]];
+	}
+
 	private function forecastDisk(array $spec, array $rows, string $source, int $now, ?string $note,
 			array $direct_pct_rows = [], string $pct_source = 'none', ?string $pct_note = null): array {
 		$current_observation_usable = ($spec['current_observation_usable'] ?? true) === true;
+		$byte_source = $spec['byte_source']
+			?? (($spec['tr'] ?? 'identity') === 'identity' ? 'used' : 'derived');
+		if ($byte_source !== 'used') {
+			// Inverting historical free bytes or scaling historical percentages by
+			// today's capacity invents used-byte growth across volume resizes. Keep
+			// measured percentage evidence, but do not publish byte-based ETAs.
+			$rows = [];
+			$limitation = _('Actual used-byte history is unavailable. Percentage thresholds use measured percentage history only; byte growth, free-space threshold dates and the full-capacity date cannot be estimated reliably.');
+			$note = $note === null ? $limitation : $note.' '.$limitation;
+		}
 		// Usable filesystem capacity is used+free. Linux total can include reserved
 		// blocks and must not silently become the percentage denominator.
 		$capacity = null;
@@ -3722,6 +4099,8 @@ final class CapacityPlanningData extends CController {
 			$pct_note = $pct_note === null ? $invalid_pct_note : $pct_note.' '.$invalid_pct_note;
 		}
 		$pct_windows = $this->summarizeWindows($pct_rows, $now, $spec['warn_pct'], $spec['crit_pct']);
+		$preferred_window = $this->selectModelWindow($windows, false);
+		$preferred_pct_window = $this->selectModelWindow($pct_windows, false);
 		$selected_window = $this->selectModelWindow($windows);
 		$selected = $selected_window !== null ? $windows[$selected_window] : null;
 		$selected_pct_window = $this->selectModelWindow($pct_windows);
@@ -3753,6 +4132,10 @@ final class CapacityPlanningData extends CController {
 		$pct_slope = $selected_pct !== null ? $selected_pct['slope'] : null;
 		$accelerating = false;
 		$pct_accelerating = false;
+		$byte_acceleration_evidence = null;
+		$pct_acceleration_evidence = null;
+		$byte_month_only_unconfirmed = false;
+		$pct_month_only_unconfirmed = false;
 		// The noise floor is capacity-relative for small filesystems: 1 MiB/day on
 		// a 200 MiB volume is a confident fill trend, not noise. 1e-5 of capacity
 		// per day (could not fill the volume within ~270 years) is unambiguously
@@ -3772,15 +4155,20 @@ final class CapacityPlanningData extends CController {
 		if ($slope !== null && $recent !== null && $recent['slope'] !== null
 				&& $recent['days'] >= 21 && $recent['cov'] >= 70 && ($recent['r2'] ?? 0) >= 0.35
 				&& $recent['slope'] > max($slope * 1.5, $byte_floor)) {
-			$selected_window = '1m';
-			$selected = $recent;
-			$slope = $recent['slope'];
-			if (!$pct_series_direct && $recent_pct !== null && $recent_pct['slope'] !== null) {
-				$selected_pct_window = '1m';
-				$selected_pct = $recent_pct;
-				$pct_slope = $recent_pct['slope'];
+			$byte_acceleration_evidence = $this->confirmDiskGrowthPersistence(
+				$windows, $rows, $now, $recent['slope'], $slope, $byte_floor);
+			$byte_acceleration_evidence['baseline_window'] = $selected_window;
+			if ($byte_acceleration_evidence['confirmed']) {
+				$selected_window = '1m';
+				$selected = $recent;
+				$slope = $recent['slope'];
+				if (!$pct_series_direct && $recent_pct !== null && $recent_pct['slope'] !== null) {
+					$selected_pct_window = '1m';
+					$selected_pct = $recent_pct;
+					$pct_slope = $recent_pct['slope'];
+				}
+				$accelerating = true;
 			}
-			$accelerating = true;
 		}
 		// A direct percentage series is an independent model of the alarming
 		// metric, so it gets the same acceleration rule evaluated in its own
@@ -3792,14 +4180,48 @@ final class CapacityPlanningData extends CController {
 				&& $recent_pct['slope'] !== null && $recent_pct['days'] >= 21
 				&& $recent_pct['cov'] >= 70 && ($recent_pct['r2'] ?? 0) >= 0.35) {
 			if ($recent_pct['slope'] > max($pct_slope * 1.5, $pct_noise_floor)) {
-				$selected_pct_window = '1m';
-				$selected_pct = $recent_pct;
-				$pct_slope = $recent_pct['slope'];
-				$pct_accelerating = true;
+				$pct_acceleration_evidence = $this->confirmDiskGrowthPersistence(
+					$pct_windows, $pct_rows, $now, $recent_pct['slope'], $pct_slope, $pct_noise_floor);
+				$pct_acceleration_evidence['baseline_window'] = $selected_pct_window;
+				if ($pct_acceleration_evidence['confirmed']) {
+					$selected_pct_window = '1m';
+					$selected_pct = $recent_pct;
+					$pct_slope = $recent_pct['slope'];
+					$pct_accelerating = true;
+				}
 			}
 		}
-		$byte_confidence = $this->forecastConfidence($selected, $windows);
-		$pct_confidence = $this->forecastConfidence($selected_pct, $pct_windows);
+		// The same step-change problem exists when only one month qualifies and
+		// there is no older baseline to override. Do not publish a point forecast
+		// from that month unless shorter windows corroborate continuing growth.
+		if ($selected_window === '1m' && !$accelerating && $slope !== null && $slope >= $byte_floor) {
+			$byte_acceleration_evidence = $this->confirmDiskGrowthPersistence(
+				$windows, $rows, $now, $slope, null, $byte_floor);
+			$byte_acceleration_evidence['baseline_window'] = null;
+			$byte_month_only_unconfirmed = !$byte_acceleration_evidence['confirmed'];
+		}
+		if ($selected_pct_window === '1m' && !$pct_accelerating && $pct_slope !== null && $pct_slope >= $pct_noise_floor) {
+			$pct_acceleration_evidence = $this->confirmDiskGrowthPersistence(
+				$pct_windows, $pct_rows, $now, $pct_slope, null, $pct_noise_floor);
+			$pct_acceleration_evidence['baseline_window'] = null;
+			$pct_month_only_unconfirmed = !$pct_acceleration_evidence['confirmed'];
+		}
+		$byte_confidence = $this->forecastConfidence($selected, $windows, $byte_floor);
+		$pct_confidence = $this->forecastConfidence($selected_pct, $pct_windows, $pct_noise_floor);
+		$byte_pattern_change = $slope !== null && (in_array($selected_window, ['3m', '6m', '12m'], true)
+				|| ($selected_window === '1m' && $slope <= $byte_floor))
+			? $this->diskRecentPatternChange($windows, $rows, $now, $slope, $byte_floor) : null;
+		$pct_pattern_change = $pct_slope !== null && (in_array($selected_pct_window, ['3m', '6m', '12m'], true)
+				|| ($selected_pct_window === '1m' && $pct_slope <= $pct_noise_floor))
+			? $this->diskRecentPatternChange($pct_windows, $pct_rows, $now, $pct_slope, $pct_noise_floor) : null;
+		if ($byte_pattern_change !== null) { $byte_confidence = 'Low'; }
+		if ($pct_pattern_change !== null) { $pct_confidence = 'Low'; }
+		if ($byte_acceleration_evidence !== null && !$byte_acceleration_evidence['confirmed']) {
+			$byte_confidence = $byte_month_only_unconfirmed ? 'Low' : ($byte_confidence === 'High' ? 'Medium' : $byte_confidence);
+		}
+		if ($pct_acceleration_evidence !== null && !$pct_acceleration_evidence['confirmed']) {
+			$pct_confidence = $pct_month_only_unconfirmed ? 'Low' : ($pct_confidence === 'High' ? 'Medium' : $pct_confidence);
+		}
 		if ($slope !== null && $slope < $byte_floor) {
 			$slope = null;
 		}
@@ -3810,6 +4232,74 @@ final class CapacityPlanningData extends CController {
 			$pct_slope = null;
 		}
 
+		// One future capacity assumption must govern every projected threshold.
+		// Historical pused may fall when a volume grows even while used bytes
+		// continue rising. Extrapolating that historical percentage independently
+		// can otherwise put Warning/Critical years after the projected Full date.
+		$observed_pct_slope = $selected_pct['slope'] ?? null;
+		$observed_pct_window = $selected_pct_window;
+		$observed_pct_windows = $pct_windows;
+		$observed_pct_confidence = $pct_confidence;
+		$observed_pct_accelerating = $pct_accelerating;
+		$projection_basis = $selected_pct !== null ? 'percentage_only' : 'unavailable';
+		if ($selected !== null && $capacity !== null && $capacity > 0) {
+			$projection_basis = 'used_bytes_fixed_capacity';
+			$pct_slope = $slope !== null ? $slope * 100 / $capacity : null;
+			$pct_windows = $this->summarizeWindows(
+				$this->transformRows($rows, 'scale', 100 / $capacity), $now,
+				$spec['warn_pct'], $spec['crit_pct']);
+			$selected_pct_window = $selected_window;
+			$selected_pct = $pct_windows[$selected_pct_window];
+			$pct_confidence = $byte_confidence;
+			$pct_accelerating = $accelerating;
+			$projection_note = _('All projected thresholds assume current usable capacity stays fixed and use the same observed used-byte growth. Historical used-percentage changes are descriptive and may include past capacity changes.');
+			$pct_note = $pct_note === null ? $projection_note : $pct_note.' '.$projection_note;
+		}
+		$acceleration_evidence = $projection_basis === 'used_bytes_fixed_capacity'
+			? $byte_acceleration_evidence : $pct_acceleration_evidence;
+		$recent_pattern_change = $projection_basis === 'used_bytes_fixed_capacity'
+			? $byte_pattern_change : $pct_pattern_change;
+		if ($acceleration_evidence !== null) {
+			$acceleration_evidence['unit'] = $projection_basis === 'used_bytes_fixed_capacity' ? 'bytes/day' : 'pp/day';
+		}
+		$acceleration_unconfirmed = $acceleration_evidence !== null && !$acceleration_evidence['confirmed'];
+		$acceleration_note = null;
+		if ($acceleration_unconfirmed) {
+			$acceleration_note = $acceleration_evidence['baseline_window'] !== null
+				? _('The higher one-month growth rate was not confirmed by recent net accumulation and shorter-window fits. The longer baseline is retained with reduced confidence. Verify recent bulk additions, cleanup or retention changes; this does not establish that growth has stopped.')
+				: _('The one-month growth rate was not confirmed by recent net accumulation and shorter-window fits, and no qualified older baseline is available. Verify recent bulk additions, cleanup or retention changes; this does not establish that growth has stopped.');
+		}
+		$observed_byte_slope = $selected['slope'] ?? null;
+		$latest_end = static function (array $series): int {
+			$end = 0;
+			foreach ($series as $row) {
+				$end = max($end, (int) $row['clock'] + max(1, (int) ($row['bucket_seconds'] ?? 3600)));
+			}
+			return $end;
+		};
+		$byte_history_fresh = $latest_end($rows) >= $now - self::STALE_DISK_SECONDS;
+		$pct_history_fresh = $projection_basis === 'used_bytes_fixed_capacity'
+			? $byte_history_fresh : $latest_end($pct_rows) >= $now - self::STALE_DISK_SECONDS;
+		// One new sample after a long collection gap must not revive an old model.
+		// Apply the established one-week evidence minimum to the recent tail too.
+		$byte_recent_covered = ($windows['1w']['days'] ?? 0) >= 5 && ($windows['1w']['cov'] ?? 0) >= 55;
+		$pct_recent_covered = ($pct_windows['1w']['days'] ?? 0) >= 5 && ($pct_windows['1w']['cov'] ?? 0) >= 55;
+		if (!$byte_history_fresh || !$byte_recent_covered) {
+			$byte_confidence = 'Low';
+		}
+		if (!$pct_history_fresh || !$pct_recent_covered) {
+			$pct_confidence = 'Low';
+		}
+		$byte_model_usable = $selected !== null && $byte_confidence !== 'Low'
+			&& $byte_history_fresh && $byte_recent_covered;
+		$pct_model_usable = $selected_pct !== null && $pct_confidence !== 'Low'
+			&& $pct_history_fresh && $pct_recent_covered;
+		if (!$byte_model_usable) {
+			$slope = null;
+		}
+		if (!$pct_model_usable) {
+			$pct_slope = null;
+		}
 		$eta = static function (?float $distance, ?float $rate): ?float {
 			if ($distance === null) {
 				return null;
@@ -3826,6 +4316,10 @@ final class CapacityPlanningData extends CController {
 		$current_snapshot_usable = $current_observation_usable && ($spec['ok'] ?? false);
 		$current_pused = $current_snapshot_usable ? $spec['pused'] : null;
 		$current_free = $current_snapshot_usable ? $spec['free'] : null;
+		if ($projection_basis === 'used_bytes_fixed_capacity' && $current_snapshot_usable
+				&& $spec['used'] !== null) {
+			$current_pused = $spec['used'] * 100 / $capacity;
+		}
 		$days_warn_pct_only = ($spec['warn_pct'] !== null && $current_pused !== null)
 			? $eta($spec['warn_pct'] - $current_pused, $pct_slope)
 			: null;
@@ -3876,10 +4370,10 @@ final class CapacityPlanningData extends CController {
 			&& $current_free < $spec['crit_free'];
 		$pct_severity = $this->diskSeverity($current_warn_pct, $current_crit_pct,
 			$days_warn_pct_only, $days_crit_pct_only, null, $pct_confidence,
-			$current_snapshot_usable && $selected_pct_window !== null);
+			$current_snapshot_usable && $pct_model_usable);
 		$byte_severity = $this->diskSeverity($current_warn_free, $current_crit_free,
 			$days_warn_gb, $days_crit_gb, $days_full, $byte_confidence,
-			$current_snapshot_usable && $selected_window !== null);
+			$current_snapshot_usable && $byte_model_usable);
 		if (self::SEVERITY_ORDER[$pct_severity] > self::SEVERITY_ORDER[$byte_severity]) {
 			$severity = $pct_severity;
 			$confidence = $pct_confidence;
@@ -3894,6 +4388,35 @@ final class CapacityPlanningData extends CController {
 				? $byte_confidence
 				: $pct_confidence;
 		}
+		$threshold_note = null;
+		if ($current_snapshot_usable && $current_free === null
+				&& (($spec['warn_free'] ?? 0) > 0 || ($spec['crit_free'] ?? 0) > 0)) {
+			$threshold_note = _('Configured absolute free-space thresholds could not be assessed because current free bytes are unavailable. Percentage evidence alone cannot establish that all thresholds are healthy.');
+			if ($severity === 'Healthy') {
+				$severity = 'Unknown';
+			}
+		}
+		$information_bytes = $projection_basis === 'used_bytes_fixed_capacity'
+			|| ($projection_basis === 'unavailable' && (bool) $rows);
+		$information = $this->diskForecastInformation([
+			'rows' => $information_bytes ? $rows : $pct_rows,
+			'windows' => $information_bytes ? $windows : $pct_windows,
+			'selected' => $information_bytes ? $selected : $selected_pct,
+			'selected_window' => $information_bytes ? $selected_window : $selected_pct_window,
+			'preferred_window' => $information_bytes ? $preferred_window : $preferred_pct_window,
+			'bytes' => $information_bytes, 'noise_floor' => $information_bytes ? $byte_floor : $pct_noise_floor,
+			'now' => $now, 'capacity' => $capacity, 'confidence' => $confidence,
+			'model_usable' => $information_bytes ? $byte_model_usable : $pct_model_usable,
+			'history_fresh' => $information_bytes ? $byte_history_fresh : $pct_history_fresh,
+			'recent_covered' => $information_bytes ? $byte_recent_covered : $pct_recent_covered,
+			'current_usable' => $current_snapshot_usable, 'current_pused' => $current_pused, 'current_free' => $current_free,
+			'current_critical' => $current_crit_pct || $current_crit_free,
+			'current_warning' => $current_warn_pct || $current_warn_free,
+			'acceleration_unconfirmed' => $acceleration_unconfirmed,
+			'acceleration_evidence' => $acceleration_evidence, 'threshold_note' => $threshold_note,
+			'recent_pattern_change' => $recent_pattern_change
+		]);
+		$forecast_unavailable_reason = $information['unavailable_reason'];
 		$notes = [];
 		if (!$current_observation_usable) {
 			$notes[] = _('The host is in maintenance without data collection; current threshold breaches and ETAs were not inferred from the last accepted values.');
@@ -3901,10 +4424,15 @@ final class CapacityPlanningData extends CController {
 		elseif (!$current_snapshot_usable) {
 			$notes[] = _('The current filesystem snapshot was incomplete or invalid; current threshold breaches and ETAs were not inferred.');
 		}
-		foreach ([$note, $pct_note] as $candidate_note) {
+		foreach ([$note, $pct_note, $forecast_unavailable_reason, $threshold_note, $acceleration_note] as $candidate_note) {
 			if ($candidate_note !== null && trim($candidate_note) !== '' && !in_array($candidate_note, $notes, true)) {
 				$notes[] = $candidate_note;
 			}
+		}
+		$recommendation = $this->diskRecommendation($severity, $spec['fs_kind']);
+		if ($acceleration_unconfirmed) {
+			$review = _('Verify recent bulk additions, cleanup and retention changes, then recheck the growth trend before relying on the baseline estimate.');
+			$recommendation = $severity === 'Healthy' ? $review : $recommendation.' '.$review;
 		}
 
 		return [
@@ -3913,6 +4441,23 @@ final class CapacityPlanningData extends CController {
 			'source' => $source,
 			'pct_source' => $pct_source,
 			'pct_series_direct' => $pct_series_direct,
+			'projection_basis' => $projection_basis,
+			'forecast_status' => $information['status'],
+			'forecast_reason_codes' => $information['reason_codes'],
+			'information' => $information['information'],
+			'recent_pattern_change' => $recent_pattern_change,
+			'acceleration_unconfirmed' => $acceleration_unconfirmed,
+			'acceleration_note' => $acceleration_note,
+			'acceleration_evidence' => $acceleration_evidence,
+			'forecast_reliable' => $byte_model_usable || $pct_model_usable,
+			'forecast_unavailable_reason' => $forecast_unavailable_reason,
+			'byte_source' => $byte_source,
+			'observed_growth_day' => $observed_byte_slope,
+			'observed_growth_pct_day' => $pct_series_direct ? $observed_pct_slope : null,
+			'observed_pct_sel' => $observed_pct_window,
+			'observed_pct_confidence' => $observed_pct_confidence,
+			'observed_pct_accelerating' => $observed_pct_accelerating,
+			'observed_pct_windows' => $this->roundWindows($observed_pct_windows),
 			'note' => $notes ? implode(' ', $notes) : null,
 			'windows' => $this->roundWindows($windows),
 			'pct_windows' => $this->roundWindows($pct_windows),
@@ -3956,7 +4501,7 @@ final class CapacityPlanningData extends CController {
 				'next_basis' => $next_basis
 			],
 			'severity' => $severity,
-			'recommendation' => $this->diskRecommendation($severity, $spec['fs_kind']),
+			'recommendation' => $recommendation,
 			'series' => $this->downsampleSeries($rows),
 			'pct_series' => $this->downsampleSeries($pct_rows)
 		];
@@ -4039,7 +4584,7 @@ final class CapacityPlanningData extends CController {
 			case 'Watch':
 				return _('Review growth monthly and investigate recent acceleration.');
 			case 'Unknown':
-				return _('Restore or extend Zabbix trend retention before making a capacity decision.');
+				return _('Inspect data coverage and recent workload or capacity changes. Use current headroom and observed usage while a reliable growth forecast is unavailable.');
 			default:
 				return _('No capacity action indicated; continue normal monitoring.');
 		}
@@ -4214,19 +4759,19 @@ final class CapacityPlanningData extends CController {
 		$label = (string) ($stats['label'] ?? 'selected window');
 		if ($crit !== null && (($stats['avg'] !== null && $stats['avg'] >= $crit)
 				|| (($stats['above_crit'] ?? 0) >= 10 && ($stats['p95'] ?? 0) >= $crit))) {
-			$reasons[] = sprintf(_('%1$s: average %2$s, p95 %3$s, and %4$.1f%% above the %5$s%% alarm threshold.'),
+			$reasons[] = sprintf(_('%1$s: average %2$s, bucket-average p95 %3$s, and %4$.1f%% bucket exposure above the %5$s%% alarm threshold.'),
 				$label, $this->formatPct($stats['avg']), $this->formatPct($stats['p95']),
 				$stats['above_crit'] ?? 0, $this->trimFloat($crit));
 			return 'Critical';
 		}
 		if (($crit !== null && ($stats['p95'] ?? 0) >= $crit && ($stats['above_crit'] ?? 0) >= 2)
 				|| ($warn !== null && ($stats['above_warn'] ?? 0) >= 20 && ($stats['p95'] ?? 0) >= $warn)) {
-			$reasons[] = sprintf(_('%1$s: p95 %2$s with %3$.1f%% above review and %4$.1f%% above alarm.'),
+			$reasons[] = sprintf(_('%1$s: bucket-average p95 %2$s with %3$.1f%% bucket exposure above review and %4$.1f%% above alarm.'),
 				$label, $this->formatPct($stats['p95']), $stats['above_warn'] ?? 0, $stats['above_crit'] ?? 0);
 			return 'High';
 		}
 		if ($warn !== null && ($stats['p95'] ?? 0) >= $warn && ($stats['above_warn'] ?? 0) >= 5) {
-			$reasons[] = sprintf(_('%1$s: p95 %2$s and %3$.1f%% above the %4$s%% review threshold.'),
+			$reasons[] = sprintf(_('%1$s: bucket-average p95 %2$s and %3$.1f%% bucket exposure above the %4$s%% review threshold.'),
 				$label, $this->formatPct($stats['p95']), $stats['above_warn'] ?? 0, $this->trimFloat($warn));
 			return 'Medium';
 		}
@@ -4267,7 +4812,6 @@ final class CapacityPlanningData extends CController {
 		$values = [];
 		$total = 0;
 		$weighted_sum = 0.0;
-		$hours = [];
 		$peak = null;
 		foreach ($selected as $row) {
 			$weight = max(1, (int) $row['num']);
@@ -4275,11 +4819,11 @@ final class CapacityPlanningData extends CController {
 			$values[] = (float) $row['avg'];
 			$total += $weight;
 			$weighted_sum += $row['avg'] * $weight;
-			$hours[intdiv($row['clock'], 3600)] = true;
 			$peak = $peak === null ? $row['max'] : max($peak, $row['max']);
 		}
 		$first = $selected[0]['clock'];
 		$last = $selected[count($selected) - 1]['clock'];
+		[$data_days, $coverage] = $this->observedWindowCoverage($selected, $start_clock, $end_clock, $days);
 		[$slope, $r2] = $this->theilSen($this->dailyPoints($selected));
 		$above = static function (?float $threshold) use ($values, $weights, $total): ?float {
 			if ($threshold === null || $total <= 0) {
@@ -4296,8 +4840,8 @@ final class CapacityPlanningData extends CController {
 		return [
 			'label' => $label,
 			'requested_days' => $days,
-			'days' => max(1, min($days, (int) ceil(($last - $first + 3600) / 86400))),
-			'cov' => min(100.0, count($hours) / ($days * 24) * 100),
+			'days' => $data_days,
+			'cov' => $coverage,
 			'n' => $total,
 			'avg' => $weighted_sum / $total,
 			'p95' => $this->weightedPercentile($values, $weights, 0.95),
@@ -4704,7 +5248,7 @@ final class CapacityPlanningData extends CController {
 			array $saturation, array $regime): string {
 		$evidence = [];
 		if ($stats !== null) {
-			$evidence[] = sprintf(_('%1$s: average %2$s, p95 %3$s, %4$.1f%% above review.'),
+			$evidence[] = sprintf(_('%1$s: average %2$s, bucket-average p95 %3$s, %4$.1f%% bucket exposure above review.'),
 				$stats['label'] ?? 'selected window', $this->formatPct($stats['avg']),
 				$this->formatPct($stats['p95']), $stats['above_warn'] ?? 0);
 		}
@@ -4807,9 +5351,11 @@ final class CapacityPlanningData extends CController {
 	}
 
 	/**
-	 * Chart-ready daily min/avg/max series, capped at SERIES_MAX_POINTS points.
+	 * Chart-ready daily min/avg/max summaries with their calendar interval.
+	 * Group adjacent days toward SERIES_MAX_POINTS; never group across a missing
+	 * day. Gappy series can exceed that target, but remain bounded by lookback.
 	 *
-	 * @return array<int, array{0: int, 1: float, 2: float, 3: float}>
+	 * @return array<int, array{0: int, 1: float, 2: float, 3: float, 4: int, 5: int}>
 	 */
 	private function downsampleSeries(array $rows): array {
 		$daily = [];
@@ -4830,27 +5376,37 @@ final class CapacityPlanningData extends CController {
 		$points = [];
 		$bucket = null;
 		$index = 0;
+		$flush = static function (array $bucket): array {
+			return [(int) round($bucket['clock_sum'] / max(1, $bucket['n'])), round($bucket['min'], 4),
+				round($bucket['sum'] / max(1, $bucket['n']), 4), round($bucket['max'], 4),
+				$bucket['from'], $bucket['to']];
+		};
 		foreach ($daily as $day => $d) {
-			if ($bucket === null) {
-				$bucket = ['clock_sum' => 0.0, 'sum' => 0.0, 'n' => 0, 'min' => $d['min'], 'max' => $d['max']];
+			if ($bucket !== null && $day > $bucket['to']) {
+				$points[] = $flush($bucket);
+				$bucket = null;
+				$index = 0;
 			}
-			// Sample-weighted mean clock: sparse series can group days that are far
-			// apart, and stamping the group's first day would misplace its values.
+			if ($bucket === null) {
+				$bucket = ['clock_sum' => 0.0, 'sum' => 0.0, 'n' => 0, 'min' => $d['min'], 'max' => $d['max'],
+					'from' => $day, 'to' => $day + 86400];
+			}
+			// Keep the representative clock separate from the summary interval.
 			$bucket['clock_sum'] += (float) $day * $d['n'];
 			$bucket['sum'] += $d['sum'];
 			$bucket['n'] += $d['n'];
 			$bucket['min'] = min($bucket['min'], $d['min']);
 			$bucket['max'] = max($bucket['max'], $d['max']);
+			$bucket['to'] = $day + 86400;
 			$index++;
 			if ($index % $group === 0) {
-				$points[] = [(int) round($bucket['clock_sum'] / max(1, $bucket['n'])), round($bucket['min'], 4),
-					round($bucket['sum'] / max(1, $bucket['n']), 4), round($bucket['max'], 4)];
+				$points[] = $flush($bucket);
 				$bucket = null;
+				$index = 0;
 			}
 		}
 		if ($bucket !== null) {
-			$points[] = [(int) round($bucket['clock_sum'] / max(1, $bucket['n'])), round($bucket['min'], 4),
-				round($bucket['sum'] / max(1, $bucket['n']), 4), round($bucket['max'], 4)];
+			$points[] = $flush($bucket);
 		}
 		return $points;
 	}

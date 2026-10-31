@@ -3,7 +3,7 @@
   "id": "incident_timeline_graph",
   "name": "Incident Timeline Graph",
   "namespace": "IncidentTimeline",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "author": "Keberneth",
   "description": "Interactive multi-month incident timeline and top-triggers report with host/group/template/name filtering, severity charts, drill-down and export options.",
   "actions": {
@@ -18,10 +18,10 @@
   },
   "assets": {
     "css": [
-      "incident-timeline.css"
+      "incident-timeline-1.4.0.css"
     ],
     "js": [
-      "incident-timeline.js"
+      "incident-timeline-1.4.0.js"
     ]
   }
 }

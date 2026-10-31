@@ -27,10 +27,14 @@ class RunSync extends CController {
     protected function checkInput(): bool {
         $fields = [
             'force' => 'in 0,1',
-            'secret' => 'string'
+            'secret' => 'string',
+            'run_id' => 'string'
         ];
 
         $ret = $this->validateInput($fields);
+        if ($ret && array_key_exists('run_id', $_REQUEST)) {
+            $ret = preg_match('/\A[0-9a-f]{32}\z/i', (string) $_REQUEST['run_id']) === 1;
+        }
 
         if (!$ret) {
             $this->respond([
@@ -52,6 +56,11 @@ class RunSync extends CController {
 
     protected function doAction(): void {
         set_time_limit(300);
+        // Authentication and CSRF validation have completed. Keep their in-memory
+        // context while allowing this same browser session to poll RunStatus.
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
 
         try {
             $config = Config::get();
@@ -59,7 +68,8 @@ class RunSync extends CController {
 
             $options = [
                 'force' => Util::truthy($_REQUEST['force'] ?? false),
-                'source' => $is_super_admin ? 'ui' : 'runner'
+                'source' => $is_super_admin ? 'ui' : 'runner',
+                'run_id' => (string) ($_REQUEST['run_id'] ?? '')
             ];
 
             // A shared-secret request must not rely on the caller's session-bound
@@ -80,14 +90,18 @@ class RunSync extends CController {
                 $this->respond([
                     'ok' => false,
                     'error' => $error,
-                    'summary' => $summary
+                    'summary' => $summary,
+                    'summary_saved' => !empty($summary['summary_saved']),
+                    'progress' => $summary['progress'] ?? null
                 ], 500);
                 return;
             }
 
             $this->respond([
                 'ok' => true,
-                'summary' => $summary
+                'summary' => $summary,
+                'summary_saved' => !empty($summary['summary_saved']),
+                'progress' => $summary['progress'] ?? null
             ]);
         }
         catch (\InvalidArgumentException $e) {
@@ -111,19 +125,21 @@ class RunSync extends CController {
      * and the non-super-admin permission path.
      */
     private function hasValidSharedSecret(): bool {
+        $secret = $this->getProvidedSecret();
+        if ($secret === '') {
+            return false;
+        }
+
         try {
-            $config = Config::sanitizeForRuntime(Config::get());
+            $config = Config::get();
+            if (empty($config['runner']['enabled'])) {
+                return false;
+            }
+            $expected = Config::resolveSectionSecret($config['runner'] ?? [], 'shared_secret');
         }
         catch (\Throwable $e) {
             return false;
         }
-
-        if (empty($config['runner']['enabled'])) {
-            return false;
-        }
-
-        $secret = $this->getProvidedSecret();
-        $expected = trim((string) ($config['runner']['shared_secret'] ?? ''));
 
         return $secret !== '' && $expected !== '' && hash_equals($expected, $secret);
     }

@@ -72,6 +72,7 @@ function tc_eval_sanitize(array $result): array {
         'rules_evaluated' => (int) ($result['rules_evaluated'] ?? 0),
         'discovery_ok' => is_array($discovery) ? (bool) ($discovery['ok'] ?? true) : true,
         'persisted' => empty($result['persist_error']),
+        'error_count' => count((array) ($result['errors'] ?? [])),
         'rules' => $rules
     ];
 }
@@ -86,13 +87,14 @@ function tc_eval_sanitize_severity(array $result): array {
             'escalated' => (int) ($rule['escalated'] ?? 0),
             'restored' => (int) ($rule['restored'] ?? 0),
             'targets' => (int) ($rule['targets_count'] ?? 0),
-            'status' => !empty($rule['error']) ? 'error' : 'ok'
+            'status' => !empty($rule['error']) ? 'error' : (string) ($rule['status'] ?? 'ok')
         ];
     }
     return [
         'rules_total' => (int) ($result['rules_total'] ?? 0),
         'rules_evaluated' => (int) ($result['rules_evaluated'] ?? 0),
         'persisted' => empty($result['persist_error']),
+        'error_count' => count((array) ($result['errors'] ?? [])),
         'rules' => $rules
     ];
 }

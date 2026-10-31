@@ -7,6 +7,8 @@ namespace Modules\TriggerCorrelation\Lib;
 require_once __DIR__.'/Util.php';
 require_once __DIR__.'/CorrelationStore.php';
 require_once __DIR__.'/ZabbixApiClient.php';
+require_once __DIR__.'/RuleEngine.php';
+require_once __DIR__.'/RuleDefinition.php';
 
 final class CorrelationEvaluator {
     private const DEFAULT_DISCOVERY_KEY = 'trigger.correlation.discovery';
@@ -17,7 +19,9 @@ final class CorrelationEvaluator {
     private array $config;
     private array $settings;
     private ZabbixApiClient $api;
+    private bool $injectedApi;
     private array $hostIdCache = [];
+    private RuleEngine $engine;
     /** Current technical names of automatic correlation hosts: hostid → host ('' = gone). */
     private array $autoHostNames = [];
 
@@ -32,9 +36,21 @@ final class CorrelationEvaluator {
         $this->config = $store->load();
         $this->settings = $this->config['settings'];
         $this->api = $api ?? ZabbixApiClient::fromConfig($this->settings);
+        $this->injectedApi = $api !== null;
+        $this->engine = new RuleEngine($this->api, $this->settings);
     }
 
     public function evaluate(?string $ruleId = null): array {
+        return $this->store->withEvaluationLock('correlation', function () use ($ruleId): array {
+            $this->config = $this->store->load();
+            $this->settings = (array) $this->config['settings'];
+            if (!$this->injectedApi) { $this->api = ZabbixApiClient::fromConfig($this->settings); }
+            $this->engine = new RuleEngine($this->api, $this->settings);
+            return $this->evaluateUnlocked($ruleId);
+        });
+    }
+
+    private function evaluateUnlocked(?string $ruleId): array {
         $started = time();
         $rules = array_values((array) ($this->config['rules'] ?? []));
         $selectedRules = [];
@@ -88,6 +104,9 @@ final class CorrelationEvaluator {
                 'last_eventids' => $result['matched_eventids'],
                 'last_push_result' => $result['push_result']
             ];
+            foreach (['candidate_state', 'pending_state', 'pending_since', 'pending_seconds', 'status', 'last_successful', 'source_signature', 'source_members'] as $key) {
+                if (array_key_exists($key, $result)) { $runtime[$key] = $result[$key]; }
+            }
             if (isset($result['comment_state'])) {
                 $runtime['last_correlation_comment_sig'] = (string) ($result['comment_state']['last_correlation_comment_sig'] ?? '');
                 $runtime['last_correlation_eventid'] = (string) ($result['comment_state']['last_correlation_eventid'] ?? '');
@@ -152,169 +171,92 @@ final class CorrelationEvaluator {
         return 'lld|'.trim((string) ($o['receiver_host'] ?? '')).'|'.CorrelationStore::slug($id);
     }
 
-    private function evaluateRule(array $rule, int $clock): array {
-        $ruleId = (string) ($rule['id'] ?? '');
-        $name = (string) ($rule['name'] ?? $ruleId);
+    /** Read-only evaluation of a saved or unsaved draft. */
+    public function preview(array $rule): array {
         $enabled = (bool) ($rule['enabled'] ?? true);
-        $conditions = array_values((array) ($rule['conditions'] ?? []));
+        $inspection = $enabled ? $this->engine->inspectSources($rule)
+            : ['valid' => true, 'results' => [], 'conditions' => [], 'active_count' => 0, 'total' => 0,
+                'errors' => [], 'source_signature' => (string) ($rule['source_signature'] ?? '')];
+        $desired = $enabled && $inspection['valid']
+            ? self::resolveState((array) ($rule['output'] ?? []), $inspection['active_count'], $inspection['total']) : 0;
+        $rule['_source_signature'] = $inspection['source_signature'];
+        $timing = RuleEngine::timedState($rule, $desired, time());
+        if (!$enabled) {
+            $timing['status'] = 'disabled';
+            if (!(bool) ($this->settings['clear_disabled_rules'] ?? true)
+                    || (self::isAuto($rule) && empty($rule['output']['receiver_hostid']))) {
+                $timing['state'] = $timing['candidate_state'] = (int) ($rule['last_state'] ?? 0);
+            }
+        }
+        if (!$inspection['valid']) {
+            $timing = array_merge($timing, ['state' => (int) ($rule['last_state'] ?? 0), 'candidate_state' => null,
+                'status' => 'unknown', 'pending_since' => 0, 'pending_state' => null, 'pending_seconds' => 0]);
+        }
+        return $timing + ['conditions' => $inspection['results'], 'active_count' => $inspection['active_count'],
+            'total' => $inspection['total'], 'errors' => $inspection['errors'], 'targets' => [],
+            'selected_severities' => RuleDefinition::selectedSeverities((array) ($rule['output'] ?? [])),
+            'source_signature' => $inspection['source_signature'],
+            'source_members' => array_column($inspection['conditions'], 'triggerid')];
+    }
+
+    private function evaluateRule(array $rule, int $clock): array {
+        $previous = (int) ($rule['last_state'] ?? 0);
+        $enabled = (bool) ($rule['enabled'] ?? true);
         $output = (array) ($rule['output'] ?? []);
-        $state = (int) ($rule['last_state'] ?? 0);
-        $error = '';
-        $pending = false;
-        $conditionResults = [];
-        $matchedProblems = [];
-        $matchedEventIds = [];
-        $pushResult = null;
-        $commentState = null;
-
+        $base = ['id' => (string) ($rule['id'] ?? ''), 'name' => (string) ($rule['name'] ?? ''),
+            'enabled' => $enabled, 'state' => $previous, 'matched' => $previous !== 0,
+            'matched_eventids' => [], 'conditions' => [], 'push_result' => null, 'pending' => false,
+            'error' => '', 'comment_state' => null, 'last_successful' => (int) ($rule['last_successful'] ?? 0)];
+        if (!$enabled && (!(bool) ($this->settings['clear_disabled_rules'] ?? true)
+                || (self::isAuto($rule) && empty($output['receiver_hostid'])))) {
+            return $base + ['status' => 'disabled', 'pending_since' => 0, 'pending_state' => null, 'pending_seconds' => 0];
+        }
         try {
-            if (!$enabled && !(bool) ($this->settings['clear_disabled_rules'] ?? true)) {
-                return [
-                    'id' => $ruleId,
-                    'name' => $name,
-                    'enabled' => false,
-                    'state' => (int) ($rule['last_state'] ?? 0),
-                    'matched' => false,
-                    'matched_eventids' => [],
-                    'conditions' => [],
-                    'push_result' => null,
-                    'pending' => false,
-                    'error' => ''
-                ];
+            // Disabled rules must still clear, even if their old sources disappeared.
+            $preview = $enabled ? $this->preview($rule) : array_merge(RuleEngine::timedState($rule, 0, $clock),
+                ['conditions' => [], 'active_count' => 0, 'total' => 0, 'errors' => []]);
+            foreach (['conditions', 'candidate_state', 'pending_state', 'pending_since', 'pending_seconds', 'status', 'source_signature', 'source_members'] as $key) {
+                if (array_key_exists($key, $preview)) { $base[$key] = $preview[$key]; }
             }
-
-            if ($conditions === []) {
-                throw new \RuntimeException('Rule has no source trigger conditions.');
+            if ($preview['errors']) {
+                $base['error'] = implode(' ', $preview['errors']);
+                return $base;
             }
-
-            $activeCount = 0;
-            foreach ($conditions as $condition) {
-                $conditionResult = $this->evaluateCondition((array) $condition);
-                $conditionResults[] = $conditionResult;
-                if ($conditionResult['active']) {
-                    $activeCount++;
-                }
-                foreach ($conditionResult['problems'] as $problem) {
-                    $matchedProblems[] = $problem;
-                    if (isset($problem['eventid'])) {
-                        $matchedEventIds[] = (string) $problem['eventid'];
-                    }
-                }
+            $state = (int) $preview['state'];
+            $problems = [];
+            foreach ($preview['conditions'] as $condition) {
+                foreach ($condition['problems'] as $p) { $problems[] = $p; }
             }
-            $total = count($conditionResults);
-
-            $state = $enabled ? self::resolveState($output, $activeCount, $total) : 0;
-            $matched = $state !== 0;
-            $context = $this->buildContext($rule, $state, $matched, $conditionResults, $matchedProblems, $clock, $activeCount, $total);
-
+            $base['matched_eventids'] = array_values(array_unique(array_column($problems, 'eventid')));
+            $context = $this->buildContext($rule, $state, $state !== 0, $preview['conditions'], $problems, $clock, $preview['active_count'], $preview['total']);
             $push = $this->pushState($rule, $state, $context, $clock);
-            $pushResult = $push['result'];
+            $base['push_result'] = $push['result'];
             if (!$push['ok']) {
-                $pending = $push['pending'];
-                // "Not created yet" is only believable for a few minutes after the
-                // rule (or its correlation host) was set up.
-                // Since the later of: the host was set up, the rule was last saved
-                // (a new Correlation ID needs a fresh discovery too).
                 $since = max((int) ($output['provisioned_at'] ?? 0), (int) ($rule['updated_at'] ?? 0));
-                if ($pending && $since > 0 && $clock - $since > 300) {
-                    $pending = false;
-                    $error = 'The receiver item still does not accept data '.intdiv($clock - $since, 60).' minutes after the rule was saved — run the self-check in Settings: '.$push['error'];
-                }
-                else {
-                    $error = ($pending ? 'Setting up — Zabbix is still creating the correlation item (usually 1–2 minutes after the rule is saved): ' : '').$push['error'];
-                }
+                $pending = $push['pending'] && $since > 0 && $clock - $since <= 300;
+                $base['pending'] = $pending;
+                $base['status'] = $pending ? 'setting_up' : 'error';
+                $base['error'] = ($pending ? 'Setting up — waiting for Zabbix discovery: ' : 'Output was not applied: ').$push['error'];
+                return $base; // last_state always means a successfully applied state.
             }
-
-            // Best-effort comment injection — fully isolated so it can never turn a
-            // successful state push into a reported failure. Reset the throttle
-            // signatures when not matched so a future re-fire comments again.
-            if ($matched && $push['ok']) {
-                try {
-                    $commentState = $this->postComments($rule, $state, $matchedProblems);
-                }
-                catch (\Throwable $e) {
-                    $commentState = null;
-                }
+            $base['state'] = $state;
+            $base['matched'] = $state !== 0;
+            $base['last_successful'] = $clock;
+            if (!$enabled) { $base['status'] = 'disabled'; }
+            if ($state !== 0) {
+                try { $base['comment_state'] = $this->postComments($rule, $state, $problems); }
+                catch (\Throwable $e) { $base['error'] = 'State applied, but a problem comment failed: '.$e->getMessage(); $base['status'] = 'warning'; }
             }
             else {
-                $commentState = ['last_correlation_comment_sig' => '', 'last_correlation_eventid' => '', 'last_source_comment_sig' => ''];
+                $base['comment_state'] = ['last_correlation_comment_sig' => '', 'last_correlation_eventid' => '', 'last_source_comment_sig' => ''];
             }
         }
         catch (\Throwable $e) {
-            $error = $e->getMessage();
-            $pushResult = null;
+            $base['error'] = $e->getMessage();
+            $base['status'] = 'error';
+            $base['pending_since'] = 0; $base['pending_state'] = null; $base['pending_seconds'] = 0;
         }
-
-        return [
-            'id' => $ruleId,
-            'name' => $name,
-            'enabled' => $enabled,
-            'state' => $state,
-            'matched' => $state !== 0,
-            'matched_eventids' => array_values(array_unique($matchedEventIds)),
-            'conditions' => $conditionResults,
-            'push_result' => $pushResult,
-            'pending' => $pending,
-            'error' => $error,
-            'comment_state' => $commentState
-        ];
-    }
-
-    private function evaluateCondition(array $condition): array {
-        $triggerid = trim((string) ($condition['triggerid'] ?? ''));
-        $hostid = trim((string) ($condition['hostid'] ?? ''));
-        $host = trim((string) ($condition['host'] ?? ''));
-        $trigger = trim((string) ($condition['trigger'] ?? ''));
-
-        if ($triggerid === '') {
-            throw new \RuntimeException('A condition is missing its trigger selection for host '.$host.'.');
-        }
-
-        $problems = $this->api->activeProblemsForTrigger($triggerid, $hostid, $this->settings);
-        $minActive = max(0, (int) ($this->settings['min_active_seconds'] ?? 0));
-        $ignoreSymptoms = (bool) ($this->settings['ignore_symptoms'] ?? true);
-        $now = time();
-        $activeProblems = [];
-
-        foreach ($problems as $problem) {
-            $clock = (int) ($problem['clock'] ?? 0);
-            if ($minActive > 0 && $clock > 0 && ($now - $clock) < $minActive) {
-                continue;
-            }
-            $cause = (string) ($problem['cause_eventid'] ?? '');
-            // Defensive client-side fallback in case a Zabbix point release does
-            // not honor the problem.get 'symptom' filter.
-            if ($ignoreSymptoms && $cause !== '' && $cause !== '0') {
-                continue;
-            }
-            $activeProblems[] = [
-                'eventid' => (string) ($problem['eventid'] ?? ''),
-                'objectid' => (string) ($problem['objectid'] ?? ''),
-                'name' => (string) ($problem['name'] ?? $trigger),
-                'hostid' => $hostid,
-                'host' => $host,
-                'triggerid' => $triggerid,
-                'trigger' => $trigger,
-                'clock' => $clock,
-                'age_seconds' => $clock > 0 ? max(0, $now - $clock) : null,
-                'severity' => (string) ($problem['severity'] ?? ''),
-                'acknowledged' => (string) ($problem['acknowledged'] ?? ''),
-                'suppressed' => (string) ($problem['suppressed'] ?? ''),
-                'symptom' => ($cause !== '' && $cause !== '0') ? '1' : '0',
-                'cause_eventid' => $cause,
-                'tags' => (array) ($problem['tags'] ?? [])
-            ];
-        }
-
-        return [
-            'hostid' => $hostid,
-            'host' => $host,
-            'triggerid' => $triggerid,
-            'trigger' => $trigger,
-            'active' => count($activeProblems) > 0,
-            'problem_count' => count($activeProblems),
-            'problems' => $activeProblems
-        ];
+        return $base;
     }
 
     private function pushDiscovery(array $rules, ?string $ruleId, bool $includeManual = true, ?array $onlyHosts = null, bool $seedEmpty = false): array {
@@ -371,7 +313,8 @@ final class CorrelationEvaluator {
                 '{#CORRELATION.ID}' => $correlationId,
                 '{#CORRELATION.NAME}' => (string) ($rule['name'] ?? $correlationId),
                 '{#CORRELATION.DESCRIPTION}' => (string) ($rule['description'] ?? ''),
-                '{#CORRELATION.RULE_ID}' => (string) ($rule['id'] ?? '')
+                '{#CORRELATION.RULE_ID}' => (string) ($rule['id'] ?? ''),
+                '{#CORRELATION.SEVERITIES}' => implode(',', RuleDefinition::selectedSeverities($output))
             ];
         }
 

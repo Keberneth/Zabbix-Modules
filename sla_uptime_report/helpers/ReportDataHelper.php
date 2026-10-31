@@ -7,6 +7,11 @@ use CSettingsHelper;
 use CTimezoneHelper;
 use CWebUser;
 
+/** A bounded scan is incomplete evidence, never an empty or healthy interval. */
+class HistoryScanLimitException extends \RuntimeException {}
+/** A time slice can be retried in smaller pieces without declaring the item incomplete. */
+class HistorySliceLimitException extends HistoryScanLimitException {}
+
 class ReportDataHelper {
 
 	public const SLA_MONTHS = 12;
@@ -20,6 +25,8 @@ class ReportDataHelper {
 	public const MAX_SLAS = 200;
 	public const MAX_GROUP_OPTIONS = 500;
 	public const FETCH_BATCH = 2000;
+	public const HISTORY_PAGE_SIZE = 10000;
+	private const HISTORY_WINDOW_ROWS = 30000;
 
 	/**
 	 * Rows PROCESSED (not retained - the scan is streaming) before the history
@@ -62,6 +69,31 @@ class ReportDataHelper {
 
 	/** @var array<string,string> */
 	private array $notes = [];
+	private bool $force_refresh;
+	private ?HistoryCache $history_cache = null;
+	private ?HistoryCache $trend_cache = null;
+	private array $authorized_history = [];
+	private array $cache_stats = ['enabled' => false, 'available' => false, 'hits' => 0, 'misses' => 0,
+		'rows_reused' => 0, 'rows_fetched' => 0, 'queries' => 0, 'forced' => false, 'reason' => 'not_needed'];
+
+	public function __construct(bool $force_refresh = false) {
+		$this->force_refresh = $force_refresh;
+		$this->cache_stats['forced'] = $force_refresh;
+	}
+
+	/** Only inexpensive permission-filtered options are needed before the page can be displayed. */
+	public function buildShell(array $filter, int $time_from, int $time_to): array {
+		$report = $this->emptyReport($filter);
+		$report['period'] = ['from' => $time_from, 'to' => $time_to,
+			'days' => max(1, (int) ceil(($time_to - $time_from + 1) / 86400)),
+			'label' => $this->formatPeriodLabel($time_from, $time_to)];
+		$report['group_options'] = $this->getGroupOptions();
+		$report['sla_options'] = $this->getSlaOptions();
+		$report['selected_groupids'] = array_values(array_intersect($filter['hostgroupids'], array_column($report['group_options'], 'groupid')));
+		$report['selected_slaids'] = array_values(array_intersect($filter['slaids'], array_column($report['sla_options'], 'slaid')));
+		$report['cache'] = $this->cache_stats + ['generated_at' => time()];
+		return $report;
+	}
 
 	/** @return array<int,string> */
 	public function getNotes(): array {
@@ -168,6 +200,10 @@ class ReportDataHelper {
 	 */
 	private static function clampRange(array $range): array {
 		[$from, $to] = $range;
+		$to = min($to, time());
+		if ($from <= 0 || $from > $to) {
+			throw new \InvalidArgumentException('The report period must include past or current time.');
+		}
 		$max_seconds = self::MAX_RANGE_DAYS * 86400;
 
 		if (($to - $from) > $max_seconds) {
@@ -236,6 +272,7 @@ class ReportDataHelper {
 		$report['daily'] = $availability['daily'];
 		$report['availability_health'] = $availability['health'];
 		$report['maintenance'] = $availability['maintenance'];
+		$report['source_used'] = $availability['source_used'] ?? $report['source_used'];
 
 		$slas = ($filter['slaids'] !== [] && $report['selected_slaids'] === [])
 			? ['slas' => [], 'summary' => $report['sla_summary']]
@@ -246,6 +283,7 @@ class ReportDataHelper {
 		$report['cards'] = $this->buildCards($report, $filter);
 		$report['attention'] = $this->buildAttention($report, $filter);
 		$report['warnings'] = array_merge($report['warnings'], $this->getNotes());
+		$report['cache'] = $this->cache_stats + ['generated_at' => time()];
 
 		return $report;
 	}
@@ -282,8 +320,8 @@ class ReportDataHelper {
 	 */
 	private static function emptyFleet(): array {
 		return [
-			'avg' => null, 'hosts_total' => 0, 'with_data' => 0, 'below_target' => 0,
-			'na' => 0, 'downtime_seconds' => 0, 'worst_host' => null, 'worst_pct' => null,
+			'avg' => null, 'hosts_total' => 0, 'measurements_total' => 0, 'with_data' => 0, 'below_target' => 0,
+			'na' => 0, 'partial_data' => 0, 'downtime_seconds' => 0, 'worst_host' => null, 'worst_pct' => null,
 			'maintenance_seconds' => 0, 'maintenance_hosts' => 0, 'maintenance_only' => 0
 		];
 	}
@@ -441,18 +479,25 @@ class ReportDataHelper {
 		if (!is_array($hosts) || $hosts === []) {
 			return $empty;
 		}
+		$settings = ReportSettings::get();
+		$before_exclusions = count($hosts);
+		$hosts = array_values(array_filter($hosts, static fn(array $host): bool =>
+			!ReportSettings::isExcluded($settings, (string) $host['hostid'],
+				array_column($host['hostgroups'] ?? [], 'groupid'))));
+		if (count($hosts) < $before_exclusions) {
+			$this->addNote(_s('%1$d hosts were excluded by report settings. Exclusions apply to host availability, not Zabbix service SLAs.',
+				$before_exclusions - count($hosts)));
+		}
 
 		if (count($hosts) > self::MAX_HOSTS) {
 			$hosts = array_slice($hosts, 0, self::MAX_HOSTS);
 			$this->addNote(_s('Availability is limited to the first %1$d hosts; narrow the host group filter to see the rest.', self::MAX_HOSTS));
 		}
 
-		$host_rows = [];
-		$hostids = [];
+		$host_base = [];
 		$host_group_names = [];
 		foreach ($hosts as $host) {
 			$hostid = (string) $host['hostid'];
-			$hostids[] = $hostid;
 
 			$names = [];
 			$host_group_names[$hostid] = [];
@@ -464,7 +509,7 @@ class ReportDataHelper {
 				$host_group_names[$hostid][] = (string) $group['name'];
 			}
 
-			$host_rows[$hostid] = [
+			$host_base[$hostid] = [
 				'hostid' => $hostid,
 				'host' => (string) (($host['name'] ?? '') !== '' ? $host['name'] : $host['host']),
 				'enabled' => (int) ($host['status'] ?? 0) === 0,
@@ -475,50 +520,31 @@ class ReportDataHelper {
 				'uptime_seconds' => 0,
 				'downtime_seconds' => 0,
 				'maintenance_seconds' => 0,
+				'coverage_pct' => null,
+				'source' => '',
 				'spark' => []
 			];
 		}
 
-		// Resolve one availability item per host (key priority order).
-		$priority = array_flip(self::AVAILABILITY_ITEM_KEYS);
-		$items_by_host = [];
-
-		foreach (array_chunk($hostids, self::ITEM_HOST_CHUNK) as $hostid_chunk) {
-			$items = API::Item()->get([
-				'output' => ['itemid', 'hostid', 'key_', 'delay'],
-				'hostids' => $hostid_chunk,
-				'filter' => ['key_' => self::AVAILABILITY_ITEM_KEYS]
-			]);
-
-			if (!is_array($items)) {
-				continue;
-			}
-
-			foreach ($items as $item) {
-				$hostid = (string) $item['hostid'];
-				$itemid = (string) $item['itemid'];
-				$rank = $priority[(string) $item['key_']] ?? PHP_INT_MAX;
-				$current = $items_by_host[$hostid] ?? null;
-
-				if ($current === null
-						|| $rank < $current['priority']
-						|| ($rank === $current['priority'] && strcmp($itemid, $current['itemid']) < 0)) {
-					$items_by_host[$hostid] = [
-						'itemid' => $itemid,
-						'hostid' => $hostid,
-						'key_' => (string) $item['key_'],
-						'delay' => isset($item['delay']) ? (string) $item['delay'] : null,
-						'priority' => $rank
-					];
-				}
+		$host_rows = $items_by_measurement = [];
+		foreach (ReportSettings::selectMeasurements($hosts, $settings) as $id => $measurement) {
+			$host_rows[$id] = $host_base[$measurement['hostid']] + [
+				'measurementid' => $id, 'measurement_label' => $measurement['label']
+			];
+			if ($measurement['item'] !== null) {
+				$host_rows[$id]['item_key'] = $measurement['item']['key_'];
+				// Measurement accumulators are keyed independently, even when checks share a host.
+				// Only API item IDs are used for history/trend lookup; real host IDs stay on display rows.
+				$items_by_measurement[$id] = array_replace($measurement['item'], ['hostid' => $id]);
 			}
 		}
-
-		foreach ($items_by_host as $hostid => $item) {
-			if (isset($host_rows[$hostid])) {
-				$host_rows[$hostid]['item_key'] = $item['key_'];
-			}
-		}
+		// Raw values may be shared only after this request has resolved items through the viewer's API permissions.
+		// Rules, exclusions and maintenance are always reloaded and applied to those values on every report.
+		require_once __DIR__.'/HistoryCache.php';
+		$this->authorized_history = array_fill_keys(array_map('strval', array_column($items_by_measurement, 'itemid')), true);
+		$this->history_cache = new HistoryCache(['enabled' => (bool) ($settings['cache']['enabled'] ?? true)]);
+		$this->trend_cache = new HistoryCache(['enabled' => (bool) ($settings['cache']['enabled'] ?? true), 'kind' => 'trend']);
+		$this->cache_stats['enabled'] = (bool) ($settings['cache']['enabled'] ?? true);
 
 		// Each host's downtime is charged to its FIRST group in the daily
 		// chart, so the stacked total equals the real downtime, not a multiple.
@@ -532,24 +558,44 @@ class ReportDataHelper {
 		// Maintenance windows are accepted downtime: both measurement paths
 		// leave them out of each host's measured time.
 		$maintenance = $this->getMaintenanceWindows(
-			array_intersect_key($host_group_names, $items_by_host),
+			$host_group_names,
 			$time_from,
 			$time_to
 		);
+		$measurement_maintenance = [];
+		foreach ($host_rows as $id => $row) {
+			$measurement_maintenance[$id] = $maintenance['hosts'][$row['hostid']] ?? [];
+		}
 
-		$measured = (($time_to - $time_from) > self::TRENDS_THRESHOLD_SECONDS)
-			? $this->availabilityFromTrends(array_values($items_by_host), $time_from, $time_to, $group_of_host,
-				$maintenance['hosts'])
-			: $this->availabilityFromHistory(array_values($items_by_host), $time_from, $time_to, $group_of_host,
-				$maintenance['hosts']);
+		$history_items = $trend_items = [];
+		foreach ($items_by_measurement as $hostid => $item) {
+			$use_history = self::usesHistory($item, $time_from, $time_to);
+			$host_rows[$hostid]['source'] = $use_history ? 'history' : 'trends';
+			if ($use_history) { $history_items[] = $item; }
+			else { $trend_items[] = $item; }
+		}
+		$measured = $this->availabilityFromHistory($history_items, $time_from, $time_to, $group_of_host, $measurement_maintenance);
+		$trended = $this->availabilityFromTrends($trend_items, $time_from, $time_to, $group_of_host, $measurement_maintenance);
+		$measured['hosts'] += $trended['hosts'];
+		foreach ($trended['group_daily'] as $group => $days) {
+			foreach ($days as $date => $minutes) {
+				$measured['group_daily'][$group][$date] = ($measured['group_daily'][$group][$date] ?? 0) + $minutes;
+			}
+		}
+		if ($history_items !== [] && $time_to - $time_from > self::TRENDS_THRESHOLD_SECONDS) {
+			$this->addNote(_('Custom value comparisons and floating-point items use retained raw history even for long periods. Hourly averages cannot establish response-code or range availability.'));
+		}
 		$group_daily = $measured['group_daily'];
 
 		// Merge measurements into the host rows.
 		foreach ($host_rows as $hostid => $row) {
 			$info = $measured['hosts'][$hostid] ?? null;
+			$host_rows[$hostid]['maintenance_seconds'] = self::overlapSeconds($measurement_maintenance[$hostid], $time_from, $time_to + 1);
+			$host_rows[$hostid]['coverage_pct'] = $info['coverage_pct'] ?? null;
 
 			if ($row['item_key'] === null) {
-				$host_rows[$hostid]['state'] = 'noitem';
+				$host_rows[$hostid]['state'] = $host_rows[$hostid]['maintenance_seconds'] >= $time_to - $time_from + 1
+					? 'maint' : 'noitem';
 				continue;
 			}
 
@@ -575,6 +621,7 @@ class ReportDataHelper {
 				'name' => $group_name,
 				'token' => ChartRenderer::seriesToken($slot_map[$group_name] ?? 0),
 				'hosts_total' => 0,
+				'measurements_total' => 0,
 				'with_data' => 0,
 				'avg' => null,
 				'bands' => ['ok' => 0, 'warn' => 0, 'bad' => 0, 'na' => 0],
@@ -586,6 +633,7 @@ class ReportDataHelper {
 			];
 		}
 
+		$group_hosts = [];
 		foreach ($host_rows as $row) {
 			foreach ($row['groups'] as $group_name) {
 				if (!isset($group_rollups[$group_name])) {
@@ -593,7 +641,11 @@ class ReportDataHelper {
 				}
 
 				$rollup = &$group_rollups[$group_name];
-				$rollup['hosts_total']++;
+				if (!isset($group_hosts[$group_name][$row['hostid']])) {
+					$rollup['hosts_total']++;
+					$group_hosts[$group_name][$row['hostid']] = true;
+				}
+				$rollup['measurements_total']++;
 				$rollup['rows'][] = $row;
 
 				if ($row['pct'] === null) {
@@ -607,7 +659,7 @@ class ReportDataHelper {
 
 					if ($rollup['worst_pct'] === null || $row['pct'] < $rollup['worst_pct']) {
 						$rollup['worst_pct'] = $row['pct'];
-						$rollup['worst_host'] = $row['host'];
+						$rollup['worst_host'] = self::measurementName($row);
 					}
 				}
 				unset($rollup);
@@ -647,12 +699,14 @@ class ReportDataHelper {
 		ksort($group_rollups, SORT_NATURAL | SORT_FLAG_CASE);
 
 		// ---- fleet ----------------------------------------------------------
-		$fleet = ['hosts_total' => count($host_rows)] + self::emptyFleet();
+		$fleet = ['hosts_total' => count($hosts), 'measurements_total' => count($host_rows)] + self::emptyFleet();
 		$values = [];
+		$maintenance_hosts = [];
 		foreach ($host_rows as $row) {
-			if ((int) $row['maintenance_seconds'] > 0) {
+			if ((int) $row['maintenance_seconds'] > 0 && !isset($maintenance_hosts[$row['hostid']])) {
 				$fleet['maintenance_seconds'] += (int) $row['maintenance_seconds'];
 				$fleet['maintenance_hosts']++;
+				$maintenance_hosts[$row['hostid']] = true;
 			}
 
 			if ($row['state'] === 'maint') {
@@ -666,6 +720,7 @@ class ReportDataHelper {
 			}
 
 			$fleet['with_data']++;
+			if ($row['coverage_pct'] !== null && $row['coverage_pct'] < 99.9999) { $fleet['partial_data']++; }
 			$values[] = (float) $row['pct'];
 			$fleet['downtime_seconds'] += (int) $row['downtime_seconds'];
 			if ($row['pct'] < $target) {
@@ -673,10 +728,13 @@ class ReportDataHelper {
 			}
 			if ($fleet['worst_pct'] === null || $row['pct'] < $fleet['worst_pct']) {
 				$fleet['worst_pct'] = $row['pct'];
-				$fleet['worst_host'] = $row['host'];
+				$fleet['worst_host'] = self::measurementName($row);
 			}
 		}
 		$fleet['avg'] = $values !== [] ? array_sum($values) / count($values) : null;
+		if ($fleet['partial_data'] > 0) {
+			$this->addNote(_s('%1$d availability checks have incomplete data coverage. Review coverage and measurement evidence before interpreting their availability.', $fleet['partial_data']));
+		}
 
 		// ---- daily downtime, stacked by group -------------------------------
 		$daily = $this->buildDailyFromGroups($group_daily, $group_rollups);
@@ -699,6 +757,8 @@ class ReportDataHelper {
 
 		return [
 			'groups' => array_values($group_rollups),
+			'source_used' => $history_items !== [] ? ($trend_items !== [] ? 'mixed' : 'history')
+				: ($trend_items !== [] || $time_to - $time_from > self::TRENDS_THRESHOLD_SECONDS ? 'trends' : 'history'),
 			'fleet' => $fleet,
 			'daily' => $daily,
 			'health' => $health,
@@ -790,11 +850,27 @@ class ReportDataHelper {
 		return ($value >= 0.5 && $value < 1.5) ? 1.0 : 0.0;
 	}
 
+	public static function usesHistory(array $item, int $from, int $to): bool {
+		return $to - $from <= self::TRENDS_THRESHOLD_SECONDS
+			|| (int) ($item['value_type'] ?? 3) !== 3
+			|| in_array($item['rule']['mode'] ?? 'auto', ['equals', 'range'], true);
+	}
+
+	public static function sourceLabel(string $source): string {
+		return $source === 'mixed' ? _('Raw history and hourly trends')
+			: ($source === 'trends' ? _('Hourly trends') : _('Raw history'));
+	}
+
+	public static function measurementName(array $row): string {
+		$label = (string) ($row['measurement_label'] ?? '');
+		return $label !== '' && $label !== $row['host'] ? $row['host'].' / '.$label : $row['host'];
+	}
+
 	/**
-	 * Raw-history availability for short windows (<= TRENDS_THRESHOLD_SECONDS).
+	 * Raw-history availability for short windows and all custom healthy-value rules.
 	 *
-	 * STREAMING: each page of rows is folded into per-item counters and
-	 * discarded, so memory is O(items x days-in-window), never O(rows).
+	 * Bounded per-item slices are read through the numeric cache and folded into
+	 * counters. Memory includes at most a bounded slice and its weekly cache shard.
 	 * Availability per item = ok samples / expected samples, where expected =
 	 * max(observed, window / interval) - a polling gap counts as downtime.
 	 * An item with zero samples reports null (no data), never 0%.
@@ -806,8 +882,8 @@ class ReportDataHelper {
 	 * Keyset pagination detail: a full page may cut a run of same-clock rows
 	 * in half, so on a full page the rows carrying the final clock are NOT
 	 * processed and the cursor is set to that clock - they are re-read intact
-	 * on the next page. Progress is guaranteed because one chunk can produce
-	 * at most HISTORY_ITEM_CHUNK rows per second, which is below FETCH_BATCH.
+	 * on the next page. A timestamp too dense to fit a page stops the scan and
+	 * marks the incomplete measurement as no data rather than caching a partial result.
 	 *
 	 * @param array<int,array{itemid:string,hostid:string,delay:?string}> $items
 	 * @param array<string,string> $group_of_host hostid => charged group name
@@ -825,6 +901,8 @@ class ReportDataHelper {
 		$itemids = [];
 		$host_by_item = [];
 		$delay_by_item = [];
+		$rules = [];
+		$complete = [];
 		$state = [];
 
 		foreach ($items as $item) {
@@ -832,6 +910,8 @@ class ReportDataHelper {
 			$itemids[] = $itemid;
 			$host_by_item[$itemid] = (string) $item['hostid'];
 			$delay_by_item[$itemid] = $item['delay'] ?? null;
+			$rules[$itemid] = $item['rule'] ?? ['mode' => 'auto'];
+			$complete[$itemid] = false;
 			$state[$itemid] = [
 				'ok' => 0,
 				'seen' => 0,
@@ -845,38 +925,46 @@ class ReportDataHelper {
 		$processed = 0;
 		$limit_reached = false;
 
-		foreach (array_chunk($itemids, self::HISTORY_ITEM_CHUNK) as $itemid_chunk) {
+		foreach ($items as $item) {
+			if ($processed >= self::MAX_HISTORY_ROWS) { $limit_reached = true; break; }
+			$itemid = (string) $item['itemid'];
 			$cursor = $time_from;
-
-			do {
-				$batch = API::History()->get([
-					'output' => ['itemid', 'clock', 'value'],
-					'itemids' => $itemid_chunk,
-					'history' => ITEM_VALUE_TYPE_UINT64,
-					'time_from' => $cursor,
-					'time_till' => $time_to,
-					'sortfield' => 'clock',
-					'sortorder' => 'ASC',
-					'limit' => self::FETCH_BATCH
-				]);
-
-				if (!is_array($batch) || $batch === []) {
-					break;
+			// One item per query follows the history (itemid, clock, ns) index instead of sorting
+			// many items across the remaining month. Bounded slices keep both cached and live memory finite.
+			$hint = $this->inferIntervalFromDeltas([], $item['delay'] ?? null);
+			$span = min(7 * 86400, max(3600, max(1, $hint) * 10000));
+			while ($cursor <= $time_to) {
+				$until = min($time_to, $cursor + $span - 1);
+				$budget = min(self::HISTORY_WINDOW_ROWS, self::MAX_HISTORY_ROWS - $processed);
+				$loader = function(int $start, int $end) use ($item, $budget): array {
+					return $this->loadHistoryRange($item, $start, $end, $budget);
+				};
+				try {
+					if ($this->history_cache !== null && isset($this->authorized_history[$itemid])) {
+						$loaded = $this->history_cache->fetchRange($itemid, (int) ($item['value_type'] ?? 3),
+							$cursor, $until, true, $loader, $this->force_refresh);
+						$batch = $loaded['rows'];
+						$this->recordCacheMeta($loaded['meta']);
+					}
+					else { $batch = $loader($cursor, $until); }
+					if (count($batch) > $budget) { throw new HistorySliceLimitException('History slice row budget exceeded.'); }
 				}
-
-				$full_page = count($batch) >= self::FETCH_BATCH;
-				$last_clock = (int) $batch[count($batch) - 1]['clock'];
-
-				foreach ($batch as $row) {
-					$clock = (int) $row['clock'];
-
-					// A full page may split a same-second run; leave that
-					// second for the next page so no row is lost.
-					if ($full_page && $clock >= $last_clock) {
+				catch (HistorySliceLimitException $e) {
+					if ($until > $cursor && $budget === self::HISTORY_WINDOW_ROWS) {
+						// Web/dependent items often advertise delay=0. Shrink the window when the
+						// actual cadence is faster than our hint; no partial slice enters the totals.
+						$span = max(1, intdiv($until - $cursor + 1, 2));
 						continue;
 					}
-
-					$itemid = (string) $row['itemid'];
+					$limit_reached = true;
+					break 2;
+				}
+				catch (HistoryScanLimitException $e) {
+					$limit_reached = true;
+					break 2;
+				}
+				foreach ($batch as $row) {
+					$clock = (int) $row['clock'];
 					$item_state = &$state[$itemid];
 
 					// The polling cadence is the same inside maintenance, so
@@ -903,7 +991,7 @@ class ReportDataHelper {
 
 					if (!$in_maintenance) {
 						$item_state['seen']++;
-						if ($this->sampleUp((float) $row['value']) >= 1.0) {
+						if (ReportSettings::sampleIsUp((float) $row['value'], $rules[$itemid])) {
 							$item_state['ok']++;
 							$date = gmdate('Y-m-d', $clock);
 							$item_state['days'][$date] = ($item_state['days'][$date] ?? 0) + 1;
@@ -914,26 +1002,17 @@ class ReportDataHelper {
 					$processed++;
 				}
 
-				if ($processed >= self::MAX_HISTORY_ROWS) {
+				$cursor = $until + 1;
+				if ($processed >= self::MAX_HISTORY_ROWS && $cursor <= $time_to) {
 					$limit_reached = true;
-					break;
+					break 2;
 				}
-
-				if (!$full_page || $last_clock >= $time_to) {
-					break;
-				}
-
-				$cursor = $last_clock;
 			}
-			while (true);
-
-			if ($limit_reached) {
-				break;
-			}
+			$complete[$itemid] = true;
 		}
 
 		if ($limit_reached) {
-			$this->addNote(_s('The history scan stopped after %1$s samples. Hosts scanned before the stop are exact; the rest report "no data". Narrow the host group filter for a complete scan.', self::MAX_HISTORY_ROWS));
+			$this->addNote(_('The history scan reached its row limit or could not advance past a dense timestamp. Incomplete host batches report no data; narrow the period or host selection.'));
 		}
 
 		foreach ($itemids as $itemid) {
@@ -944,7 +1023,7 @@ class ReportDataHelper {
 			$measured_seconds = max(0, $window_seconds - $maintenance_seconds);
 			$interval = $this->inferIntervalFromDeltas($item_state['deltas'], $delay_by_item[$itemid] ?? null);
 
-			if ($item_state['seen'] === 0) {
+			if (!$complete[$itemid] || $item_state['seen'] === 0) {
 				// Zero samples is "no data", never "0% available" - the row
 				// cap, a dead item and a decommissioned host all look the
 				// same here, and inventing a hard-down verdict for them
@@ -954,6 +1033,7 @@ class ReportDataHelper {
 				$result['hosts'][$hostid] = [
 					'pct' => null, 'uptime_seconds' => 0, 'downtime_seconds' => 0,
 					'maintenance_seconds' => $maintenance_seconds,
+					'coverage_pct' => $complete[$itemid] && $measured_seconds > 0 ? 0.0 : null,
 					'maintenance_only' => $maintenance_seconds > 0 && $measured_seconds < $interval,
 					'spark' => []
 				];
@@ -999,11 +1079,51 @@ class ReportDataHelper {
 				'uptime_seconds' => max(0, min($measured_seconds, $uptime_seconds)),
 				'downtime_seconds' => max(0, $measured_seconds - $uptime_seconds),
 				'maintenance_seconds' => $maintenance_seconds,
+				'coverage_pct' => $expected > 0 ? min(100.0, 100.0 * $item_state['seen'] / $expected) : null,
 				'spark' => $spark
 			];
 		}
 
 		return $result;
+	}
+
+	/** Return only a completely scanned slice. Cache coverage must never be written for a partial scan. */
+	private function loadHistoryRange(array $item, int $from, int $to, int $budget): array {
+		$rows = [];
+		$cursor = $from;
+		do {
+			$this->cache_stats['queries']++;
+			$batch = API::History()->get([
+				'output' => ['itemid', 'clock', 'value', 'ns'], 'itemids' => [(string) $item['itemid']],
+				'history' => (int) ($item['value_type'] ?? 3), 'time_from' => $cursor, 'time_till' => $to,
+				'sortfield' => 'clock', 'sortorder' => 'ASC', 'limit' => self::HISTORY_PAGE_SIZE
+			]);
+			if (!is_array($batch)) { throw new \RuntimeException('Availability history could not be read.'); }
+			if ($batch === []) { return $rows; }
+			$full = count($batch) >= self::HISTORY_PAGE_SIZE;
+			$last = (int) $batch[count($batch) - 1]['clock'];
+			if ($full && $last <= $cursor) { throw new HistoryScanLimitException('History timestamp cannot be scanned completely.'); }
+			foreach ($batch as $row) {
+				$clock = (int) $row['clock'];
+				if ($full && $clock >= $last) { continue; } // Re-read the whole final second on the next page.
+				if ($clock < $cursor || $clock > $to || (isset($row['itemid']) && (string) $row['itemid'] !== (string) $item['itemid'])) {
+					throw new \RuntimeException('Unexpected history item or timestamp.');
+				}
+				$rows[] = $row;
+				if (count($rows) > $budget) { throw new HistorySliceLimitException('History slice row budget exceeded.'); }
+			}
+			if (!$full) { return $rows; }
+			$cursor = $last;
+		} while (true);
+	}
+
+	private function recordCacheMeta(array $meta): void {
+		$this->cache_stats['available'] = (bool) ($meta['backend_available'] ?? false);
+		$this->cache_stats['hits'] += (int) ($meta['hits'] ?? 0);
+		$this->cache_stats['misses'] += (int) ($meta['misses'] ?? 0);
+		$this->cache_stats['rows_reused'] += (int) ($meta['rows_cached'] ?? 0);
+		$this->cache_stats['rows_fetched'] += (int) ($meta['rows_fetched'] ?? 0);
+		$this->cache_stats['reason'] = (string) ($meta['reason'] ?? '');
 	}
 
 	/**
@@ -1039,11 +1159,9 @@ class ReportDataHelper {
 			return $result;
 		}
 
-		$itemids = [];
 		$host_by_item = [];
 		$spark_hosts = [];
 		foreach ($items as $item) {
-			$itemids[] = (string) $item['itemid'];
 			$host_by_item[(string) $item['itemid']] = (string) $item['hostid'];
 			if (count($spark_hosts) < self::MAX_SPARK_HOSTS) {
 				$spark_hosts[(string) $item['hostid']] = true;
@@ -1054,26 +1172,12 @@ class ReportDataHelper {
 			$this->addNote(_s('Daily trend sparklines are drawn for the first %1$d hosts; totals and charts cover every host.', self::MAX_SPARK_HOSTS));
 		}
 
-		$hours_in_window = max(1, (int) ceil($window_seconds / 3600));
-		$chunk_size = max(1, min(1000, (int) floor(self::TREND_ROWS_PER_CALL / $hours_in_window)));
-
 		$up_hours = [];
 		$covered_hours = [];
 		$spark_up = [];
 		$spark_covered = [];
 
-		foreach (array_chunk($itemids, $chunk_size) as $itemid_chunk) {
-			$trends = API::Trend()->get([
-				'output' => ['itemid', 'clock', 'value_avg'],
-				'itemids' => $itemid_chunk,
-				'time_from' => $time_from,
-				'time_till' => $time_to
-			]);
-
-			if (!is_array($trends)) {
-				continue;
-			}
-
+		foreach ($this->trendBatches($items, $time_from, $time_to) as $trends) {
 			foreach ($trends as $trend) {
 				$itemid = (string) $trend['itemid'];
 				if (!isset($host_by_item[$itemid])) {
@@ -1086,21 +1190,28 @@ class ReportDataHelper {
 					continue;
 				}
 
-				$value = $this->sampleUp((float) $trend['value_avg']);
+				if (isset($trend['num']) && (int) $trend['num'] <= 0) { continue; }
+				// Only an hour containing exclusively healthy binary values is up.
+				// An average of 1 can also be a mixture of unknown (0) and unavailable (2).
+				$value = isset($trend['value_min'], $trend['value_max'])
+					? ((float) $trend['value_min'] === 1.0 && (float) $trend['value_max'] === 1.0 ? 1.0 : 0.0)
+					: $this->sampleUp((float) $trend['value_avg']);
+				$seconds = max(0, min($time_to + 1, (int) $trend['clock'] + 3600)
+					- max($time_from, (int) $trend['clock']));
 				$date = gmdate('Y-m-d', (int) $trend['clock']);
 
-				$up_hours[$hostid] = ($up_hours[$hostid] ?? 0.0) + $value;
-				$covered_hours[$hostid] = ($covered_hours[$hostid] ?? 0) + 1;
+				$up_hours[$hostid] = ($up_hours[$hostid] ?? 0.0) + $value * $seconds;
+				$covered_hours[$hostid] = ($covered_hours[$hostid] ?? 0) + $seconds;
 
 				$group = $group_of_host[$hostid] ?? null;
 				if ($group !== null && $value < 1.0) {
 					$result['group_daily'][$group][$date] =
-						($result['group_daily'][$group][$date] ?? 0.0) + (1.0 - $value) * 60.0;
+						($result['group_daily'][$group][$date] ?? 0.0) + (1.0 - $value) * $seconds / 60.0;
 				}
 
 				if (isset($spark_hosts[$hostid])) {
-					$spark_up[$hostid][$date] = ($spark_up[$hostid][$date] ?? 0.0) + $value;
-					$spark_covered[$hostid][$date] = ($spark_covered[$hostid][$date] ?? 0) + 1;
+					$spark_up[$hostid][$date] = ($spark_up[$hostid][$date] ?? 0.0) + $value * $seconds;
+					$spark_covered[$hostid][$date] = ($spark_covered[$hostid][$date] ?? 0) + $seconds;
 				}
 			}
 
@@ -1111,7 +1222,11 @@ class ReportDataHelper {
 			$hostid = (string) $item['hostid'];
 			$covered = $covered_hours[$hostid] ?? 0;
 			$maintenance_seconds = self::overlapSeconds($maintenance[$hostid] ?? [], $time_from, $time_to + 1);
-			$measured_seconds = max(0, $window_seconds - $maintenance_seconds);
+			$rounded_windows = array_map(static fn(array $w): array => [
+				(int) (floor($w[0] / 3600) * 3600), (int) (ceil($w[1] / 3600) * 3600)
+			], $maintenance[$hostid] ?? []);
+			$eligible_seconds = max(0, $window_seconds - self::overlapSeconds(self::mergeWindows($rounded_windows), $time_from, $time_to + 1));
+			$measured_seconds = $covered;
 
 			if ($covered === 0) {
 				// Less than an hour outside maintenance cannot hold a single
@@ -1119,7 +1234,8 @@ class ReportDataHelper {
 				$result['hosts'][$hostid] = [
 					'pct' => null, 'uptime_seconds' => 0, 'downtime_seconds' => 0,
 					'maintenance_seconds' => $maintenance_seconds,
-					'maintenance_only' => $maintenance_seconds > 0 && $measured_seconds < 3600,
+					'coverage_pct' => $eligible_seconds > 0 ? 0.0 : null,
+					'maintenance_only' => $maintenance_seconds > 0 && $eligible_seconds === 0,
 					'spark' => []
 				];
 				continue;
@@ -1145,11 +1261,86 @@ class ReportDataHelper {
 				'uptime_seconds' => max(0, min($measured_seconds, $uptime_seconds)),
 				'downtime_seconds' => max(0, $measured_seconds - $uptime_seconds),
 				'maintenance_seconds' => $maintenance_seconds,
+				'coverage_pct' => $eligible_seconds > 0 ? min(100.0, 100.0 * $covered / $eligible_seconds) : null,
 				'spark' => $spark
 			];
 		}
 
 		return $result;
+	}
+
+	/** Batch cold trend reads across authorized items while retaining per-item incremental coverage. */
+	private function trendBatches(array $items, int $from, int $to): \Generator {
+		if ($items === []) { return; }
+		$from = (int) (floor($from / 3600) * 3600);
+		$itemids = array_map('strval', array_column($items, 'itemid'));
+		$fetch = function(array $ids, int $start, int $end): array {
+			$this->cache_stats['queries']++;
+			$rows = API::Trend()->get(['output' => ['itemid', 'clock', 'value_avg', 'value_min', 'value_max', 'num'],
+				'itemids' => $ids, 'time_from' => $start, 'time_till' => $end]);
+			if (!is_array($rows)) { throw new \RuntimeException('Availability trends could not be read.'); }
+			return $rows;
+		};
+		if ($this->trend_cache === null || !$this->cache_stats['enabled']
+				|| array_diff($itemids, array_keys($this->authorized_history)) !== []) {
+			$this->cache_stats['reason'] = $this->cache_stats['enabled'] ? 'unavailable' : 'disabled';
+			$hours = max(1, (int) ceil(($to - $from + 1) / 3600));
+			$chunk_size = max(1, min(1000, (int) floor(self::TREND_ROWS_PER_CALL / $hours)));
+			foreach (array_chunk($itemids, $chunk_size) as $ids) {
+				$rows = $fetch($ids, $from, $to);
+				$this->cache_stats['rows_fetched'] += count($rows);
+				yield $rows;
+			}
+			return;
+		}
+		$week = (int) floor(($from - 345600) / (7 * 86400)) * (7 * 86400) + 345600;
+		for (; $week <= $to; $week += 7 * 86400) {
+			$start = max($from, $week); $end = min($to, $week + 7 * 86400 - 1);
+			$hours = max(1, (int) ceil(($end - $start + 1) / 3600));
+			$chunk_size = max(1, min(1000, (int) floor(self::TREND_ROWS_PER_CALL / $hours)));
+			foreach (array_chunk($items, $chunk_size) as $chunk) {
+				$pending = [];
+				foreach ($chunk as $item) {
+					$id = (string) $item['itemid'];
+					$cached = $this->force_refresh ? null : $this->trend_cache->tryCachedRange(
+						$id, (int) ($item['value_type'] ?? 3), $start, $end, true);
+					if ($cached === null) { $pending[] = $item; continue; }
+					$this->recordCacheMeta($cached['meta']);
+					$rows = [];
+					foreach ($cached['rows'] as $row) { $rows[] = ['itemid' => $id] + $row; }
+					yield $rows;
+					unset($cached, $rows);
+				}
+				// Only series with missing coverage participate in a cold API batch. Adding one
+				// host must not re-read historical data for every already cached host in its group.
+				$ids = array_map('strval', array_column($pending, 'itemid'));
+				$memo = [];
+				foreach ($pending as $item) {
+					$id = (string) $item['itemid'];
+					$loader = function(int $a, int $b) use ($id, $ids, $fetch, &$memo): array {
+						$key = $a.':'.$b;
+						if (!isset($memo[$key])) {
+							// One common API read warms an entire cold batch, rather than querying each item separately.
+							$memo = []; // Retain at most one bounded API batch, even for overlapping holes.
+							$memo[$key] = [];
+							foreach ($fetch($ids, $a, $b) as $row) {
+								$row_id = (string) $row['itemid'];
+								if (!in_array($row_id, $ids, true)) { throw new \RuntimeException('Unexpected trend item.'); }
+								$memo[$key][$row_id][] = $row;
+							}
+						}
+						return $memo[$key][$id] ?? [];
+					};
+					$loaded = $this->trend_cache->fetchRange($id, (int) ($item['value_type'] ?? 3),
+						$start, $end, true, $loader, $this->force_refresh);
+					$this->recordCacheMeta($loaded['meta']);
+					$rows = [];
+					foreach ($loaded['rows'] as $row) { $rows[] = ['itemid' => $id] + $row; }
+					yield $rows;
+				}
+				unset($memo);
+			}
+		}
 	}
 
 	// -------------------------------------------------------------- maintenance
@@ -1173,9 +1364,10 @@ class ReportDataHelper {
 	 *
 	 * @return array{hosts:array<string,array<int,array{0:int,1:int}>>,applied:int,timezone:string}
 	 */
-	private function getMaintenanceWindows(array $host_group_names, int $time_from, int $time_to): array {
+	public function getMaintenanceWindows(array $host_group_names, int $time_from, int $time_to,
+			bool $include_details = false): array {
 		$timezone = $this->getMaintenanceTimezone();
-		$result = ['hosts' => [], 'applied' => 0, 'timezone' => $timezone->getName()];
+		$result = ['hosts' => [], 'details' => [], 'applied' => 0, 'timezone' => $timezone->getName()];
 		$until = $time_to + 1;
 
 		if ($host_group_names === []) {
@@ -1226,7 +1418,7 @@ class ReportDataHelper {
 
 		foreach (array_chunk($maintenanceids, 500) as $maintenanceid_chunk) {
 			$maintenances = API::Maintenance()->get([
-				'output' => ['maintenanceid', 'name', 'active_since', 'active_till'],
+				'output' => ['maintenanceid', 'name', 'maintenance_type', 'active_since', 'active_till'],
 				'maintenanceids' => $maintenanceid_chunk,
 				'selectHosts' => ['hostid'],
 				'selectHostGroups' => ['name'],
@@ -1287,6 +1479,17 @@ class ReportDataHelper {
 				$windows_by_maintenance[$maintenanceid] = $windows;
 				foreach (array_keys($covered) as $hostid) {
 					$maintenances_by_host[(string) $hostid][] = $maintenanceid;
+					foreach ($include_details ? $windows : [] as $window) {
+						if (count($result['details'][(string) $hostid] ?? []) >= 5000) {
+							$this->addNote(_('Only the first 5000 maintenance occurrences per host are listed. Totals include every expanded window; narrow the period for a complete list.'));
+							break;
+						}
+						$result['details'][(string) $hostid][] = [
+							'maintenanceid' => $maintenanceid, 'name' => (string) $maintenance['name'],
+							'start' => $window[0], 'end' => $window[1],
+							'maintenance_type' => (int) ($maintenance['maintenance_type'] ?? 0)
+						];
+					}
 				}
 			}
 		}
@@ -1761,9 +1964,9 @@ class ReportDataHelper {
 
 		$cards[] = [
 			'key' => 'fleet',
-			'label' => _('Fleet availability'),
+			'label' => _('Average check availability'),
 			'value' => $fleet['avg'] === null ? '—' : $this->formatPct($fleet['avg'], 2),
-			'sub' => _s('Average across %1$d hosts with data', (int) $fleet['with_data']),
+			'sub' => _s('Across %1$d checks with data on %2$d hosts', (int) $fleet['with_data'], (int) $fleet['hosts_total']),
 			'tone' => $fleet['avg'] === null ? 'neutral'
 				: ($fleet['avg'] >= $target ? 'ok' : ($fleet['avg'] >= self::BAD_THRESHOLD ? 'warning' : 'critical'))
 		];
@@ -1771,15 +1974,15 @@ class ReportDataHelper {
 		$meeting_target = max(0, (int) $fleet['with_data'] - (int) $fleet['below_target']);
 		$cards[] = [
 			'key' => 'target',
-			'label' => _s('Hosts meeting %1$s', $this->formatTargetPct($target)),
+			'label' => _s('Checks meeting %1$s', $this->formatTargetPct($target)),
 			'value' => $fleet['with_data'] > 0
 				? $meeting_target.' / '.(int) $fleet['with_data']
 				: '—',
 			'sub' => (int) $fleet['below_target'] === 0
-				? _('Every measured host is on target')
+				? _('Every measured check is on target')
 				: ((int) $fleet['below_target'] === 1
-					? _('1 host is below target')
-					: _s('%1$d hosts are below target', (int) $fleet['below_target'])),
+					? _('1 check is below target')
+					: _s('%1$d checks are below target', (int) $fleet['below_target'])),
 			'tone' => $fleet['with_data'] === 0 ? 'neutral'
 				: ((int) $fleet['below_target'] === 0 ? 'ok'
 					: ((int) $fleet['below_target'] <= 2 ? 'warning' : 'critical'))
@@ -1790,7 +1993,7 @@ class ReportDataHelper {
 			'label' => _('Total downtime'),
 			'value' => $fleet['with_data'] > 0 ? $this->formatDuration((int) $fleet['downtime_seconds']) : '—',
 			'sub' => $fleet['worst_host'] === null
-				? _('Summed across all measured hosts')
+				? _('Summed across all measured checks')
 				: _s('Worst: %1$s at %2$s', (string) $fleet['worst_host'], $this->formatPct($fleet['worst_pct'], 2)),
 			'tone' => 'neutral'
 		];
@@ -1835,7 +2038,7 @@ class ReportDataHelper {
 		if ((int) $fleet['na'] > 0) {
 			$cards[] = [
 				'key' => 'nodata',
-				'label' => _('Hosts without data'),
+				'label' => _('Checks without data'),
 				'value' => (string) (int) $fleet['na'],
 				'sub' => _('No availability item, or no samples in the period'),
 				'tone' => 'warning'
@@ -1891,7 +2094,7 @@ class ReportDataHelper {
 			$items[] = [
 				'severity' => 'critical',
 				'scope' => _('Host'),
-				'title' => _s('%1$s availability is %2$s', $row['host'], $this->formatPct($row['pct'], 2)),
+				'title' => _s('%1$s availability is %2$s', self::measurementName($row), $this->formatPct($row['pct'], 2)),
 				'detail' => _s(
 					'%1$s of downtime in this period. Group: %2$s.',
 					$this->formatDuration((int) $row['downtime_seconds']),
@@ -1904,7 +2107,7 @@ class ReportDataHelper {
 			$items[] = [
 				'severity' => 'warning',
 				'scope' => _('Host'),
-				'title' => _s('%1$s is below the %2$s target', $row['host'], $this->formatTargetPct($target)),
+				'title' => _s('%1$s is below the %2$s target', self::measurementName($row), $this->formatTargetPct($target)),
 				'detail' => _s(
 					'%1$s availability, %2$s of downtime. Group: %3$s.',
 					$this->formatPct($row['pct'], 2),
@@ -2072,7 +2275,9 @@ class ReportDataHelper {
 					$row['maintenance_seconds'] ?? 0,
 					$row['item_key'] ?? '',
 					gmdate('Y-m-d H:i:s', $time_from),
-					gmdate('Y-m-d H:i:s', $time_to)
+					gmdate('Y-m-d H:i:s', $time_to),
+					$row['coverage_pct'] ?? '', $row['source'] ?? '',
+					$row['measurement_label'] ?? $row['host'], $row['measurementid'] ?? ''
 				];
 			}
 		}

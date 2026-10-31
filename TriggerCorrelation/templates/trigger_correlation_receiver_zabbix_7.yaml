@@ -74,6 +74,72 @@ zabbix_export:
           lifetime: 30d
           enabled_lifetime_type: DISABLE_NEVER
           description: 'LLD data is pushed by the Trigger Correlation module.'
+          overrides:
+            - name: 'TC selected severity 1'
+              step: '1'
+              filter:
+                conditions:
+                  - macro: '{#CORRELATION.SEVERITIES}'
+                    value: '(^|,)1(,|$)'
+                    operator: NOT_MATCHES_REGEX
+                    formulaid: A
+              operations:
+                - operationobject: TRIGGER_PROTOTYPE
+                  operator: REGEXP
+                  value: '^Correlation INFORMATION:'
+                  discover: NO_DISCOVER
+            - name: 'TC selected severity 2'
+              step: '2'
+              filter:
+                conditions:
+                  - macro: '{#CORRELATION.SEVERITIES}'
+                    value: '(^|,)2(,|$)'
+                    operator: NOT_MATCHES_REGEX
+                    formulaid: A
+              operations:
+                - operationobject: TRIGGER_PROTOTYPE
+                  operator: REGEXP
+                  value: '^Correlation WARNING:'
+                  discover: NO_DISCOVER
+            - name: 'TC selected severity 3'
+              step: '3'
+              filter:
+                conditions:
+                  - macro: '{#CORRELATION.SEVERITIES}'
+                    value: '(^|,)3(,|$)'
+                    operator: NOT_MATCHES_REGEX
+                    formulaid: A
+              operations:
+                - operationobject: TRIGGER_PROTOTYPE
+                  operator: REGEXP
+                  value: '^Correlation AVERAGE:'
+                  discover: NO_DISCOVER
+            - name: 'TC selected severity 4'
+              step: '4'
+              filter:
+                conditions:
+                  - macro: '{#CORRELATION.SEVERITIES}'
+                    value: '(^|,)4(,|$)'
+                    operator: NOT_MATCHES_REGEX
+                    formulaid: A
+              operations:
+                - operationobject: TRIGGER_PROTOTYPE
+                  operator: REGEXP
+                  value: '^Correlation HIGH:'
+                  discover: NO_DISCOVER
+            - name: 'TC selected severity 5'
+              step: '5'
+              filter:
+                conditions:
+                  - macro: '{#CORRELATION.SEVERITIES}'
+                    value: '(^|,)5(,|$)'
+                    operator: NOT_MATCHES_REGEX
+                    formulaid: A
+              operations:
+                - operationobject: TRIGGER_PROTOTYPE
+                  operator: REGEXP
+                  value: '^Correlation CRITICAL:'
+                  discover: NO_DISCOVER
           item_prototypes:
             - uuid: dcccde1085e74dbaa8f1a9a0a4596320
               name: 'Correlation state: {#CORRELATION.NAME}'

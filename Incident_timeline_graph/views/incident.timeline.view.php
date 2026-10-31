@@ -5,6 +5,7 @@ declare(strict_types=1);
 $root = (new CDiv(_('Loading incident timeline…')))
 	->setId('incident-timeline-root')
 	->addClass('incident-timeline-root')
+	->setAttribute('data-module-version', '1.4.0')
 	->setAttribute('data-data-url', $data['data_url'])
 	->setAttribute('data-initial-month', (string) $data['month'])
 	->setAttribute('data-initial-from', (string) $data['from'])

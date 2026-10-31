@@ -33,9 +33,13 @@ class ApiTest extends CController {
         try {
             $store = new CorrelationStore();
             $config = $store->load();
-            $api = ZabbixApiClient::fromFrontendOrConfig($config['settings']);
-            // apiinfo.version is not always exposed over the in-process facade;
-            // keep it best-effort so a working host.get still reports success.
+            // Test the exact credentials used by the unattended evaluator. A
+            // working Super Admin session does not prove the saved token works.
+            $settings = (array) ($config['settings'] ?? []);
+            if (trim((string) ($settings['api_url'] ?? '')) === '' || CorrelationStore::apiToken($settings) === '') {
+                throw new \InvalidArgumentException('Save an API URL and token first. This test checks the saved runtime credentials.');
+            }
+            $api = ZabbixApiClient::fromConfig($settings);
             $version = '';
             try {
                 $version = $api->version();
@@ -46,7 +50,8 @@ class ApiTest extends CController {
             $hostCount = $api->hostCount();
             $this->jsonResponse([
                 'ok' => true,
-                'transport' => $api->isFrontend() ? 'in-process frontend API' : 'HTTP token',
+                'transport' => 'saved runtime API token',
+                'runtime_token_tested' => true,
                 'api_url' => $api->getUrl(),
                 'version' => $version,
                 'host_count' => $hostCount

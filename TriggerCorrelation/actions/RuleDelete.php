@@ -43,6 +43,7 @@ class RuleDelete extends CController {
             $settings = [];
             $hostStillUsed = false;
 
+            $store->withEvaluationLock('correlation', function () use ($store, $id, &$removed, &$notes, &$settings, &$hostStillUsed): void {
             CorrelationStore::transaction(function () use ($store, $id, &$removed, &$notes, &$settings, &$hostStillUsed): void {
                 $config = $store->load();
                 $settings = (array) ($config['settings'] ?? []);
@@ -104,6 +105,8 @@ class RuleDelete extends CController {
                         .'” was kept with its history; delete unused hosts from Settings → Automatic setup.';
                 }
             }
+
+            });
 
             $this->jsonResponse(['ok' => true, 'deleted' => $removed !== null ? 1 : 0, 'notes' => $notes] + $store->publicConfig());
         }

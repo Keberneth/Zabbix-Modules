@@ -8,6 +8,7 @@ use CController;
 use Modules\TriggerCorrelation\Lib\CorrelationStore;
 use Modules\TriggerCorrelation\Lib\JsonResponse;
 use Modules\TriggerCorrelation\Lib\ReceiverProvisioner;
+use Modules\TriggerCorrelation\Lib\RuleEngine;
 use Modules\TriggerCorrelation\Lib\Util;
 use Modules\TriggerCorrelation\Lib\ZabbixApiClient;
 
@@ -15,6 +16,7 @@ require_once dirname(__DIR__).'/lib/CorrelationStore.php';
 require_once dirname(__DIR__).'/lib/JsonResponse.php';
 require_once dirname(__DIR__).'/lib/ZabbixApiClient.php';
 require_once dirname(__DIR__).'/lib/ReceiverProvisioner.php';
+require_once dirname(__DIR__).'/lib/RuleEngine.php';
 
 /**
  * Diagnoses the evaluation pipeline and reports exactly what is missing or wrong:
@@ -56,11 +58,13 @@ class SelfCheck extends CController {
                 : $this->check('api_token', 'API token', 'fail', 'Not set — the eval endpoint cannot read problems or push state.');
 
             // 3. Zabbix API reachable via the token path (exactly what eval.php uses)
+            $runtimeApi = null;
             try {
                 $api = ZabbixApiClient::fromConfig($settings);
                 $version = '';
                 try { $version = $api->version(); } catch (\Throwable $e) { $version = ''; }
                 $hostCount = $api->hostCount();
+                $runtimeApi = $api;
                 $checks[] = $this->check('api_reach', 'Zabbix API reachable (token path)', 'ok',
                     'Connected'.($version !== '' ? ' (v'.$version.')' : '').', '.$hostCount.' hosts visible.');
             }
@@ -78,9 +82,17 @@ class SelfCheck extends CController {
 
             // 5. Rules
             $rules = array_values((array) ($config['rules'] ?? []));
-            $enabled = count(array_filter($rules, static fn($r): bool => (bool) ($r['enabled'] ?? true)));
-            $checks[] = $this->check('rules', 'Rules', $rules ? 'ok' : 'warn',
-                count($rules).' rule(s), '.$enabled.' enabled.');
+            $severityRules = array_values((array) ($config['severity_rules'] ?? []));
+            $allRules = array_merge($rules, $severityRules);
+            $enabled = count(array_filter($allRules, static fn($r): bool => (bool) ($r['enabled'] ?? true)));
+            $checks[] = $this->check('rules', 'Rules', $allRules ? 'ok' : 'warn',
+                count($rules).' correlation and '.count($severityRules).' escalation rule(s), '.$enabled.' enabled.');
+            $usage = CorrelationStore::storageUsage($config);
+            $checks[] = $this->check('storage', 'Configuration storage', $usage['percent'] >= 80 ? 'warn' : 'ok',
+                $usage['bytes'].' of '.$usage['max_bytes'].' bytes ('.$usage['percent'].'%). Rules and restoration records share this space.');
+            foreach ($this->runtimeChecks($runtimeApi, $settings, $rules, $severityRules) as $check) {
+                $checks[] = $check;
+            }
 
             // 6. eval.php deployed + reachable + token-gated
             $evalUrl = self::evalUrl();
@@ -105,7 +117,7 @@ class SelfCheck extends CController {
 
             // 7-8. Automatic setup: the engine heartbeat as the Zabbix SERVER sees
             // it, and the correlation hosts the rules point at.
-            foreach ($this->setupChecks($settings, $rules) as $check) {
+            foreach ($this->setupChecks($settings, $rules, $enabled > 0) as $check) {
                 $checks[] = $check;
             }
 
@@ -116,7 +128,7 @@ class SelfCheck extends CController {
         }
     }
 
-    private function setupChecks(array $settings, array $rules): array {
+    private function setupChecks(array $settings, array $rules, bool $requiresDriver): array {
         $checks = [];
         try {
             $provisioner = ReceiverProvisioner::forFrontend($settings);
@@ -145,8 +157,10 @@ class SelfCheck extends CController {
         }
 
         if ($engines === []) {
-            $checks[] = $this->check('engine', 'Engine host (heartbeat)', $rules ? 'fail' : 'warn',
-                'No host has the evaluator heartbeat yet, so nothing is evaluated automatically. It is created when you save a rule.');
+            $external = (string) ($settings['eval_driver'] ?? 'auto') === 'external' || ReceiverProvisioner::externalDriverActive($settings);
+            $checks[] = $this->check('engine', 'Engine host (heartbeat)', $external ? 'ok' : ($requiresDriver ? 'fail' : 'warn'),
+                $external ? 'An external evaluation driver is selected; no engine host is required.'
+                    : 'No host has the evaluator heartbeat yet, so nothing is evaluated automatically. It is created when you save a rule.');
         }
         else {
             $urls = [];
@@ -189,7 +203,10 @@ class SelfCheck extends CController {
 
         // Who drives the evaluation besides (or instead of) the engine host.
         if ((string) ($settings['eval_driver'] ?? 'auto') === 'external') {
-            $checks[] = $this->check('driver', 'Evaluation driver', 'ok', 'External (you call eval.php yourself) — the module never creates an engine host.');
+            $lastCall = (int) ($settings['driver_last_call'] ?? 0);
+            $fresh = $lastCall > 0 && time() - $lastCall <= 900;
+            $checks[] = $this->check('driver', 'Evaluation driver', $fresh ? 'ok' : 'warn',
+                'External (you call eval.php yourself). '.($fresh ? 'A recent authenticated call was received.' : 'No authenticated call within the last 15 minutes.'));
         }
         elseif (ReceiverProvisioner::externalDriverActive($settings)) {
             $checks[] = $this->check('driver', 'Evaluation driver', $engines !== [] ? 'warn' : 'ok',
@@ -263,10 +280,10 @@ class SelfCheck extends CController {
                     }
                     $hidden = array_values(array_diff_key($wanted, $seen));
                     $checks[] = $hidden !== []
-                        ? $this->check('auto_hosts_token', 'API token can write correlation hosts', 'fail',
+                        ? $this->check('auto_hosts_token', 'API token visibility of correlation hosts', 'fail',
                             'The API token’s user cannot see: '.Util::truncate(implode(', ', $hidden), 200)
                             .'. Give its user group at least Read on the correlation host group.')
-                        : $this->check('auto_hosts_token', 'API token can write correlation hosts', 'ok', 'The API token’s user can see every correlation host.');
+                        : $this->check('auto_hosts_token', 'API token visibility of correlation hosts', 'ok', 'The API token’s user can see every correlation host. API method permissions are checked by actual evaluation.');
                 }
             }
             catch (\Throwable $e) {
@@ -274,6 +291,90 @@ class SelfCheck extends CController {
             }
         }
 
+        return $checks;
+    }
+
+    private function runtimeChecks(?ZabbixApiClient $api, array $settings, array $rules, array $severityRules): array {
+        if ($api === null) {
+            return [$this->check('runtime_sources', 'Runtime source coverage', 'warn', 'Not assessed: the saved runtime API token could not connect.')];
+        }
+        $engine = new RuleEngine($api, $settings);
+        $frontendApi = ZabbixApiClient::fromFrontend($settings);
+        $frontendEngine = $frontendApi === null ? null : new RuleEngine($frontendApi, $settings);
+        $issues = [];
+        $checked = 0;
+        $health = [];
+        foreach (array_merge($rules, $severityRules) as $rule) {
+            if (!(bool) ($rule['enabled'] ?? true)) { continue; }
+            $checked++;
+            $inspection = $engine->inspectSources((array) $rule);
+            foreach ($inspection['errors'] as $error) { $issues[] = (string) ($rule['name'] ?? '').': '.$error; }
+            if (($rule['source_selector']['mode'] ?? '') === 'group' && $frontendEngine !== null) {
+                try {
+                    $expected = $frontendEngine->resolveSources($rule);
+                    $hidden = array_diff(array_column($expected, 'triggerid'), array_column($inspection['conditions'], 'triggerid'));
+                    if ($hidden !== []) {
+                        $issues[] = (string) ($rule['name'] ?? '').': '.count($hidden).' dynamic source trigger(s) are visible to this administrator but not the runtime token.';
+                    }
+                }
+                catch (\Throwable $e) { $issues[] = (string) ($rule['name'] ?? '').': dynamic source coverage could not be compared: '.$e->getMessage(); }
+            }
+            if (!empty($rule['last_error'])) { $health[] = (string) ($rule['name'] ?? '').': '.(string) $rule['last_error']; }
+            elseif ((int) ($rule['last_evaluated'] ?? 0) === 0) { $health[] = (string) ($rule['name'] ?? '').': waiting for its first evaluation'; }
+            elseif ((int) ($rule['last_evaluated'] ?? 0) > 0 && time() - (int) $rule['last_evaluated'] > 420) {
+                $health[] = (string) ($rule['name'] ?? '').': evaluation is older than expected';
+            }
+        }
+        $checks = [$this->check('runtime_sources', 'Runtime source coverage', $issues ? 'fail' : 'ok',
+            $issues ? Util::truncate(implode('; ', $issues), 1200) : 'The saved API token can inspect the sources of all '.$checked.' enabled rule(s).')];
+        $checks[] = $this->check('rule_health', 'Rule evaluation health', $health ? 'fail' : 'ok',
+            $health ? Util::truncate(implode('; ', $health), 1200) : 'No stored rule errors or stale evaluations.');
+        $targetIssues = [];
+        $targetCount = 0;
+        $broad = false;
+        foreach ($severityRules as $rule) {
+            if (!(bool) ($rule['enabled'] ?? true)) { continue; }
+            foreach ((array) ($rule['targets'] ?? []) as $target) {
+                $targetCount++;
+                $label = (string) ($rule['name'] ?? '').': '.(string) ($target['trigger'] ?? '');
+                try {
+                    $scope = (string) ($target['scope'] ?? 'host');
+                    if ($scope === 'host') {
+                        $params = ['output' => ['triggerid'], 'triggerids' => [(string) ($target['triggerid'] ?? '')]];
+                        if (!$api->call('trigger.get', $params)) {
+                            $targetIssues[] = $label.' — target trigger is missing or invisible to the runtime token';
+                        }
+                        elseif (!$api->call('trigger.get', $params + ['editable' => true])) {
+                            $targetIssues[] = $label.' — runtime token lacks write access to the target trigger';
+                        }
+                    }
+                    elseif ($scope === 'hostgroup') {
+                        $groupid = (string) ($target['groupid'] ?? '');
+                        if (!$api->call('hostgroup.get', ['output' => ['groupid'], 'groupids' => [$groupid]])) {
+                            $targetIssues[] = $label.' — target group is missing or invisible to the runtime token';
+                        }
+                        if ($frontendApi !== null) {
+                            $params = ['output' => ['hostid'], 'groupids' => [$groupid]];
+                            $expected = array_column((array) $frontendApi->call('host.get', $params), 'hostid');
+                            $visible = array_column((array) $api->call('host.get', $params), 'hostid');
+                            $hidden = array_diff($expected, $visible);
+                            if ($hidden !== []) { $targetIssues[] = $label.' — '.count($hidden).' host(s) in the target group are invisible to the runtime token'; }
+                        }
+                        $broad = true;
+                    }
+                    else { $broad = true; }
+                }
+                catch (\Throwable $e) { $targetIssues[] = $label.' — '.Util::truncate($e->getMessage(), 200); }
+            }
+        }
+        if ($targetCount > 0) {
+            $checks[] = $this->check('runtime_targets', 'Escalation target access', $targetIssues ? 'fail' : 'ok',
+                $targetIssues ? Util::truncate(implode('; ', $targetIssues), 1200)
+                    : $targetCount.' target selection(s) checked for visibility; explicit host targets also have write access.');
+            $checks[] = $this->check('severity_permission', 'Change severity capability', 'warn',
+                'Not tested by this read-only check. The runtime token also needs event.get and the Change severity role/API permission.'
+                    .($broad ? ' Group and all-host scopes act only on hosts visible to that token.' : ''));
+        }
         return $checks;
     }
 

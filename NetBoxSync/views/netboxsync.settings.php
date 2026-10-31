@@ -10,6 +10,7 @@ $last_summary = is_array($data['last_summary'] ?? null) ? $data['last_summary'] 
 
 $settings_save_url = (string) ($data['settings_save_url'] ?? (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.settings.save')->getUrl());
 $run_url = (string) ($data['run_url'] ?? (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.run')->getUrl());
+$run_status_url = (string) ($data['run_status_url'] ?? (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.run.status')->getUrl());
 $test_url = (string) ($data['test_url'] ?? (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.test')->getUrl());
 $zabbix_test_url = (string) ($data['zabbix_test_url'] ?? (new CUrl('zabbix.php'))->setArgument('action', 'netboxsync.zabbix.test')->getUrl());
 $linux_plugin_url = (string) ($data['linux_plugin_url'] ?? '');
@@ -165,7 +166,7 @@ $render_mapping_row = static function(array $mapping = []) use ($h): string {
         </details>
 
         <div class="nbs-repeat-row-actions">
-            <button type="button" class="btn-alt nbs-remove-row"><?= $h(_('Remove mapping')) ?></button>
+            <button type="button" class="nbs-button nbs-button--tertiary nbs-remove-row"><?= $h(_('Remove mapping')) ?></button>
         </div>
     </div>
     <?php
@@ -173,24 +174,47 @@ $render_mapping_row = static function(array $mapping = []) use ($h): string {
 };
 
 $summary_messages = is_array($last_summary['messages'] ?? null) ? $last_summary['messages'] : [];
+$settings_tabs = [
+    'integrations' => _('Integrations'),
+    'scheduling' => _('Scheduling'),
+    'built-in' => _('Built-in syncs'),
+    'vms' => _('VMs & services'),
+    'devices' => _('Devices'),
+    'mappings' => _('Custom mappings'),
+    'last-run' => _('Last run')
+];
+$summary_ok = array_key_exists('ok', $last_summary) ? (bool) $last_summary['ok'] : null;
+$summary_failed = $summary_ok === false || (int) ($last_summary['errors'] ?? 0) > 0;
+$summary_result = $summary_failed ? _('Finished with errors')
+    : ($summary_ok === true ? _('Finished successfully') : _('Result unavailable'));
 $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.php --json';
 ?>
 <div id="nbs-settings-root" class="nbs-page nbs-settings-page" data-nbs-theme="<?= $h($nbs_theme) ?>">
     <div class="nbs-header">
         <div>
             <h1><?= $h($data['title'] ?? _('NetBox sync settings')) ?></h1>
-            <p class="nbs-muted"><?= $h(_('Configure the NetBox connection, built-in syncs from your current scripts, device sync, and reusable custom mappings.')) ?></p>
+            <p class="nbs-muted"><?= $h(_('Configure integrations, choose what to sync, and review the latest run. Save settings applies changes from every tab. Run now uses the saved settings.')) ?></p>
         </div>
         <div class="nbs-header-actions">
-            <button type="submit" form="nbs-settings-form" class="btn-alt"><?= $h(_('Save settings')) ?></button>
-            <button type="button" id="nbs-run-now" class="btn-alt" data-run-url="<?= $h($run_url) ?>"><?= $h(_('Run now')) ?></button>
-            <a class="btn-alt" href="<?= $h($log_url) ?>"><?= $h(_('Open log')) ?></a>
+            <button type="submit" form="nbs-settings-form" class="nbs-button nbs-button--primary"><?= $h(_('Save settings')) ?></button>
+            <button type="button" id="nbs-run-now" class="nbs-button nbs-button--secondary" data-run-url="<?= $h($run_url) ?>"><?= $h(_('Run now')) ?></button>
+            <a class="nbs-button nbs-button--tertiary" href="<?= $h($log_url) ?>"><?= $h(_('Open log')) ?></a>
         </div>
     </div>
 
-    <div id="nbs-status" class="nbs-status" hidden></div>
+    <div id="nbs-status" class="nbs-status" role="status" aria-live="polite" hidden></div>
 
-    <form id="nbs-settings-form" method="post" action="<?= $h($settings_save_url) ?>" data-save-url="<?= $h($settings_save_url) ?>" data-run-url="<?= $h($run_url) ?>">
+    <div id="nbs-run-progress" class="nbs-run-progress" role="region" aria-label="<?= $h(_('Sync progress')) ?>" hidden>
+        <div class="nbs-progress-heading">
+            <strong id="nbs-run-progress-phase"><?= $h(_('Preparing sync')) ?></strong>
+            <span id="nbs-run-progress-percent" class="nbs-progress-percent">—</span>
+        </div>
+        <progress id="nbs-run-progress-bar" max="100" aria-labelledby="nbs-run-progress-phase" aria-describedby="nbs-run-progress-counts"></progress>
+        <div id="nbs-run-progress-counts" class="nbs-progress-counts"><?= $h(_('Waiting for host discovery.')) ?></div>
+        <p id="nbs-run-progress-note" class="nbs-mini-help" role="status" aria-live="polite"><?= $h(_('Progress reflects hosts attempted, including hosts with errors.')) ?></p>
+    </div>
+
+    <form id="nbs-settings-form" method="post" action="<?= $h($settings_save_url) ?>" data-save-url="<?= $h($settings_save_url) ?>" data-run-url="<?= $h($run_url) ?>" data-run-status-url="<?= $h($run_status_url) ?>">
         <input type="hidden" name="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>" value="<?= $h(CCsrfTokenHelper::get('netboxsync.settings.save')) ?>">
         <input type="hidden" id="nbs-run-csrf-token-name" value="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>">
         <input type="hidden" id="nbs-run-csrf-token-value" value="<?= $h(CCsrfTokenHelper::get('netboxsync.run')) ?>">
@@ -199,6 +223,13 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
         <input type="hidden" id="nbs-zabbix-test-csrf-token-name" value="<?= $h(CCsrfTokenHelper::CSRF_TOKEN_NAME) ?>">
         <input type="hidden" id="nbs-zabbix-test-csrf-token-value" value="<?= $h(CCsrfTokenHelper::get('netboxsync.zabbix.test')) ?>">
 
+        <nav class="nbs-settings-tabs" role="tablist" aria-label="<?= $h(_('Settings sections')) ?>" hidden>
+            <?php foreach ($settings_tabs as $tab_key => $tab_label): ?>
+                <button type="button" id="nbs-tab-<?= $h($tab_key) ?>" class="nbs-settings-tab" role="tab" data-tab="<?= $h($tab_key) ?>" aria-controls="nbs-panel-<?= $h($tab_key) ?>" aria-selected="false" tabindex="-1"><?= $h($tab_label) ?></button>
+            <?php endforeach; ?>
+        </nav>
+
+        <div id="nbs-panel-integrations" class="nbs-tab-panel" data-tab="integrations" role="tabpanel" aria-labelledby="nbs-tab-integrations" tabindex="0">
         <section class="nbs-card">
             <div class="nbs-section-header">
                 <h2><?= $h(_('Connections')) ?></h2>
@@ -206,7 +237,10 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
             </div>
             <div id="nbs-faq-connections" class="nbs-faq-box">
                 <p><strong><?= $h(_('Zabbix data')) ?>:</strong> <?= $h(_('Interactive runs use the current frontend session. Unattended CLI runs use the dedicated Zabbix API token configured below, so no browser session is required.')) ?></p>
-                <p><strong><?= $h(_('NetBox')) ?>:</strong> <?= $h(_('Used for VM, device, interface, disk, IP, service, and custom-field updates. For secrets, prefer environment variables when possible.')) ?></p>
+                <p><strong><?= $h(_('NetBox')) ?>:</strong> <?= $h(_('Used for VM, device, interface, disk, IP, service, and custom-field updates.')) ?></p>
+                <p><strong><?= $h(_('Direct HashiCorp Vault lookup')) ?>:</strong> <?= $h(_('Use vault:secret/data/netbox#api_token to read key api_token from a KV v2 secret. The server administrator configures NETBOXSYNC_VAULT_ADDR and a restricted Vault authentication token or token file for PHP-FPM and the CLI service. TLS verification is required. See INSTALL.md for setup.')) ?></p>
+                <p><?= $h(_('Alternatively, use env:NAME for an approved environment variable or file:NAME for a file below NETBOXSYNC_SECRET_DIR. Bare environment names remain supported. Native Zabbix Vault macros are not expanded here.')) ?></p>
+                <p><?= $h(_('Select either an inline API token or a secret reference. Inline tokens are stored in the module database without module-side encryption. Saving a reference removes that inline value. A missing reference reports an error instead of using a stored token.')) ?></p>
             </div>
             <div class="nbs-columns">
                 <div class="nbs-column-card">
@@ -234,9 +268,10 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
                                 <label class="nbs-checkbox"><input type="checkbox" name="netbox[clear_token]" value="1"> <?= $h(_('Clear stored token')) ?></label>
                             </div>
                         </div>
-                        <div>
-                            <label class="nbs-label"><?= $h(_('Token environment variable')) ?></label>
-                            <input class="nbs-input" type="text" name="netbox[token_env]" value="<?= $h($config['netbox']['token_env'] ?? '') ?>" placeholder="NETBOX_API_TOKEN">
+                        <div class="nbs-span-2">
+                            <label class="nbs-label" for="nbs-netbox-secret-reference"><?= $h(_('Vault / secret reference')) ?></label>
+                            <input class="nbs-input" id="nbs-netbox-secret-reference" type="text" name="netbox[token_env]" value="<?= $h($config['netbox']['token_env'] ?? '') ?>" placeholder="vault:secret/data/netbox#api_token" aria-describedby="nbs-netbox-secret-help">
+                            <div class="nbs-mini-help" id="nbs-netbox-secret-help"><?= $h(_('Direct Vault KV v2, env:NAME or file:NAME. Leave API token blank; saving a reference replaces the stored token.')) ?></div>
                         </div>
                         <div>
                             <label class="nbs-label"><?= $h(_('Verify TLS')) ?></label>
@@ -244,8 +279,8 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
                         </div>
                     </div>
                     <div class="nbs-section-actions">
-                        <button type="button" id="nbs-test-connection" class="btn-alt" data-test-url="<?= $h($test_url) ?>"><?= $h(_('Test connection')) ?></button>
-                        <span class="nbs-mini-help"><?= $h(_('Runs a single GET /status/ using the values above (blank fields fall back to the stored config).')) ?></span>
+                        <button type="button" id="nbs-test-connection" class="nbs-button nbs-button--secondary" data-test-url="<?= $h($test_url) ?>"><?= $h(_('Test connection')) ?></button>
+                        <span class="nbs-mini-help"><?= $h(_('Tests connectivity using the token or reference above. This does not verify write permissions.')) ?></span>
                     </div>
                 </div>
                 <div class="nbs-column-card">
@@ -274,19 +309,21 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
                             </div>
                         </div>
                         <div class="nbs-span-2">
-                            <label class="nbs-label"><?= $h(_('Token environment variable')) ?></label>
-                            <input class="nbs-input" type="text" name="zabbix_api[token_env]" value="<?= $h($config['zabbix_api']['token_env'] ?? '') ?>" placeholder="NETBOXSYNC_ZABBIX_API_TOKEN">
-                            <div class="nbs-mini-help"><?= $h(_('For systemd, define this variable in /etc/sysconfig/zabbix-netbox-sync.')) ?></div>
+                            <label class="nbs-label" for="nbs-zabbix-secret-reference"><?= $h(_('Vault / secret reference')) ?></label>
+                            <input class="nbs-input" id="nbs-zabbix-secret-reference" type="text" name="zabbix_api[token_env]" value="<?= $h($config['zabbix_api']['token_env'] ?? '') ?>" placeholder="vault:secret/data/zabbix#api_token" aria-describedby="nbs-zabbix-secret-help">
+                            <div class="nbs-mini-help" id="nbs-zabbix-secret-help"><?= $h(_('Direct Vault KV v2, env:NAME or file:NAME. Leave API token blank. Use CLI --check for secrets available only to the service.')) ?></div>
                         </div>
                     </div>
                     <div class="nbs-section-actions">
-                        <button type="button" id="nbs-test-zabbix-connection" class="btn-alt" data-test-url="<?= $h($zabbix_test_url) ?>"><?= $h(_('Test Zabbix API')) ?></button>
+                        <button type="button" id="nbs-test-zabbix-connection" class="nbs-button nbs-button--secondary" data-test-url="<?= $h($zabbix_test_url) ?>"><?= $h(_('Test Zabbix API')) ?></button>
                         <span class="nbs-mini-help"><?= $h(_('Verifies the endpoint and service-token access with a small host.get request.')) ?></span>
                     </div>
                 </div>
             </div>
         </section>
 
+        </div>
+        <div id="nbs-panel-scheduling" class="nbs-tab-panel" data-tab="scheduling" role="tabpanel" aria-labelledby="nbs-tab-scheduling" tabindex="0">
         <section class="nbs-card">
             <div class="nbs-section-header">
                 <h2><?= $h(_('Runner and scheduling')) ?></h2>
@@ -327,8 +364,9 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
                     </div>
                 </div>
                 <div>
-                    <label class="nbs-label"><?= $h(_('Legacy secret environment variable')) ?></label>
-                    <input class="nbs-input" type="text" name="runner[shared_secret_env]" value="<?= $h($config['runner']['shared_secret_env'] ?? '') ?>" placeholder="NETBOXSYNC_SHARED_SECRET">
+                    <label class="nbs-label"><?= $h(_('Legacy secret reference')) ?></label>
+                    <input class="nbs-input" type="text" name="runner[shared_secret_env]" value="<?= $h($config['runner']['shared_secret_env'] ?? '') ?>" placeholder="env:NETBOXSYNC_SHARED_SECRET">
+                    <div class="nbs-mini-help"><?= $h(_('Accepts vault:PATH#KEY, env:NAME or file:NAME. Leave the shared secret blank; saving a reference replaces it.')) ?></div>
                 </div>
                 <div>
                     <label class="nbs-label"><?= $h(_('Lock TTL (seconds)')) ?></label>
@@ -345,6 +383,8 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
             </div>
         </section>
 
+        </div>
+        <div id="nbs-panel-built-in" class="nbs-tab-panel" data-tab="built-in" role="tabpanel" aria-labelledby="nbs-tab-built-in" tabindex="0">
         <section class="nbs-card">
             <div class="nbs-section-header">
                 <h2><?= $h(_('Built-in sync catalogue')) ?></h2>
@@ -353,6 +393,7 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
             <div id="nbs-faq-standard" class="nbs-faq-box">
                 <p><?= $h(_('These rows expose the logic already present in your current scripts, plus the new device flow. Each row can be enabled or disabled independently and can use the global schedule or its own interval override.')) ?></p>
             </div>
+            <p class="nbs-mini-help"><?= $h(_('VM rows also require Enable VM sync on the VMs & services tab. Listening services additionally requires Enable service sync and its source plugin. Device rows require Enable device sync on the Devices tab. A checked row alone does not enable its target type.')) ?></p>
 
             <div class="nbs-table-wrap">
                 <table class="nbs-table">
@@ -394,6 +435,8 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
             </div>
         </section>
 
+        </div>
+        <div id="nbs-panel-vms" class="nbs-tab-panel" data-tab="vms" role="tabpanel" aria-labelledby="nbs-tab-vms" tabindex="0">
         <section class="nbs-card">
             <div class="nbs-section-header">
                 <h2><?= $h(_('VM sync defaults')) ?></h2>
@@ -532,6 +575,8 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
             </div>
         </section>
 
+        </div>
+        <div id="nbs-panel-devices" class="nbs-tab-panel" data-tab="devices" role="tabpanel" aria-labelledby="nbs-tab-devices" tabindex="0">
         <section class="nbs-card">
             <div class="nbs-section-header">
                 <h2><?= $h(_('Device sync defaults')) ?></h2>
@@ -625,6 +670,8 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
             </div>
         </section>
 
+        </div>
+        <div id="nbs-panel-mappings" class="nbs-tab-panel" data-tab="mappings" role="tabpanel" aria-labelledby="nbs-tab-mappings" tabindex="0">
         <section class="nbs-card">
             <div class="nbs-section-header">
                 <h2><?= $h(_('Custom mappings')) ?></h2>
@@ -639,6 +686,25 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
                 </ul>
             </div>
 
+            <div class="nbs-mapping-examples">
+                <h3><?= $h(_('Start with an example')) ?></h3>
+                <p><?= $h(_('Examples are added disabled. Review the source item, target, host-name filter, and Devices settings before enabling and saving. Device mappings resolve the device by its configured name and may create it when Create missing is enabled.')) ?></p>
+                <div class="nbs-columns">
+                    <div class="nbs-column-card">
+                        <h3><?= $h(_('Device serial to a custom field')) ?></h3>
+                        <p><code>fgate.device.serialnumber</code> → <code>custom_fields.serial_from_zabbix</code></p>
+                        <p><?= $h(_('Verify this item key exists on the intended hosts, and create a text custom field named serial_from_zabbix for Device objects in NetBox first. Empty source values are skipped.')) ?></p>
+                        <button type="button" class="nbs-button nbs-button--secondary" data-mapping-example="serial"><?= $h(_('Add serial example')) ?></button>
+                    </div>
+                    <div class="nbs-column-card">
+                        <h3><?= $h(_('Assign an existing device role')) ?></h3>
+                        <p><code>Network device</code> → <code>role</code></p>
+                        <p><?= $h(_('Replace Network device with an existing NetBox device-role name. The example looks up that name and writes its ID. Set a host-name filter to limit which devices receive this role.')) ?></p>
+                        <button type="button" class="nbs-button nbs-button--secondary" data-mapping-example="role"><?= $h(_('Add role example')) ?></button>
+                    </div>
+                </div>
+            </div>
+
             <div id="nbs-mappings-list" class="nbs-repeat-list">
                 <?php foreach ($custom_mappings as $mapping): ?>
                     <?= $render_mapping_row($mapping) ?>
@@ -646,21 +712,25 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
             </div>
 
             <div class="nbs-section-actions">
-                <button type="button" class="btn-alt" data-add-row="mapping"><?= $h(_('Add mapping')) ?></button>
+                <button type="button" class="nbs-button nbs-button--secondary" data-add-row="mapping"><?= $h(_('Add mapping')) ?></button>
             </div>
         </section>
 
+        </div>
+        <div id="nbs-panel-last-run" class="nbs-tab-panel" data-tab="last-run" role="tabpanel" aria-labelledby="nbs-tab-last-run" tabindex="0">
         <section class="nbs-card">
             <div class="nbs-section-header">
                 <h2><?= $h(_('Last run summary')) ?></h2>
+                <a class="nbs-button nbs-button--tertiary" href="<?= $h($log_url) ?>"><?= $h(_('Open log')) ?></a>
             </div>
             <?php if ($last_summary === []): ?>
                 <p class="nbs-muted"><?= $h(_('No sync run has been recorded yet.')) ?></p>
             <?php else: ?>
+                <div class="nbs-status is-<?= $summary_failed ? 'error' : ($summary_ok === true ? 'ok' : 'warn') ?>"><?= $h($summary_result) ?></div>
                 <div class="nbs-summary-grid">
                     <div class="nbs-summary-tile"><span><?= $h(_('Started')) ?></span><strong><?= $h($last_summary['started_at'] ?? '') ?></strong></div>
                     <div class="nbs-summary-tile"><span><?= $h(_('Finished')) ?></span><strong><?= $h($last_summary['finished_at'] ?? '') ?></strong></div>
-                    <div class="nbs-summary-tile"><span><?= $h(_('Elapsed')) ?></span><strong><?= $h($last_summary['elapsed_seconds'] ?? 0) ?></strong></div>
+                    <div class="nbs-summary-tile"><span><?= $h(_('Elapsed (seconds)')) ?></span><strong><?= $h($last_summary['elapsed_seconds'] ?? 0) ?></strong></div>
                     <div class="nbs-summary-tile"><span><?= $h(_('Processed hosts')) ?></span><strong><?= $h(($last_summary['hosts_processed'] ?? 0).'/'.($last_summary['hosts_total'] ?? 0)) ?></strong></div>
                     <div class="nbs-summary-tile"><span><?= $h(_('Mappings run')) ?></span><strong><?= $h($last_summary['mappings_run'] ?? 0) ?></strong></div>
                     <div class="nbs-summary-tile"><span><?= $h(_('Created')) ?></span><strong><?= $h($last_summary['created'] ?? 0) ?></strong></div>
@@ -685,6 +755,7 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
                 <?php endif; ?>
             <?php endif; ?>
         </section>
+        </div>
     </form>
 
     <template id="nbs-template-mapping">

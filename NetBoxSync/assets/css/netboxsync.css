@@ -18,6 +18,13 @@
     --nbs-error-bg: #fff1f0;
     --nbs-error-border: #f2c2bf;
     --nbs-error-text: #c14545;
+    --nbs-button-fg: #26374b;
+    --nbs-button-bg: #edf2f8;
+    --nbs-button-hover: #dfe9f4;
+    --nbs-button-border: #9baec2;
+    --nbs-button-primary: #166cb3;
+    --nbs-button-primary-hover: #10558f;
+    --nbs-progress-track: #dfe7f0;
 }
 
 html[theme="dark-theme"] .nbs-page,
@@ -41,6 +48,13 @@ html[theme="hc-dark"] .nbs-page,
     --nbs-error-bg: #3d1f1f;
     --nbs-error-border: #6b3030;
     --nbs-error-text: #e08b86;
+    --nbs-button-fg: #edf2f7;
+    --nbs-button-bg: #374b63;
+    --nbs-button-hover: #445e7b;
+    --nbs-button-border: #7a92ad;
+    --nbs-button-primary: #196db3;
+    --nbs-button-primary-hover: #12558f;
+    --nbs-progress-track: #172538;
 }
 
 #nbs-settings-root {
@@ -70,6 +84,122 @@ html[theme="hc-dark"] .nbs-page,
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+    flex-shrink: 0;
+}
+
+/* Own the action-button appearance; Zabbix's btn-alt is a text-only control. */
+#nbs-settings-root .nbs-button {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: auto;
+    min-width: 0;
+    min-height: 36px;
+    height: auto;
+    margin: 0;
+    padding: 8px 14px;
+    border: 1px solid var(--nbs-button-border);
+    border-radius: 5px;
+    background: var(--nbs-button-bg);
+    color: var(--nbs-button-fg);
+    box-shadow: none;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.2;
+    text-decoration: none;
+    text-shadow: none;
+    white-space: nowrap;
+    vertical-align: middle;
+    cursor: pointer;
+}
+
+#nbs-settings-root .nbs-button:hover {
+    border-color: var(--nbs-button-border);
+    background: var(--nbs-button-hover);
+    color: var(--nbs-button-fg);
+    text-decoration: none;
+}
+
+#nbs-settings-root .nbs-button--primary {
+    border-color: var(--nbs-button-primary);
+    background: var(--nbs-button-primary);
+    color: #fff;
+}
+
+#nbs-settings-root .nbs-button--primary:hover {
+    border-color: var(--nbs-button-primary-hover);
+    background: var(--nbs-button-primary-hover);
+    color: #fff;
+}
+
+#nbs-settings-root .nbs-button--tertiary {
+    background: var(--nbs-bg);
+}
+
+#nbs-settings-root .nbs-button--tertiary:hover {
+    background: var(--nbs-bg-accent);
+}
+
+#nbs-settings-root .nbs-button:focus-visible {
+    outline: 2px solid #6cb5f2;
+    outline-offset: 3px;
+}
+
+#nbs-settings-root .nbs-button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    box-shadow: none;
+}
+
+.nbs-run-progress {
+    padding: 16px;
+    margin-bottom: 18px;
+    border: 1px solid var(--nbs-border-strong);
+    border-radius: 6px;
+    background: var(--nbs-bg);
+}
+
+.nbs-run-progress[hidden] {
+    display: none !important;
+}
+
+.nbs-progress-heading {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 10px;
+}
+
+.nbs-progress-percent {
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+#nbs-run-progress-bar {
+    display: block;
+    width: 100%;
+    height: 12px;
+    margin: 0 0 10px;
+    accent-color: var(--nbs-button-primary);
+}
+
+.nbs-progress-counts {
+    font-variant-numeric: tabular-nums;
+}
+
+.nbs-run-progress .nbs-mini-help {
+    margin: 8px 0 0;
+}
+
+.nbs-run-progress.is-warn {
+    border-color: var(--nbs-warn-border);
+}
+
+.nbs-run-progress.is-error {
+    border-color: var(--nbs-error-text);
 }
 
 .nbs-muted,
@@ -383,6 +513,7 @@ html[theme="hc-dark"] .nbs-page,
     margin: 6px 0 0;
 }
 
+.nbs-settings-tabs,
 .nbs-log-tabs {
     display: flex;
     gap: 4px;
@@ -391,6 +522,7 @@ html[theme="hc-dark"] .nbs-page,
     flex-wrap: wrap;
 }
 
+.nbs-settings-tab,
 .nbs-log-tab {
     display: inline-flex;
     align-items: center;
@@ -413,21 +545,52 @@ html[theme="hc-dark"] .nbs-page,
     transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 
+.nbs-settings-tab:hover,
 .nbs-log-tab:hover {
     color: var(--nbs-fg);
     opacity: 0.85;
 }
 
+.nbs-settings-tab:focus-visible,
 .nbs-log-tab:focus-visible {
     outline: 2px solid #2e7dd1;
     outline-offset: -2px;
 }
 
+.nbs-settings-tab.is-active,
 .nbs-log-tab.is-active {
     background: var(--nbs-bg);
     color: var(--nbs-fg);
     opacity: 1;
     margin-bottom: -1px;
+}
+
+.nbs-settings-tab,
+.nbs-settings-tab:hover {
+    opacity: 1;
+    color: var(--nbs-fg);
+}
+
+.nbs-settings-tab.is-active {
+    box-shadow: inset 0 3px 0 #2e7dd1;
+}
+
+.nbs-settings-tabs[hidden],
+.nbs-tab-panel[hidden] {
+    display: none !important;
+}
+
+.nbs-tab-panel:focus-visible {
+    outline: 2px solid #2e7dd1;
+    outline-offset: 3px;
+}
+
+.nbs-mapping-examples {
+    margin-bottom: 20px;
+}
+
+.nbs-mapping-examples code {
+    overflow-wrap: anywhere;
 }
 
 .nbs-log-tab-count {
@@ -566,6 +729,10 @@ html[theme="hc-dark"] .nbs-page,
     .nbs-settings-grid,
     .nbs-repeat-grid {
         grid-template-columns: 1fr;
+    }
+
+    .nbs-columns {
+        grid-template-columns: minmax(0, 1fr);
     }
 
     .nbs-span-2,

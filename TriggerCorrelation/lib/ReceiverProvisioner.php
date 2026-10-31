@@ -12,8 +12,8 @@ require_once __DIR__.'/ZabbixApiClient.php';
  * Creates and maintains the Zabbix objects the rules need, so the user never has
  * to import a template, create a host, link it or set macros by hand.
  *
- *  - The two shipped templates (imported on demand, create-only — an existing
- *    template is never modified, so local customisations survive).
+ *  - The two shipped templates (imported on demand; existing customisations are
+ *    retained while module-owned severity selection overrides are upgraded).
  *  - ONE engine host carrying "Template Trigger Correlation Receiver": its
  *    HTTP-agent heartbeat calls eval.php every minute and evaluates every rule.
  *    Any host that already has the heartbeat item counts as the engine, so an
@@ -225,7 +225,9 @@ final class ReceiverProvisioner {
             if ($uuid !== '') {
                 $rows = (array) $this->api->call('template.get', ['output' => ['templateid'], 'filter' => ['uuid' => [$uuid]], 'limit' => 1]);
                 if ($rows !== []) {
-                    return $this->templateIds[$name] = (string) $rows[0]['templateid'];
+                    $id = (string) $rows[0]['templateid'];
+                    $this->installSeverityOverrides($id, $name);
+                    return $this->templateIds[$name] = $id;
                 }
             }
 
@@ -263,7 +265,92 @@ final class ReceiverProvisioner {
             }
         }
 
+        $this->installSeverityOverrides($id, $name);
         return $this->templateIds[$name] = $id;
+    }
+
+    /** Narrow upgrade of shipped discovery rules; preserves user prototypes and overrides. */
+    private function installSeverityOverrides(string $templateid, string $templateName): void {
+        $rules = (array) $this->api->call('discoveryrule.get', [
+            'output' => ['itemid'], 'templateids' => [$templateid],
+            'filter' => ['key_' => [self::DISCOVERY_KEY]], 'selectOverrides' => 'extend'
+        ]);
+        foreach ($rules as $rule) {
+            // Earliest shipped templates had only Warning through Disaster.
+            // Add the missing Information prototype without replacing user customizations.
+            $informationUuid = $templateName === self::ENGINE_TEMPLATE ? 'd59c0e61e71346968eac7e62b20eeeb6' : '66b3411c9ce94cccb45e0c710f962353';
+            $information = (array) $this->api->call('triggerprototype.get', [
+                'output' => ['triggerid', 'uuid', 'description'], 'discoveryids' => [(string) $rule['itemid']], 'filter' => ['priority' => 1]
+            ]);
+            $information = array_filter($information, static fn(array $p): bool => ($p['uuid'] ?? '') === $informationUuid
+                || ($p['description'] ?? '') === 'Correlation INFORMATION: {#CORRELATION.NAME}');
+            if ($information === []) {
+                $templates = (array) $this->api->call('template.get', ['output' => ['host'], 'templateids' => [$templateid]]);
+                $host = (string) ($templates[0]['host'] ?? '');
+                if ($host === '') { throw new \RuntimeException('Cannot identify the receiver template for the Information severity upgrade.'); }
+                $this->api->call('triggerprototype.create', [[
+                    'uuid' => $informationUuid,
+                    'description' => 'Correlation INFORMATION: {#CORRELATION.NAME}',
+                    'expression' => 'last(/'.$host.'/trigger.correlation.state[{#CORRELATION.ID}])=1',
+                    'priority' => 1, 'comments' => '{#CORRELATION.DESCRIPTION}',
+                    'tags' => [['tag' => 'component', 'value' => 'correlation'], ['tag' => 'scope', 'value' => 'trigger-correlation'],
+                        ['tag' => 'correlation.id', 'value' => '{#CORRELATION.ID}']]
+                ]]);
+            }
+            $existing = (array) ($rule['overrides'] ?? []);
+            $custom = [];
+            $owned = [];
+            foreach ($existing as $override) {
+                if (preg_match('/^TC selected severity [1-5]$/', (string) ($override['name'] ?? ''))) { $owned[] = $override; }
+                else { $custom[] = $override; }
+            }
+            $desired = [];
+            foreach ([1 => 'INFORMATION', 2 => 'WARNING', 3 => 'AVERAGE', 4 => 'HIGH', 5 => 'CRITICAL'] as $level => $label) {
+                $desired[] = ['name' => 'TC selected severity '.$level, 'step' => $level, 'stop' => 0,
+                    'filter' => ['evaltype' => 0, 'conditions' => [['macro' => '{#CORRELATION.SEVERITIES}',
+                        'operator' => 9, 'value' => '(^|,)'.$level.'(,|$)']]],
+                    'operations' => [['operationobject' => 1, 'operator' => 8, 'value' => '^Correlation '.$label.':',
+                        'opdiscover' => ['discover' => 1]]]];
+            }
+            // API returns IDs, strings and generated formulas. Compare only our semantic fields.
+            $correct = count($owned) === 5;
+            foreach ($desired as $expected) {
+                $matches = array_values(array_filter($owned, static fn(array $o): bool => $o['name'] === $expected['name']));
+                $o = $matches[0] ?? [];
+                $condition = $o['filter']['conditions'][0] ?? [];
+                $operation = $o['operations'][0] ?? [];
+                $correct = $correct && (int) ($o['step'] ?? 0) === $expected['step']
+                    && (int) ($o['stop'] ?? 0) === 0 && (int) ($o['filter']['evaltype'] ?? -1) === 0
+                    && count($o['filter']['conditions'] ?? []) === 1 && count($o['operations'] ?? []) === 1
+                    && ($condition['macro'] ?? '') === '{#CORRELATION.SEVERITIES}'
+                    && (int) ($condition['operator'] ?? 0) === 9
+                    && ($condition['value'] ?? '') === $expected['filter']['conditions'][0]['value']
+                    && (int) ($operation['operationobject'] ?? -1) === 1 && (int) ($operation['operator'] ?? -1) === 8
+                    && ($operation['value'] ?? '') === $expected['operations'][0]['value']
+                    && (int) ($operation['opdiscover']['discover'] ?? -1) === 1;
+            }
+            if ($correct) { continue; }
+            usort($custom, static fn(array $a, array $b): int => (int) $a['step'] <=> (int) $b['step']);
+            foreach ($custom as $i => $override) {
+                $clean = self::cleanOverride($override);
+                $clean['step'] = $i + 6;
+                $desired[] = $clean;
+            }
+            $this->api->call('discoveryrule.update', [['itemid' => (string) $rule['itemid'], 'overrides' => $desired]]);
+        }
+    }
+
+    private static function cleanOverride(array $override): array {
+        $out = array_intersect_key($override, array_flip(['name', 'step', 'stop', 'filter', 'operations']));
+        $clean = static function (array $values) use (&$clean): array {
+            $result = [];
+            foreach ($values as $key => $value) {
+                if (is_string($key) && (str_starts_with($key, 'lld_') || $key === 'eval_formula')) { continue; }
+                $result[$key] = is_array($value) ? $clean($value) : $value;
+            }
+            return $result;
+        };
+        return $clean($out);
     }
 
     /**
@@ -945,7 +1032,7 @@ final class ReceiverProvisioner {
      *
      * Returns ['hostid', 'host', 'name', 'key', 'created' => bool, 'rekeyed' => bool].
      */
-    public function ensureCorrelationHost(array $conditions, string $rekeyHostid = '', array $ruleHostids = []): array {
+    public function ensureCorrelationHost(array $conditions, string $rekeyHostid = '', array $ruleHostids = [], array $selector = []): array {
         $hostids = self::conditionHostIds($conditions);
         if ($hostids === []) {
             throw new \RuntimeException('The rule has no source hosts to build a correlation host for.');
@@ -955,7 +1042,10 @@ final class ReceiverProvisioner {
         // hosts its own rules already point at (e.g. created before recording).
         $trusted = array_flip(array_merge($this->managedIds('auto'), array_map('strval', $ruleHostids)));
 
-        $key = self::hostsetKey($hostids);
+        $dynamic = ($selector['mode'] ?? 'static') === 'group';
+        $key = $dynamic ? substr(hash('sha256', 'group:'.json_encode([
+            $selector['groupid'] ?? '', $selector['trigger_name'] ?? '', $selector['tag'] ?? '', $selector['tag_value'] ?? ''
+        ])), 0, 12) : self::hostsetKey($hostids);
         $templateid = $this->ensureTemplate(self::AUTO_TEMPLATE);
 
         $found = $this->findAutoHost($key, $trusted);
@@ -967,7 +1057,7 @@ final class ReceiverProvisioner {
             return $found + ['key' => $key, 'created' => false, 'rekeyed' => false];
         }
 
-        $sources = $this->sourceHostNames($hostids);
+        $sources = $dynamic ? ['Group '.(($selector['group'] ?? '') ?: $selector['groupid'])] : $this->sourceHostNames($hostids);
         $technical = self::autoHostName($key);
         // Someone else's host may already carry the technical name: never take it
         // over, use a distinct name instead.

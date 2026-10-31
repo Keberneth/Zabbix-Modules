@@ -33,45 +33,15 @@ class SeverityRuleDelete extends CController {
             }
 
             $store = new CorrelationStore();
-            $removed = null;
-
-            // Under the module-row lock, so this whole-config save cannot undo a
-            // concurrent change (e.g. a secret rotation) made on another node.
-            CorrelationStore::transaction(function () use ($store, $id, &$removed): void {
-                $config = $store->load();
-                $kept = [];
-                foreach (array_values((array) ($config['severity_rules'] ?? [])) as $rule) {
-                    if ((string) ($rule['id'] ?? '') === $id) {
-                        $removed = $rule;
-                    }
-                    else {
-                        $kept[] = $rule;
-                    }
-                }
-                $config['severity_rules'] = $kept;
-                $store->save($config);
-            });
-
-            // Then restore every severity the rule had raised, so problems do not
-            // stay stuck at the escalated severity. Best effort: anything left
-            // behind is found again by "Repair automatic setup" (it carries the
-            // [TC severity] marker).
-            if ($removed !== null) {
-                try {
-                    (new SeverityEvaluator($store))->revertRule($removed);
-                }
-                catch (\Throwable $e) {
-                    // never block the delete
-                }
-            }
-
-            $this->jsonResponse(['ok' => true, 'deleted' => $removed !== null ? 1 : 0] + $store->publicConfig());
+            $result = (new SeverityEvaluator($store))->deleteRule($id);
+            $this->jsonResponse(['ok' => empty($result['pending'])] + $result + $store->publicConfig());
         }
         catch (\InvalidArgumentException $e) {
             $this->jsonResponse(['ok' => false, 'error' => $e->getMessage()], 400);
         }
         catch (\Throwable $e) {
-            $this->jsonResponse(['ok' => false, 'error' => 'Failed to delete the severity rule.'], 500);
+            error_log('[TriggerCorrelation] severity rule deletion pending: '.$e->getMessage());
+            $this->jsonResponse(['ok' => false, 'error' => 'The rule could not be fully removed. Any disabled rule and pending recovery records are retained for retry.'], 500);
         }
     }
 }

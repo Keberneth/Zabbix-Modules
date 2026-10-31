@@ -883,6 +883,27 @@
 	min-width: 260px;
 }
 
+.cap-information-cell {
+	min-width: 280px;
+	max-width: 360px;
+	white-space: normal;
+	line-height: 1.45;
+	overflow-wrap: anywhere;
+}
+
+.cap-information-cell .cap-information-summary {
+	display: -webkit-box;
+	-webkit-line-clamp: 4;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+
+.cap-table[data-table='disks'] th[data-sort='conf'] {
+	min-width: 84px;
+	max-width: 108px;
+	white-space: normal;
+}
+
 .cap-pager {
 	display: flex;
 	align-items: center;
@@ -1004,6 +1025,50 @@
 
 .cap-detail-stats b {
 	color: #1f2b3a;
+}
+
+.cap-detail-information {
+	flex: 1 1 100%;
+	padding: 12px;
+	border: 1px solid #dfe4ec;
+	border-radius: 5px;
+	line-height: 1.45;
+	overflow-wrap: anywhere;
+}
+
+.cap-detail-information > p {
+	margin: 0 0 10px;
+	font-weight: 600;
+}
+
+.cap-information-grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 12px 20px;
+	margin: 0;
+}
+
+.cap-information-grid dt {
+	font-weight: 700;
+}
+
+.cap-information-grid dd {
+	margin: 4px 0 0;
+}
+
+.cap-information-signals {
+	margin-top: 12px;
+}
+
+.cap-information-signals ul {
+	margin: 4px 0 0;
+	padding-left: 20px;
+}
+
+@media (max-width: 720px) {
+	.cap-information-grid {
+		grid-template-columns: 1fr;
+	}
 }
 
 .cap-detail-maintenance {
@@ -1263,6 +1328,11 @@ body.cap-modal-open {
 	border-color: #8a5b20;
 	background: #35240f;
 	color: #f6d29a;
+}
+
+[theme='dark-theme'] .cap-detail-information,
+[theme='hc-dark'] .cap-detail-information {
+	border-color: #3b4a5b;
 }
 
 [theme='dark-theme'] .cap-filter-check,

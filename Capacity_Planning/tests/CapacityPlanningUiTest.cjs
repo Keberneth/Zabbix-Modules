@@ -6,12 +6,12 @@ const path = require('path');
 const {chromium} = require('playwright');
 
 const root = path.resolve(__dirname, '..');
-const jsAsset = path.join(root, 'assets', 'js', 'capacity-planning-1.4.0-20260801.1.js');
-const cssAsset = path.join(root, 'assets', 'css', 'capacity-planning.css');
+const jsAsset = path.join(root, 'assets', 'js', 'capacity-planning-1.4.3-20261031.3.js');
+const cssAsset = path.join(root, 'assets', 'css', 'capacity-planning-1.4.3-20261031.3.css');
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
 	|| 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-const MODULE_VERSION = '1.4.0';
-const CLIENT_BUILD_ID = '1.4.0-20260801.1';
+const MODULE_VERSION = '1.4.3';
+const CLIENT_BUILD_ID = '1.4.3-20261031.3';
 
 function appDocument(initialTab = 'disks', extraAttributes = '') {
 	return `<!doctype html><html><body><main id="capacity-planning-root" data-data-url="/fake"
@@ -48,6 +48,7 @@ function fixture() {
 			warn_free: {v: 0, src: 'fixture', fb: false}, crit_free: {v: 0, src: 'fixture', fb: false},
 			status, current_severity: severity,
 			expected_gap: bucket === 0, current_observation_usable: bucket !== 0,
+			current_snapshot_usable: bucket !== 0,
 			current_reasons: bucket === 0
 				? ['Current observation withheld during maintenance; last accepted value retained.']
 				: [`Fixture ${severity}`],
@@ -106,7 +107,7 @@ function forecastPoolFixture() {
 		fs: `/pool/${index}`, kind: 'Local', total: 1000, usable: 1000,
 		used: pused * 10, free: (100 - pused) * 10, pused,
 		status: 'OK', current_severity: 'Unknown', expected_gap: false,
-		current_observation_usable: true, current_reasons: [],
+		current_observation_usable: true, current_snapshot_usable: true, current_reasons: [],
 		current_recommendation: 'No current-state recommendation.'
 	}));
 	data.inventory.resources = [];
@@ -146,7 +147,7 @@ async function run() {
 		await initialMismatchPage.route('http://initial-build-mismatch.test/**', (route) => route.fulfill({
 			status: 200, contentType: 'text/html',
 			body: appDocument('disks').replace(`data-server-build-id="${CLIENT_BUILD_ID}"`,
-				'data-server-build-id="1.4.0-stale-server"')
+				'data-server-build-id="1.4.3-stale-server"')
 		}));
 		await initialMismatchPage.goto('http://initial-build-mismatch.test/zabbix.php?action=capacity.planning.view');
 		await initialMismatchPage.addScriptTag({path: jsAsset});
@@ -154,7 +155,7 @@ async function run() {
 		await initialMismatchPage.waitForFunction(() =>
 			document.querySelector('[data-role="error"]').textContent.includes('Mixed or stale'));
 		const initialMismatchText = await initialMismatchPage.locator('[data-role="error"]').textContent();
-		ok(initialMismatchText.includes('server build 1.4.0-stale-server')
+		ok(initialMismatchText.includes('server build 1.4.3-stale-server')
 			&& initialMismatchText.includes(`browser build ${CLIENT_BUILD_ID}`)
 			&& initialMismatchText.includes('restart PHP-FPM/Apache')
 			&& initialMismatchText.includes('hard-refresh'),
@@ -165,7 +166,7 @@ async function run() {
 
 		const responseMismatchPage = await browser.newPage({viewport: {width: 1000, height: 700}});
 		await responseMismatchPage.addInitScript(() => {
-			window.fetch = async () => new Response(JSON.stringify({build_id: '1.4.0-stale-response'}),
+			window.fetch = async () => new Response(JSON.stringify({build_id: '1.4.3-stale-response'}),
 				{status: 200, headers: {'Content-Type': 'application/json'}});
 		});
 		await responseMismatchPage.route('http://response-build-mismatch.test/**', (route) => route.fulfill({
@@ -177,14 +178,14 @@ async function run() {
 		await responseMismatchPage.waitForFunction(() =>
 			document.querySelector('[data-role="error"]').textContent.includes('Mixed or stale'));
 		ok((await responseMismatchPage.locator('[data-role="error"]').textContent())
-			.includes('server build 1.4.0-stale-response'),
+			.includes('server build 1.4.3-stale-response'),
 			'Every capacity-data response should reject a mismatched build identity.');
 		await responseMismatchPage.close();
 
 		const cacheMismatchPage = await browser.newPage({viewport: {width: 1000, height: 700}});
 		await cacheMismatchPage.addInitScript(() => {
 			window.fetch = async () => new Response(JSON.stringify({
-				build_id: '1.4.0-stale-cache', ok: true, cache_status: {}
+				build_id: '1.4.3-stale-cache', ok: true, cache_status: {}
 			}), {status: 200, headers: {'Content-Type': 'application/json'}});
 		});
 		await cacheMismatchPage.route('http://cache-build-mismatch.test/**', (route) => route.fulfill({
@@ -198,7 +199,7 @@ async function run() {
 		ok((await cacheMismatchPage.locator('[data-role="settings-message"]').textContent())
 			.includes('cache-status response')
 			&& (await cacheMismatchPage.locator('[data-role="settings-message"]').textContent())
-				.includes('server build 1.4.0-stale-cache'),
+				.includes('server build 1.4.3-stale-cache'),
 			'A cache-status response with a stale build must fail closed with deployment recovery guidance.');
 		await cacheMismatchPage.close();
 
@@ -213,7 +214,7 @@ async function run() {
 							max_bytes: 1048576, private_permissions_verified: true, scan_complete: true}
 					}), {status: 200, headers: {'Content-Type': 'application/json'}});
 				}
-				return new Response(JSON.stringify({build_id: '1.4.0-stale-settings', ok: true}),
+				return new Response(JSON.stringify({build_id: '1.4.3-stale-settings', ok: true}),
 					{status: 200, headers: {'Content-Type': 'application/json'}});
 			};
 		}, CLIENT_BUILD_ID);
@@ -230,7 +231,7 @@ async function run() {
 			document.querySelector('[data-role="settings-message"]').textContent.includes('Mixed or stale'));
 		const staleSettingsMessage = await settingsMismatchPage.locator('[data-role="settings-message"]').textContent();
 		ok(staleSettingsMessage.includes('settings response')
-			&& staleSettingsMessage.includes('server build 1.4.0-stale-settings'),
+			&& staleSettingsMessage.includes('server build 1.4.3-stale-settings'),
 			'A settings-save response with a stale build must fail closed instead of applying its payload.');
 		await settingsMismatchPage.close();
 
@@ -398,7 +399,7 @@ async function run() {
 			window.__readOnlyFetches = [];
 			window.fetch = async (url, options = {}) => {
 				window.__readOnlyFetches.push({url: String(url), body: String(options.body || '')});
-				return new Response(JSON.stringify({build_id: '1.4.0-20260801.1', ok: false,
+				return new Response(JSON.stringify({build_id: '1.4.3-20261031.3', ok: false,
 					error: 'Unexpected request'}), {status: 500});
 			};
 		});
@@ -943,7 +944,7 @@ async function run() {
 		same(3, await poolPage.evaluate(() => window.__poolStats.maxByDays[92]),
 			'The forecast worker pool should cap one analysis run at three concurrent requests.');
 		await poolPage.waitForFunction(() => window.__poolStats.activeByDays[92] > 0
-			&& document.querySelector('[data-table="disks"] tbody tr[data-id="pool-3"] td:nth-child(9)')
+			&& document.querySelector('[data-table="disks"] tbody tr[data-id="pool-3"] .cap-forecast-confidence')
 				.textContent.includes('Pool result'));
 		ok(await poolPage.locator('[data-role="loading"]').isVisible(),
 			'A completed high-risk batch should render while other forecast batches are still in flight.');
@@ -955,7 +956,7 @@ async function run() {
 			'Concurrent workers should still claim batches in descending utilization order.');
 		same(6, await poolPage.evaluate(() => window.__poolStats.started.filter((entry) => entry.days === 92).length),
 			'A failed forecast batch should not prevent later queued batches from running.');
-		same(5, await poolPage.locator('[data-table="disks"] tbody tr td:nth-child(9)', {hasText: 'Pool result'}).count(),
+		same(5, await poolPage.locator('[data-table="disks"] tbody tr .cap-forecast-confidence', {hasText: 'Pool result'}).count(),
 			'Every successful forecast batch should remain in the progressively assembled result set.');
 		same('Unknown', await poolPage.locator('[data-table="disks"] tbody tr[data-id="pool-1"] .cap-risk-pill').textContent(),
 			'The finding from a failed batch should settle to Unknown instead of remaining Pending.');
@@ -1313,7 +1314,7 @@ async function run() {
 		patternData.inventory.disks = [{
 			...patternData.inventory.disks[0],
 			hostid: '3', host: 'dev01', status: 'OK', expected_gap: false,
-			current_observation_usable: true, current_reasons: [],
+			current_observation_usable: true, current_snapshot_usable: true, current_reasons: [],
 			maintenance: {active: false, type: 'none', id: null, since: null},
 			used: 940, free: 60, pused: 94, usable: 1000, total: 1000,
 			warn_pct: {v: 95, src: 'fixture', fb: false},
@@ -1541,6 +1542,92 @@ async function run() {
 		same(baselineStatsText, await patternPage.locator('[data-role="detail-stats"]').textContent(),
 			'The possible path must not alter any printed ETA or assessment text.');
 		await patternPage.close();
+
+		// A current breach, a recent spike and an unreliable forecast must remain
+		// separate, readable facts in the new Information column and detail view.
+		const informationData = fixture();
+		const gib = 1024 ** 3;
+		informationData.inventory.disks = [{...informationData.inventory.disks[0],
+			hostid: '3', host: 'example-server', fs: 'Data (J:)', status: 'OK', expected_gap: false,
+			maintenance: {active: false, type: 'none'}, current_observation_usable: true,
+			current_snapshot_usable: true, current_severity: 'Critical', current_reasons: ['Current used space exceeds 95%.'],
+			used: 461.94 * gib, free: 18.06 * gib, total: 480 * gib, usable: 480 * gib, pused: 96.237}];
+		informationData.inventory.resources = [];
+		informationData.inventory.meta.hosts_analyzed = 1;
+		informationData.forecast = {...informationData.forecast, confidence: 'Low', pct_confidence: 'Low', byte_confidence: 'Low',
+			byte_source: 'used', projection_basis: 'used_bytes_fixed_capacity',
+			reasons: ['Current critical threshold exceeded', 'Poor longer-term model fit'],
+			recommendation: 'Investigate the current capacity breach and recent increase before relying on a future date.',
+			forecast_reliable: false, forecast_status: 'unavailable', forecast_reason_codes: ['poor_model_fit'],
+			forecast_unavailable_reason: 'The longer-term model has poor fit (R² 0.093), despite 99.8% coverage.',
+			growth_day: null, growth_pct_day: null, selected: {days: 92, cov: 99.8, r2: 0.093},
+			pct_selected: {days: 92, cov: 99.8, r2: 0.093},
+			eta: {warn_days: 0, crit_days: 0, full_days: null, next_days: 0},
+			information: {
+				summary: 'Critical now at 96.24% used. A recent jump needs investigation; the longer-term pattern does not support a reliable date.',
+				current: 'Used space exceeds the 95% critical threshold; 18.06 GiB is free. This is a current capacity risk.',
+				recent: 'A sharp increase followed an earlier cleanup. This observation does not establish a repeating spike or sustained faster growth.',
+				long_term: 'The longer-term history includes growth and cleanup. Coverage is 99.8%, but the linear fit is poor (R² 0.093).',
+				forecast: 'No reliable threshold date is projected. Investigate the recent increase and review the next observations before extrapolating.',
+				signals: ['Current critical threshold exceeded', 'Recent jump; recurrence unproven', 'Good coverage with poor model fit']
+			}};
+		informationData.forecast.series = informationData.forecast.series.map((point, index) => {
+			const value = (index < 50 ? 390 + (index % 14) * 2 : 420 + (index - 50) * 4) * gib;
+			return [point[0], value - gib, value, value + gib];
+		});
+		const informationPage = await browser.newPage({viewport: {width: 1280, height: 1000}});
+		informationPage.on('pageerror', (error) => browserErrors.push(error.message));
+		await informationPage.addInitScript((payload) => {
+			window.fetch = async (_url, options = {}) => {
+				const mode = new URLSearchParams(options.body || '').get('mode');
+				const body = mode === 'inventory' ? payload.inventory
+					: {build_id: payload.inventory.build_id, forecasts: [payload.forecast]};
+				return new Response(JSON.stringify(body), {status: 200, headers: {'Content-Type': 'application/json'}});
+			};
+		}, informationData);
+		await informationPage.route('http://information.test/**', (route) => route.fulfill({status: 200,
+			contentType: 'text/html;charset=utf-8', body: appDocument('disks').replace('<body>',
+				'<body><p style="font:13px Arial;margin:12px">Local preview · illustrative spike/critical fixture · not deployed</p>')}));
+		await informationPage.goto('http://information.test/zabbix.php?action=capacity.planning.view&tab=disks');
+		await informationPage.addStyleTag({path: cssAsset});
+		await informationPage.addStyleTag({content: 'body{font-family:Arial,Helvetica,sans-serif}'});
+		await informationPage.addScriptTag({path: jsAsset});
+		await informationPage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
+		await informationPage.waitForSelector('[data-table="disks"] .cap-information-summary');
+		await informationPage.waitForFunction(() => document.querySelector('[data-role="loading"]').hidden);
+		const informationRow = informationPage.locator('[data-table="disks"] tbody tr').first();
+		same(informationData.forecast.information.summary,
+			await informationRow.locator('.cap-information-summary').textContent(),
+			'The browser must show the backend summary without rewriting the current-risk evidence.');
+		same('Critical', await informationRow.locator('.cap-risk-pill').textContent(),
+			'Unreliable future dates must not lower an actual current critical breach.');
+		same('Low', await informationRow.locator('.cap-forecast-confidence').textContent(),
+			'Forecast confidence must remain distinct from current severity.');
+		ok(await informationRow.locator('.cap-information-cell').evaluate((cell) => {
+			const bounds = cell.getBoundingClientRect();
+			const summary = cell.querySelector('.cap-information-summary').getBoundingClientRect();
+			return bounds.width >= 280 && bounds.width <= 385 && summary.height <= 80;
+		}), 'Information must wrap within a compact column at 1280px.');
+		ok(await informationPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1),
+			'Wide filesystem columns must scroll inside their table rather than overflow the page.');
+		if (process.env.CAPACITY_PLANNING_REVIEW_DIR) {
+			fs.mkdirSync(process.env.CAPACITY_PLANNING_REVIEW_DIR, {recursive: true});
+			await informationPage.screenshot({path: path.join(process.env.CAPACITY_PLANNING_REVIEW_DIR, 'information-table.png'), fullPage: true, animations: 'disabled'});
+		}
+		await informationRow.click();
+		await informationPage.waitForSelector('[data-role="detail-modal"].is-open');
+		same('Current risk|Recent behaviour|Longer-term behaviour|Forecast assessment',
+			(await informationPage.locator('.cap-detail-information dt').allTextContents()).join('|'),
+			'The full interpretation must have four distinct evidence blocks.');
+		ok(await informationPage.locator('.cap-detail-information').evaluate((section) => {
+			const bounds = section.getBoundingClientRect();
+			return bounds.left >= 0 && bounds.right <= window.innerWidth
+				&& [...section.querySelectorAll('dd')].every((field) => field.scrollWidth <= field.clientWidth + 1);
+		}), 'Detail evidence blocks must fit inside the modal without horizontal text overflow.');
+		if (process.env.CAPACITY_PLANNING_REVIEW_DIR) {
+			await informationPage.screenshot({path: path.join(process.env.CAPACITY_PLANNING_REVIEW_DIR, 'information-detail.png'), fullPage: true, animations: 'disabled'});
+		}
+		await informationPage.close();
 
 		await page.locator('[data-role="custom-lookback-toggle"]').click();
 		await page.locator('#cap-custom-lookback-days').fill('45');

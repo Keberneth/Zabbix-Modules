@@ -17,6 +17,9 @@ require_once dirname(__DIR__).'/lib/JsonResponse.php';
 require_once dirname(__DIR__).'/lib/ZabbixApiClient.php';
 require_once dirname(__DIR__).'/lib/CorrelationEvaluator.php';
 require_once dirname(__DIR__).'/lib/ReceiverProvisioner.php';
+require_once dirname(__DIR__).'/lib/RuleDefinition.php';
+require_once dirname(__DIR__).'/lib/RuleEngine.php';
+require_once dirname(__DIR__).'/lib/OutputIdentity.php';
 
 class RuleSave extends CController {
     use JsonResponse;
@@ -41,6 +44,12 @@ class RuleSave extends CController {
             $rule = $this->normalizeRule($posted);
             $store = new CorrelationStore();
             $notes = [];
+            if (!empty($rule['enabled'])) {
+                $settings = (array) ($store->load()['settings'] ?? []);
+                $inspection = (new \Modules\TriggerCorrelation\Lib\RuleEngine(\Modules\TriggerCorrelation\Lib\ZabbixApiClient::fromConfig($settings), $settings))->inspectSources($rule);
+                if (!$inspection['valid']) { throw new \InvalidArgumentException(implode(' ', $inspection['errors'])); }
+                $rule['conditions'] = $inspection['conditions'];
+            }
             $clearOld = null;
             $syncHosts = [];
             $settings = [];
@@ -52,6 +61,7 @@ class RuleSave extends CController {
 
             // One critical section across all frontend nodes (module-row lock):
             // read the current rules, set up hosts, save, tidy up — or none of it.
+            $store->withEvaluationLock('correlation', function () use ($store, $posted, &$rule, &$notes, &$clearOld, &$syncHosts, &$settings): void {
             CorrelationStore::transaction(function () use ($store, $posted, &$rule, &$notes, &$clearOld, &$syncHosts, &$settings): void {
                 $config = $store->load();
                 $settings = (array) ($config['settings'] ?? []);
@@ -64,6 +74,18 @@ class RuleSave extends CController {
                     }
                 }
                 $previousOutput = (array) ($previous['output'] ?? []);
+                if (empty($rule['enabled']) && $previous !== null) {
+                    // Disabling must work even after a dynamic source group disappears.
+                    // Keep the actual output identity so the evaluator can still clear it.
+                    if (($rule['source_selector']['mode'] ?? 'static') === 'group') {
+                        $rule['conditions'] = (array) ($previous['conditions'] ?? []);
+                    }
+                    if (!empty($rule['output']['receiver_auto']) && !empty($previousOutput['receiver_auto'])) {
+                        foreach (['receiver_host', 'receiver_hostid', 'receiver_host_name', 'receiver_hostset', 'receiver_hostset_ids', 'provisioned_at'] as $key) {
+                            if (array_key_exists($key, $previousOutput)) { $rule['output'][$key] = $previousOutput[$key]; }
+                        }
+                    }
+                }
 
                 // A browser still running the previous version of the page does
                 // not know the automatic flag; keep an automatic rule automatic.
@@ -77,8 +99,9 @@ class RuleSave extends CController {
                 // host (heartbeat) whatever the output mode, and the shared
                 // correlation host for this rule's source hosts in automatic mode.
                 $provisioner = ReceiverProvisioner::forFrontend($settings, $store);
-                if ($provisioner !== null) {
+                if ($provisioner !== null && !empty($rule['enabled'])) {
                     try {
+                        $provisioner->ensureTemplate(ReceiverProvisioner::ENGINE_TEMPLATE);
                         $notes = array_merge($notes, $provisioner->ensureEngineAndSecret($store, $settings));
                     }
                     catch (\Throwable $e) {
@@ -89,7 +112,7 @@ class RuleSave extends CController {
                     $config['settings'] = $settings;
                 }
 
-                if (!empty($rule['output']['receiver_auto'])) {
+                if (!empty($rule['output']['receiver_auto']) && !empty($rule['enabled'])) {
                     if ($provisioner === null) {
                         throw new \InvalidArgumentException('The automatic correlation host can only be set up from a logged-in Zabbix frontend session.');
                     }
@@ -105,7 +128,7 @@ class RuleSave extends CController {
                         $rules
                     )));
                     try {
-                        $host = $provisioner->ensureCorrelationHost($rule['conditions'], $rekey, $ruleHostids);
+                        $host = $provisioner->ensureCorrelationHost($rule['conditions'], $rekey, $ruleHostids, (array) ($rule['source_selector'] ?? []));
                     }
                     catch (\Throwable $e) {
                         error_log('[TriggerCorrelation] correlation host setup failed: '.$e->getMessage());
@@ -147,12 +170,12 @@ class RuleSave extends CController {
                         // conditions and orphan output keys.
                         $runtime = [];
                         foreach (['last_state', 'last_error', 'last_evaluated', 'last_evaluated_iso', 'last_eventids', 'last_push_result',
-                            'last_correlation_comment_sig', 'last_correlation_eventid', 'last_source_comment_sig'] as $key) {
+                            'last_correlation_comment_sig', 'last_correlation_eventid', 'last_source_comment_sig', 'last_successful', 'status', 'candidate_state', 'source_signature', 'source_members'] as $key) {
                             if (array_key_exists($key, $existing)) {
                                 $runtime[$key] = $existing[$key];
                             }
                         }
-                        $rules[$i] = array_merge($rule, $runtime);
+                        $rules[$i] = array_merge($rule, $runtime, ['pending_since' => 0, 'pending_state' => null, 'pending_seconds' => 0]);
                         $found = true;
                         break;
                     }
@@ -211,6 +234,8 @@ class RuleSave extends CController {
             catch (\Throwable $e) {
                 // best effort — the next heartbeat pushes discovery anyway
             }
+
+            });
 
             if (trim((string) ($settings['api_url'] ?? '')) === '' || CorrelationStore::apiToken($settings) === '') {
                 $notes[] = 'Automatic evaluation still needs the Zabbix API URL and an API token: Settings → Zabbix API.';
@@ -276,147 +301,17 @@ class RuleSave extends CController {
      * evaluator's fallback to the default receiver from Settings.
      */
     private function assertCorrelationIdUnique(array $rule, array $rules, array $settings): void {
-        $output = (array) ($rule['output'] ?? []);
-        if ((string) ($output['mode'] ?? 'receiver_lld') !== 'receiver_lld') {
-            return;
-        }
-
-        $defaultReceiver = trim((string) ($settings['receiver_host'] ?? ''));
-        $slug = CorrelationStore::slug((string) ($output['correlation_id'] ?? ''));
-        $receiver = trim((string) ($output['receiver_host'] ?? '')) ?: $defaultReceiver;
-        $key = self::receiverKey($output, $defaultReceiver)."\0".$slug;
-
-        foreach ($rules as $other) {
-            if ((string) ($other['id'] ?? '') === (string) ($rule['id'] ?? '')) {
-                continue;
-            }
-            $otherOutput = (array) ($other['output'] ?? []);
-            if ((string) ($otherOutput['mode'] ?? 'receiver_lld') !== 'receiver_lld') {
-                continue;
-            }
-            if ((self::receiverKey($otherOutput, $defaultReceiver)."\0".CorrelationStore::slug((string) ($otherOutput['correlation_id'] ?? ''))) === $key) {
-                throw new \InvalidArgumentException(
-                    'Another rule ("'.(string) ($other['name'] ?? $other['id'] ?? '').'") already uses the Correlation ID "'
-                    .$slug.'" on receiver host "'.$receiver.'". Choose a unique Correlation ID.'
-                );
-            }
+        $api = ZabbixApiClient::fromFrontend($settings);
+        if ($api === null) { throw new \InvalidArgumentException('A frontend session is required to validate the output.'); }
+        $identity = new \Modules\TriggerCorrelation\Lib\OutputIdentity([$api, 'call']);
+        $other = $identity->findConflict($rule, $rules, $settings);
+        if ($other !== null) {
+            throw new \InvalidArgumentException('Another rule ("'.(string) ($other['name'] ?? $other['id'] ?? '')
+                .'") writes to the same output item. Choose a different Correlation ID or output item.');
         }
     }
 
     private function normalizeRule(array $rule): array {
-        $id = trim((string) ($rule['id'] ?? ''));
-        if ($id === '') {
-            $id = CorrelationStore::generateId();
-        }
-
-        $name = trim((string) ($rule['name'] ?? ''));
-        if ($name === '') {
-            throw new \InvalidArgumentException('Rule name is required.');
-        }
-
-        $conditions = array_values((array) ($rule['conditions'] ?? []));
-        $normalizedConditions = [];
-        foreach ($conditions as $condition) {
-            $condition = (array) $condition;
-            $hostid = trim((string) ($condition['hostid'] ?? ''));
-            $triggerid = trim((string) ($condition['triggerid'] ?? ''));
-            // Skip fully-empty rows so a half-filled extra condition does not block saving.
-            if ($hostid === '' && $triggerid === ''
-                && trim((string) ($condition['host'] ?? '')) === ''
-                && trim((string) ($condition['trigger'] ?? '')) === '') {
-                continue;
-            }
-            if ($hostid === '' || $triggerid === '') {
-                throw new \InvalidArgumentException('Each condition must have a selected host and trigger.');
-            }
-            $normalizedConditions[] = [
-                'hostid' => $hostid,
-                'host' => trim((string) ($condition['host'] ?? '')),
-                'triggerid' => $triggerid,
-                'trigger' => trim((string) ($condition['trigger'] ?? ''))
-            ];
-        }
-
-        if (count($normalizedConditions) < 2) {
-            throw new \InvalidArgumentException('At least two source trigger conditions are required.');
-        }
-        if (count($normalizedConditions) > self::MAX_CONDITIONS) {
-            throw new \InvalidArgumentException('A rule can have at most '.self::MAX_CONDITIONS.' source triggers (this one has '
-                .count($normalizedConditions).'). Split it, or correlate an aggregate trigger per group.');
-        }
-
-        $output = (array) ($rule['output'] ?? []);
-        $mode = (string) ($output['mode'] ?? 'receiver_lld');
-        if (!in_array($mode, ['receiver_lld', 'existing_item'], true)) {
-            throw new \InvalidArgumentException('Unsupported output mode.');
-        }
-
-        $matchMode = (string) ($output['match_mode'] ?? 'all');
-        if (!in_array($matchMode, ['all', 'any', 'count'], true)) {
-            $matchMode = 'all';
-        }
-
-        $normalizedOutput = [
-            'mode' => $mode,
-            'match_mode' => $matchMode,
-            'match_value' => max(1, min(5, (int) ($output['match_value'] ?? 4))),
-            'clear_value' => 0,
-            'comment_correlation_problem' => (bool) ($output['comment_correlation_problem'] ?? true),
-            'comment_source_problems' => (bool) ($output['comment_source_problems'] ?? true)
-        ];
-
-        if ($matchMode === 'count') {
-            // Tiers: highest active-count threshold reached wins. Dedupe by min,
-            // sort ascending, cap to a sane number.
-            $tiers = [];
-            foreach ((array) ($output['severity_tiers'] ?? []) as $tier) {
-                $tier = (array) $tier;
-                $min = (int) ($tier['min'] ?? 0);
-                $value = (int) ($tier['value'] ?? 0);
-                if ($min < 1 || $value < 1 || $value > 5) {
-                    continue;
-                }
-                $tiers[$min] = $value;
-            }
-            if ($tiers === []) {
-                throw new \InvalidArgumentException('Count mode needs at least one severity tier (minimum active count → severity).');
-            }
-            ksort($tiers);
-            $tiers = array_slice($tiers, 0, 10, true);
-            $normalizedOutput['severity_tiers'] = [];
-            foreach ($tiers as $min => $value) {
-                $normalizedOutput['severity_tiers'][] = ['min' => $min, 'value' => $value];
-            }
-        }
-
-        if ($mode === 'existing_item') {
-            $normalizedOutput['itemid'] = trim((string) ($output['itemid'] ?? ''));
-            $normalizedOutput['hostid'] = trim((string) ($output['hostid'] ?? ''));
-            $normalizedOutput['host'] = trim((string) ($output['host'] ?? ''));
-            $normalizedOutput['key'] = trim((string) ($output['key'] ?? ''));
-            if ($normalizedOutput['itemid'] === '' && ($normalizedOutput['host'] === '' || $normalizedOutput['key'] === '')) {
-                throw new \InvalidArgumentException('Existing-item output requires an item id or a host and key.');
-            }
-        }
-        else {
-            $correlationId = CorrelationStore::slug((string) (trim((string) ($output['correlation_id'] ?? '')) ?: $name));
-            $normalizedOutput['correlation_id'] = $correlationId;
-            // Automatic: the receiver host is provisioned (and filled in) on save;
-            // a host name submitted alongside is ignored.
-            $normalizedOutput['receiver_auto'] = Util::truthy($output['receiver_auto'] ?? false);
-            $normalizedOutput['receiver_host'] = $normalizedOutput['receiver_auto']
-                ? '' : Util::cleanString($output['receiver_host'] ?? '', 128);
-        }
-
-        return [
-            'id' => $id,
-            'enabled' => (bool) ($rule['enabled'] ?? true),
-            'name' => $name,
-            'description' => trim((string) ($rule['description'] ?? '')),
-            'conditions' => $normalizedConditions,
-            'output' => $normalizedOutput,
-            'updated_at' => time(),
-            'updated_at_iso' => gmdate('c')
-        ];
+        return \Modules\TriggerCorrelation\Lib\RuleDefinition::normalize($rule, 'correlation');
     }
 }

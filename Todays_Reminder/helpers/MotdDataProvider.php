@@ -4,1357 +4,720 @@ declare(strict_types = 0);
 
 namespace Modules\MessageOfTheDay\Helpers;
 
+require_once __DIR__.'/MaintenanceSchedule.php';
+require_once __DIR__.'/RequestContext.php';
+
 use API;
 use CUrl;
 
 class MotdDataProvider {
-
-	private const SEVERITY_HIGH = 4;
-	private const SEVERITY_CRITICAL = 5;
-
-	private const TIMEPERIOD_TYPE_ONETIME = 0;
-	private const TIMEPERIOD_TYPE_DAILY = 2;
-	private const TIMEPERIOD_TYPE_WEEKLY = 3;
-	private const TIMEPERIOD_TYPE_MONTHLY = 4;
-
-	/** Short server-side cache lifetime (seconds) for the aggregated payload. */
 	private const CACHE_TTL = 45;
+	private const CACHE_VERSION = '1.1.0';
+	private const EVENT_PAGE_SIZE = 1000;
+	private const MAX_EVENT_SCAN = 20000;
+	private const MAX_SCOPE_HOSTS = 20000;
+	private const MAX_HEALTH_HOSTS = 5000;
+	private const MAX_STALE_ITEMS = 2000;
+	private const MAX_QUEUE_AGE = 900;
 
-	/** Bound how many trigger ids are resolved per API round-trip. */
-	private const TRIGGER_CHUNK = 1000;
-
-	/** Cap the stale-item row scan used only to count distinct affected hosts. */
-	private const MAX_STALE_ITEM_SCAN = 2000;
-
-	/** Cap the unreachable host-interface scan on large installs. */
-	private const MAX_UNREACHABLE_INTERFACES = 5000;
-
-	/** zabbix[queue,10m] items considered (server first, then proxies). */
-	private const MAX_QUEUE_ITEMS = 50;
-
-	/** Per-instance trigger metadata cache populated by a single batched lookup. */
+	private $filters = ['groupid' => '0', 'tag' => '', 'tag_value' => ''];
+	private $hostids = null;
+	private $scope_groups = [];
+	private $scope_group_names = [];
+	private $scope_failed = false;
+	private $issues = [];
+	private $success = [];
+	private $failures = [];
 	private $trigger_cache = [];
+	private $maintenance_timezone = null;
+	private $deadline;
 
-	/**
-	 * Return the aggregated banner/overview payload, served from a short file cache when fresh.
-	 *
-	 * @param string $cache_scope  Per-user scope key (user id) so users with different
-	 *                             permission-filtered visibility never share a cached payload.
-	 */
-	public function getData(string $cache_scope = 'global'): array {
+	/** A cache is private to one user, installation, filter, language and timezone. */
+	public function getData(string $cache_scope = 'global', array $filters = []): array {
+		$this->filters = self::normalizeFilters($filters);
+		$this->hostids = null;
+		$this->scope_groups = [];
+		$this->scope_group_names = [];
+		$this->scope_failed = false;
+		$this->issues = $this->success = $this->failures = $this->trigger_cache = [];
 		$cached = $this->readCache($cache_scope);
-		if ($cached !== null) {
-			return $cached;
-		}
-
+		if ($cached !== null) return $cached;
 		$data = $this->buildData();
 		$this->writeCache($cache_scope, $data);
-
 		return $data;
+	}
+
+	public static function normalizeFilters(array $filters): array {
+		return RequestContext::filters($filters);
 	}
 
 	private function buildData(): array {
-		set_time_limit(300);
-
+		$this->deadline = microtime(true) + 20;
 		$timezone = $this->getTimezone();
 		$now = new \DateTimeImmutable('now', $timezone);
-		$today_start = $now->setTime(0, 0, 0);
-		$tomorrow_start = $today_start->modify('+1 day');
-		$week_start = $today_start->modify('monday this week');
-		$week_end = $week_start->modify('+7 days');
-
-		$problems = $this->getProblemSummary($timezone, $now);
-		$unacked = $this->getUnacknowledgedProblems($timezone, $now);
-		$longest = $this->getLongestRunningProblems($timezone, $now);
-		$resolved = $this->getRecentlyResolvedProblems($timezone, $now);
-		$health = $this->getMonitoringHealth();
+		$today = $now->setTime(0, 0);
+		$this->resolveScope();
+		$groups = $this->query('HostGroup', ['output' => ['groupid', 'name'], 'sortfield' => 'name'], 'filters', false);
+		$this->expandScopeGroups($groups ?? []);
+		$problems = $this->getProblemSummary();
+		$unacked = $this->getUnacknowledgedProblems();
+		$longest = $this->getLongestRunningProblems();
+		$resolved = $this->getRecentlyResolvedProblems($now);
+		$health = $this->getMonitoringHealth($now);
 		$new_hosts = $this->getNewHosts24h($timezone, $now);
-		$maintenances = $this->getMaintenanceSummary($now, $today_start, $tomorrow_start, $week_end, $timezone);
-
-		// Resolve every referenced trigger (and its hosts) in a single batched lookup instead of
-		// one Trigger.get per problem section.
-		$this->primeTriggerCache([
-			$problems['_recent_raw'] ?? [],
-			$unacked['_recent_raw'] ?? [],
-			$longest['_recent_raw'] ?? [],
-			$resolved['_top_raw'] ?? []
-		]);
-
-		$problems['recent'] = $this->formatProblemRows($problems['_recent_raw'] ?? [], $timezone, $now);
-		unset($problems['_recent_raw']);
-
-		$unacked['recent'] = $this->formatProblemRows($unacked['_recent_raw'] ?? [], $timezone, $now);
-		unset($unacked['_recent_raw']);
-
-		$longest['recent'] = $this->formatProblemRows($longest['_recent_raw'] ?? [], $timezone, $now);
-		unset($longest['_recent_raw']);
-
-		$resolved_rows = $this->formatProblemRows($resolved['_top_raw'] ?? [], $timezone, $now);
-		foreach ($resolved_rows as $idx => &$row) {
-			$meta = $resolved['_top_meta'][$idx] ?? null;
-			if ($meta !== null) {
-				$row['resolved_at'] = $meta['resolved_at'];
-				$row['resolved_at_text'] = $this->formatTimestamp($meta['resolved_at'], $timezone);
-				$row['resolved_age_text'] = $this->formatAge($meta['resolved_at'], $now->getTimestamp());
-				$row['mttr'] = $meta['mttr'];
-				$row['mttr_text'] = $this->formatDuration($meta['mttr']);
-			}
+		$maintenances = $this->getMaintenanceSummary($now, $today, $today->modify('+1 day'),
+			$today->modify('monday this week')->modify('+7 days'), $timezone);
+		$this->primeTriggerCache([$problems['_recent_raw'], $unacked['_recent_raw'],
+			$longest['_recent_raw'], $resolved['_top_raw']]);
+		foreach (['problems', 'unacked', 'longest'] as $section) {
+			${$section}['recent'] = $this->formatProblemRows(${$section}['_recent_raw'], $timezone, $now);
+			unset(${$section}['_recent_raw']);
 		}
-		unset($row);
-		$resolved['recent'] = $resolved_rows;
-		unset($resolved['_top_raw'], $resolved['_top_meta']);
-
-		$summary_line = $this->buildSummaryLine($problems, $unacked, $maintenances);
-		$banner_items = $this->buildBannerItems($problems, $unacked, $longest, $maintenances);
-		$chips = $this->buildSummaryChips($problems, $unacked, $health, $new_hosts, $maintenances);
-
-		$data = [
-			'title' => _('Today\'s Reminder'),
-			'generated_at' => $now->getTimestamp(),
-			'generated_at_text' => $now->format('Y-m-d H:i'),
-			'timezone' => $timezone->getName(),
-			'summary_line' => $summary_line,
-			'banner_items' => $banner_items,
-			'chips' => $chips,
-			'problems' => $problems,
-			'unacked' => $unacked,
-			'longest' => $longest,
-			'resolved' => $resolved,
-			'health' => $health,
-			'new_hosts' => $new_hosts,
-			'maintenances' => $maintenances,
-			'links' => [
-				'module' => $this->buildUrl('motd.view'),
-				'problems' => $this->buildUrl('problem.view'),
-				'maintenance' => $this->buildUrl('maintenance.list')
-			]
+		$resolved['recent'] = $this->formatProblemRows($resolved['_top_raw'], $timezone, $now);
+		foreach ($resolved['recent'] as $idx => &$row) {
+			$meta = $resolved['_top_meta'][$idx];
+			$row['resolved_at'] = $meta['resolved_at'];
+			$row['resolved_at_text'] = $this->formatTimestamp($meta['resolved_at'], $timezone);
+			$row['resolved_age_text'] = $this->formatAge($meta['resolved_at'], $now->getTimestamp());
+			$row['mttr'] = $meta['mttr'];
+			$row['mttr_text'] = $this->formatDuration($meta['mttr']);
+		}
+		unset($row, $resolved['_top_raw'], $resolved['_top_meta']);
+		$sections = compact('problems', 'unacked', 'longest', 'resolved', 'health', 'new_hosts', 'maintenances');
+		foreach ($sections as $name => &$section) $section += $this->sectionState($name);
+		unset($section);
+		extract($sections, EXTR_OVERWRITE);
+		$has_data = $problems['high_count'] !== null || $problems['critical_count'] !== null
+			|| $unacked['count'] !== null || $resolved['count'] !== null || $new_hosts['count'] !== null
+			|| $maintenances['today_count'] !== null || (isset($this->success['longest']) && !isset($this->failures['longest']));
+		foreach (['stale_items_total', 'unreachable_hosts', 'unreachable_proxies', 'queue_backlog'] as $metric) {
+			$has_data = $has_data || $health[$metric] !== null;
+		}
+		$status = !$this->issues ? 'ok' : (!$has_data ? 'unavailable' : 'partial');
+		$data = $sections + [
+			'title' => _('Today\'s Reminder'), 'generated_at' => $now->getTimestamp(),
+			'generated_at_text' => $now->format('Y-m-d H:i'), 'timezone' => $timezone->getName(),
+			'maintenance_timezone' => $this->maintenance_timezone,
+			'filters' => $this->filters, 'filter_options' => ['groups' => $groups ?? []],
+			'status' => $status, 'issues' => array_values($this->issues),
+			'summary_line' => $this->buildSummaryLine($problems, $unacked, $maintenances),
+			'banner_items' => $this->buildBannerItems($problems, $unacked, $longest, $maintenances),
+			'chips' => $this->buildSummaryChips($problems, $unacked, $health, $new_hosts, $maintenances),
+			'links' => ['module' => $this->moduleUrl(), 'problems' => $this->buildProblemFilterUrl([4, 5]),
+				'maintenance' => $this->moduleUrl().'#motd-maintenance']
 		];
-
-		$data['fingerprint'] = sha1(json_encode([
-			$summary_line,
-			$problems['high_count'],
-			$problems['critical_count'],
-			$unacked['count'],
-			$health['stale_items_total'],
-			$health['unreachable_hosts'],
-			$health['unreachable_proxies'],
-			$health['queue_backlog'],
-			$new_hosts['count'],
-			$resolved['count'],
-			array_map(static function(array $item): array {
-				return [
-					$item['maintenanceid'] ?? '',
-					$item['start_ts'] ?? 0,
-					$item['end_ts'] ?? 0,
-					$item['status'] ?? ''
-				];
-			}, $maintenances['today']),
-			array_map(static function(array $item): array {
-				return [
-					$item['maintenanceid'] ?? '',
-					$item['start_ts'] ?? 0,
-					$item['end_ts'] ?? 0,
-					$item['status'] ?? ''
-				];
-			}, $maintenances['week'])
-		], JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: 'motd');
-
+		// Include every displayed field, including incident identity, coverage and relative age.
+		$fingerprint_data = $data;
+		unset($fingerprint_data['generated_at'], $fingerprint_data['generated_at_text']);
+		$data['fingerprint'] = hash('sha256', json_encode($fingerprint_data,
+			JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
 		return $data;
 	}
 
-	private function cacheFile(string $scope): string {
-		return sys_get_temp_dir().'/zbx_motd_'.sha1($this->installSalt().'|'.$scope).'.json';
-	}
-
-	/**
-	 * Per-install salt so two Zabbix frontends sharing a host temp dir never read
-	 * each other's cached payloads (the scope itself is only a per-user id).
-	 */
-	private function installSalt(): string {
-		global $DB;
-
-		return (string) (($DB['DATABASE'] ?? '').'@'.($DB['SERVER'] ?? '').':'.($DB['PORT'] ?? ''));
-	}
-
-	private function readCache(string $scope): ?array {
-		$file = $this->cacheFile($scope);
-		if (!is_file($file)) {
-			return null;
+	private function resolveScope(): void {
+		if ($this->filters['groupid'] === '0' && $this->filters['tag'] === '') return;
+		$options = ['output' => ['hostid'], 'selectHostGroups' => ['groupid', 'name'],
+			'limit' => self::MAX_SCOPE_HOSTS + 1, 'sortfield' => 'hostid'];
+		if ($this->filters['groupid'] !== '0') $options['groupids'] = [$this->filters['groupid']];
+		if ($this->filters['tag'] !== '') {
+			$options['inheritedTags'] = true;
+			$options['tags'] = [['tag' => $this->filters['tag'], 'value' => $this->filters['tag_value'],
+				'operator' => $this->filters['tag_value'] === '' ? 4 : 1]];
 		}
-
-		$mtime = @filemtime($file);
-		if ($mtime === false || (time() - $mtime) > self::CACHE_TTL) {
-			return null;
-		}
-
-		$raw = @file_get_contents($file);
-		if ($raw === false || $raw === '') {
-			return null;
-		}
-
-		$decoded = json_decode($raw, true);
-
-		return is_array($decoded) ? $decoded : null;
-	}
-
-	private function writeCache(string $scope, array $data): void {
-		$json = json_encode($data, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-		if ($json === false) {
+		$hosts = $this->query('Host', $options, 'filters', false);
+		if ($hosts === null || count($hosts) > self::MAX_SCOPE_HOSTS) {
+			$this->scope_failed = true;
+			$this->hostids = [];
+			$this->issue('filters', $hosts === null ? _('The selected host scope could not be loaded.')
+				: _('The selected scope exceeds 20,000 hosts. Choose a smaller group or tag.'));
 			return;
 		}
-
-		$file = $this->cacheFile($scope);
-		$tmp = $file.'.'.getmypid().'.tmp';
-		if (@file_put_contents($tmp, $json, LOCK_EX) !== false) {
-			@rename($tmp, $file);
-		}
-		else {
-			@unlink($tmp);
+		$this->hostids = array_map('strval', array_column($hosts, 'hostid'));
+		foreach ($hosts as $host) {
+			foreach ($host['hostgroups'] ?? [] as $group) {
+				$this->scope_groups[(string) $group['groupid']] = true;
+				if (isset($group['name'])) $this->scope_group_names[(string) $group['name']] = true;
+			}
 		}
 	}
 
-	/**
-	 * Populate $this->trigger_cache for every distinct objectid across the supplied row sets using
-	 * a single chunked Trigger.get, so the per-section formatters never hit the API individually.
-	 *
-	 * @param array $row_sets  List of raw problem/event row arrays (each row may carry an objectid).
-	 */
-	private function primeTriggerCache(array $row_sets): void {
-		$ids = [];
-		foreach ($row_sets as $rows) {
-			if (!is_array($rows)) {
-				continue;
+	private function expandScopeGroups(array $groups): void {
+		if ($this->hostids === null || !$this->scope_groups) return;
+		$names = [];
+		foreach ($groups as $group) {
+			if (isset($this->scope_groups[(string) $group['groupid']])) {
+				$names[] = (string) $group['name'];
+				$this->scope_group_names[(string) $group['name']] = true;
 			}
-			foreach ($rows as $problem) {
-				$oid = (string) ($problem['objectid'] ?? '');
-				if ($oid !== '' && !array_key_exists($oid, $this->trigger_cache)) {
-					$ids[$oid] = true;
+		}
+		// Zabbix maintenance assigned to a parent host group also covers its subgroups.
+		foreach ($groups as $group) {
+			foreach ($names as $name) {
+				$prefix = (string) $group['name'].'/';
+				if (strncmp($name, $prefix, strlen($prefix)) === 0) $this->scope_groups[(string) $group['groupid']] = true;
+			}
+		}
+	}
+
+	/** Failures are data, never a healthy zero. Empty scopes never widen to all hosts. */
+	private function query(string $service, array $options, string $section, bool $scoped = true) {
+		if ($scoped && $this->scope_failed) {
+			$this->issue($section, _('Unavailable because the selected host scope could not be loaded.'));
+			return null;
+		}
+		if ($scoped && $this->hostids === []) {
+			$this->success[$section] = true;
+			return !empty($options['countOutput']) ? 0 : [];
+		}
+		if ($scoped && $this->hostids !== null) $options['hostids'] = $this->hostids;
+		if ($service === 'AuditLog' && (int) (\CWebUser::$data['type'] ?? 0) < 3) {
+			$this->issue($section, _('New-host activity requires permission to read the audit log.'));
+			return null;
+		}
+		if ($this->deadline !== null && microtime(true) >= $this->deadline) {
+			$this->issue($section, _('The data collection time budget was reached. Refresh to retry.'));
+			return null;
+		}
+		try {
+			$result = API::$service()->get($options);
+			if (!empty($options['countOutput'])) {
+				if (!(is_int($result) && $result >= 0) && !(is_string($result) && preg_match('/^[0-9]+$/D', $result))) {
+					throw new \RuntimeException('Unexpected API count response.');
 				}
 			}
+			elseif (!is_array($result)) throw new \RuntimeException('Unexpected API row response.');
+			$this->success[$section] = true;
+			return !empty($options['countOutput']) ? (int) $result : $result;
 		}
-
-		if (!$ids) {
-			return;
-		}
-
-		foreach (array_chunk(array_keys($ids), self::TRIGGER_CHUNK) as $chunk) {
-			try {
-				$triggers = API::Trigger()->get([
-					'output' => ['triggerid'],
-					'triggerids' => $chunk,
-					'selectHosts' => ['hostid', 'host', 'name'],
-					'preservekeys' => true
-				]);
-				foreach ($triggers as $tid => $trigger) {
-					$this->trigger_cache[(string) $tid] = $trigger;
-				}
-			}
-			catch (\Throwable $e) {
-				// Leave unresolved triggers uncached; their rows simply render without host names.
-			}
+		catch (\Throwable $e) {
+			$this->issue($section, _('Data could not be loaded or is not permitted for this account.'));
+			error_log('Today\'s Reminder '.$section.' '.$service.'.get: '.$e->getMessage());
+			return null;
 		}
 	}
 
-	private function getProblemSummary(\DateTimeZone $timezone, \DateTimeImmutable $now): array {
-		$high_count = 0;
-		$critical_count = 0;
-		$suppressed_count = 0;
-		$recent = [];
-
-		try {
-			$high_count = (int) API::Problem()->get([
-				'countOutput' => true,
-				'severities' => [self::SEVERITY_HIGH],
-				'suppressed' => false
-			]);
-		}
-		catch (\Throwable $e) {
-			$high_count = 0;
-		}
-
-		try {
-			$critical_count = (int) API::Problem()->get([
-				'countOutput' => true,
-				'severities' => [self::SEVERITY_CRITICAL],
-				'suppressed' => false
-			]);
-		}
-		catch (\Throwable $e) {
-			$critical_count = 0;
-		}
-
-		try {
-			$suppressed_count = (int) API::Problem()->get([
-				'countOutput' => true,
-				'severities' => [self::SEVERITY_HIGH, self::SEVERITY_CRITICAL],
-				'suppressed' => true
-			]);
-		}
-		catch (\Throwable $e) {
-			$suppressed_count = 0;
-		}
-
-		try {
-			$recent = API::Problem()->get([
-				'output' => ['eventid', 'objectid', 'clock', 'name', 'severity'],
-				'severities' => [self::SEVERITY_HIGH, self::SEVERITY_CRITICAL],
-				'suppressed' => false,
-				'sortfield' => ['eventid'],
-				'sortorder' => 'DESC',
-				'limit' => 8
-			]);
-		}
-		catch (\Throwable $e) {
-			$recent = [];
-		}
-
-		return [
-			'high_count' => $high_count,
-			'critical_count' => $critical_count,
-			'suppressed_count' => $suppressed_count,
-			'total' => $high_count + $critical_count,
-			'_recent_raw' => $recent,
-			'all_url' => $this->buildUrl('problem.view'),
-			'high_url' => $this->buildProblemFilterUrl([self::SEVERITY_HIGH]),
-			'critical_url' => $this->buildProblemFilterUrl([self::SEVERITY_CRITICAL]),
-			'high_critical_url' => $this->buildProblemFilterUrl([self::SEVERITY_HIGH, self::SEVERITY_CRITICAL]),
-			'suppressed_url' => $this->buildProblemSuppressedUrl()
-		];
+	private function issue(string $section, string $message): void {
+		$this->failures[$section] = true;
+		$this->issues[$section.'|'.$message] = ['section' => $section, 'message' => $message];
 	}
 
-	private function formatProblemRows(array $problems, \DateTimeZone $timezone, \DateTimeImmutable $now): array {
-		if (!$problems) {
-			return [];
-		}
-
-		$formatted = [];
-		foreach ($problems as $problem) {
-			$severity = (int) ($problem['severity'] ?? 0);
-			$clock = (int) ($problem['clock'] ?? 0);
-			$triggerid = (string) ($problem['objectid'] ?? '');
-			$hosts = [];
-
-			if ($triggerid !== '' && array_key_exists($triggerid, $this->trigger_cache)) {
-				foreach ($this->trigger_cache[$triggerid]['hosts'] ?? [] as $host) {
-					$hosts[] = (string) ($host['name'] ?? $host['host'] ?? '');
-				}
-			}
-
-			$hosts = array_values(array_filter(array_unique($hosts), static function(string $value): bool {
-				return $value !== '';
-			}));
-
-			$formatted[] = [
-				'eventid' => (string) ($problem['eventid'] ?? ''),
-				'triggerid' => $triggerid,
-				'name' => (string) ($problem['name'] ?? ''),
-				'severity' => $severity,
-				'severity_label' => $this->severityLabel($severity),
-				'severity_key' => $this->severityKey($severity),
-				'clock' => $clock,
-				'clock_text' => $clock > 0 ? $this->formatTimestamp($clock, $timezone) : '',
-				'age_text' => $clock > 0 ? $this->formatAge($clock, $now->getTimestamp()) : '',
-				'acknowledged' => (int) ($problem['acknowledged'] ?? 0) === 1,
-				'hosts' => $hosts,
-				'host_text' => $this->formatNameList($hosts, 2),
-				'url' => $this->buildProblemTriggerUrl($triggerid)
-			];
-		}
-
-		return $formatted;
+	private function sectionState(string $section): array {
+		$messages = [];
+		foreach ($this->issues as $issue) if ($issue['section'] === $section) $messages[] = $issue['message'];
+		return ['status' => isset($this->failures[$section])
+			? (isset($this->success[$section]) ? 'partial' : 'unavailable') : 'ok',
+			'message' => implode(' ', $messages)];
 	}
 
-	private function getUnacknowledgedProblems(\DateTimeZone $timezone, \DateTimeImmutable $now): array {
-		$count = 0;
-		$items = [];
-
-		try {
-			$count = (int) API::Problem()->get([
-				'countOutput' => true,
-				'severities' => [self::SEVERITY_HIGH, self::SEVERITY_CRITICAL],
-				'acknowledged' => false,
-				'suppressed' => false
-			]);
-		}
-		catch (\Throwable $e) {
-			$count = 0;
-		}
-
-		try {
-			$items = API::Problem()->get([
-				'output' => ['eventid', 'objectid', 'clock', 'name', 'severity', 'acknowledged'],
-				'severities' => [self::SEVERITY_HIGH, self::SEVERITY_CRITICAL],
-				'acknowledged' => false,
-				'suppressed' => false,
-				'sortfield' => ['eventid'],
-				'sortorder' => 'DESC',
-				'limit' => 5
-			]);
-		}
-		catch (\Throwable $e) {
-			$items = [];
-		}
-
-		return [
-			'count' => $count,
-			'_recent_raw' => $items,
-			'url' => $this->buildProblemUnackedUrl()
-		];
+	private function getProblemSummary(): array {
+		$high = $this->query('Problem', ['countOutput' => true, 'severities' => [4], 'suppressed' => false], 'problems');
+		$critical = $this->query('Problem', ['countOutput' => true, 'severities' => [5], 'suppressed' => false], 'problems');
+		$suppressed = $this->query('Problem', ['countOutput' => true, 'severities' => [4, 5], 'suppressed' => true], 'problems');
+		$recent = $this->query('Problem', $this->problemOptions(8), 'problems');
+		return ['high_count' => $high, 'critical_count' => $critical, 'suppressed_count' => $suppressed,
+			'total' => $high === null || $critical === null ? null : $high + $critical,
+			'_recent_raw' => $recent ?? [], 'all_url' => $this->buildProblemFilterUrl([4, 5]),
+			'high_url' => $this->buildProblemFilterUrl([4]), 'critical_url' => $this->buildProblemFilterUrl([5]),
+			'high_critical_url' => $this->buildProblemFilterUrl([4, 5]),
+			'suppressed_url' => $this->buildProblemFilterUrl([4, 5], ['show_suppressed' => 1])];
 	}
 
-	private function getLongestRunningProblems(\DateTimeZone $timezone, \DateTimeImmutable $now): array {
-		$items = [];
-
-		try {
-			$items = API::Problem()->get([
-				'output' => ['eventid', 'objectid', 'clock', 'name', 'severity', 'acknowledged'],
-				'severities' => [self::SEVERITY_HIGH, self::SEVERITY_CRITICAL],
-				'suppressed' => false,
-				'sortfield' => ['eventid'],
-				'sortorder' => 'ASC',
-				'limit' => 5
-			]);
-		}
-		catch (\Throwable $e) {
-			$items = [];
-		}
-
-		return [
-			'_recent_raw' => $items
-		];
+	private function problemOptions(int $limit, string $sort = 'DESC'): array {
+		return ['output' => ['eventid', 'objectid', 'clock', 'name', 'severity', 'acknowledged'],
+			'severities' => [4, 5], 'suppressed' => false, 'sortfield' => ['eventid'],
+			'sortorder' => $sort, 'limit' => $limit];
 	}
 
-	private function getRecentlyResolvedProblems(\DateTimeZone $timezone, \DateTimeImmutable $now): array {
+	private function getUnacknowledgedProblems(): array {
+		$count = $this->query('Problem', ['countOutput' => true, 'severities' => [4, 5],
+			'acknowledged' => false, 'suppressed' => false], 'unacked');
+		$rows = $this->query('Problem', $this->problemOptions(5) + ['acknowledged' => false], 'unacked');
+		return ['count' => $count, '_recent_raw' => $rows ?? [],
+			'url' => $this->buildProblemFilterUrl([4, 5], ['acknowledgement_status' => 1])];
+	}
+
+	private function getLongestRunningProblems(): array {
+		return ['_recent_raw' => $this->query('Problem', $this->problemOptions(5, 'ASC'), 'longest') ?? []];
+	}
+
+	private function getRecentlyResolvedProblems(\DateTimeImmutable $now): array {
 		$since = $now->getTimestamp() - 86400;
-		$problem_events = [];
-
-		try {
-			$problem_events = API::Event()->get([
-				'output' => ['eventid', 'clock', 'name', 'severity', 'objectid', 'r_eventid'],
-				'source' => 0,
-				'object' => 0,
-				'value' => 1,
-				'severities' => [self::SEVERITY_HIGH, self::SEVERITY_CRITICAL],
-				'sortfield' => ['eventid'],
-				'sortorder' => 'DESC',
-				'limit' => 200
-			]);
-		}
-		catch (\Throwable $e) {
-			$problem_events = [];
-		}
-
-		$recovery_ids = [];
-		foreach ($problem_events as $event) {
-			$rid = (string) ($event['r_eventid'] ?? '0');
-			if ($rid !== '' && $rid !== '0') {
-				$recovery_ids[] = $rid;
-			}
-		}
-
-		$recovery_map = [];
-		if ($recovery_ids) {
-			try {
-				$recoveries = API::Event()->get([
-					'output' => ['eventid', 'clock'],
-					'eventids' => array_values(array_unique($recovery_ids))
-				]);
-				foreach ($recoveries as $rec) {
-					$recovery_map[(string) $rec['eventid']] = (int) $rec['clock'];
+		// Overlap filters include old starts whose recovery falls in the last 24 hours.
+		// event.get cannot filter r_eventid directly; recoveries are joined by event ID.
+		$base = ['source' => 0, 'object' => 0, 'value' => 1, 'severities' => [4, 5],
+			'problem_time_from' => $since, 'problem_time_till' => $now->getTimestamp()];
+		$total = $this->query('Event', $base + ['countOutput' => true], 'resolved');
+		$resolved = [];
+		$scanned = 0;
+		$cursor = null;
+		$complete = $total !== null;
+		while ($total !== null && $scanned < $total && $scanned < self::MAX_EVENT_SCAN) {
+			$options = $base + ['output' => ['eventid', 'clock', 'name', 'severity', 'objectid', 'r_eventid'],
+				'sortfield' => 'eventid', 'sortorder' => 'DESC', 'limit' => self::EVENT_PAGE_SIZE];
+			if ($cursor !== null) $options['eventid_till'] = $cursor;
+			$events = $this->query('Event', $options, 'resolved');
+			if ($events === null || !$events) { $complete = false; break; }
+			$scanned += count($events);
+			$recovery_ids = [];
+			foreach ($events as $event) if (!empty($event['r_eventid'])) $recovery_ids[(string) $event['r_eventid']] = true;
+			$recoveries = $recovery_ids ? $this->query('Event', ['output' => ['eventid', 'clock'],
+				'eventids' => array_keys($recovery_ids), 'source' => 0, 'object' => 0, 'value' => 0], 'resolved') : [];
+			if ($recoveries === null) { $complete = false; break; }
+			$clocks = array_column($recoveries, 'clock', 'eventid');
+			foreach ($events as $event) {
+				$rid = (string) ($event['r_eventid'] ?? '0');
+				if ($rid === '0' || $rid === '') continue;
+				if (!isset($clocks[$rid])) { $complete = false; continue; }
+				$recovered = (int) $clocks[$rid];
+				if ($recovered >= $since && $recovered <= $now->getTimestamp()) {
+					$resolved[(string) $event['eventid']] = ['problem_event' => $event,
+						'resolved_at' => $recovered, 'mttr' => max(0, $recovered - (int) $event['clock'])];
 				}
 			}
-			catch (\Throwable $e) {
-				$recovery_map = [];
-			}
+			$last = end($events);
+			$next = $this->previousId((string) $last['eventid']);
+			if ($next === $cursor || $next === '0') { $complete = $complete && $scanned >= $total; break; }
+			$cursor = $next;
 		}
-
-		$resolved = [];
-		$count = 0;
-		$mttr_sum = 0;
-		$mttr_count = 0;
-
-		foreach ($problem_events as $event) {
-			$rid = (string) ($event['r_eventid'] ?? '0');
-			if ($rid === '' || $rid === '0' || !isset($recovery_map[$rid])) {
-				continue;
-			}
-			$r_clock = $recovery_map[$rid];
-			if ($r_clock < $since) {
-				continue;
-			}
-			$p_clock = (int) ($event['clock'] ?? 0);
-			$mttr = max(0, $r_clock - $p_clock);
-			$mttr_sum += $mttr;
-			$mttr_count++;
-			$count++;
-
-			$resolved[] = [
-				'problem_event' => $event,
-				'resolved_at' => $r_clock,
-				'mttr' => $mttr
-			];
+		$complete = $complete && $scanned >= ($total ?? 0);
+		if (!$complete && $total !== null) {
+			$this->issue('resolved', _('The recovery report is incomplete. The count is a minimum; average MTTR is unavailable.'));
 		}
-
-		usort($resolved, static function(array $a, array $b): int {
-			return $b['resolved_at'] <=> $a['resolved_at'];
-		});
-
+		usort($resolved, static function(array $a, array $b): int { return $b['resolved_at'] <=> $a['resolved_at']; });
+		$count = $total === null ? null : count($resolved);
+		$mean = $complete && $count > 0 ? (int) round(array_sum(array_column($resolved, 'mttr')) / $count) : null;
 		$top = array_slice($resolved, 0, 5);
-
-		return [
-			'count' => $count,
-			'_top_raw' => array_column($top, 'problem_event'),
-			'_top_meta' => array_values($top),
-			'avg_mttr' => $mttr_count > 0 ? (int) round($mttr_sum / $mttr_count) : 0,
-			'avg_mttr_text' => $mttr_count > 0 ? $this->formatDuration((int) round($mttr_sum / $mttr_count)) : ''
-		];
+		return ['count' => $count, 'count_is_lower_bound' => !$complete && $count !== null,
+			'truncated' => !$complete, 'candidates_scanned' => $scanned, 'candidates_total' => $total,
+			'avg_mttr' => $mean, 'avg_mttr_text' => $mean === null ? '' : $this->formatDuration($mean),
+			'_top_raw' => array_column($top, 'problem_event'), '_top_meta' => $top];
 	}
 
-	private function getMonitoringHealth(): array {
-		$stale_total = 0;
-		$stale_hosts = 0;
-		$stale_hosts_truncated = false;
-
-		try {
-			$stale_total = (int) API::Item()->get([
-				'countOutput' => true,
-				'filter' => ['state' => 1],
-				'monitored' => true
-			]);
+	private function previousId(string $id): string {
+		// Zabbix IDs may exceed PHP_INT_MAX; keep pagination arithmetic decimal-string safe.
+		for ($i = strlen($id) - 1; $i >= 0; $i--) {
+			if ($id[$i] !== '0') {
+				$id[$i] = (string) ((int) $id[$i] - 1);
+				return ltrim($id, '0') ?: '0';
+			}
+			$id[$i] = '9';
 		}
-		catch (\Throwable $e) {
-			$stale_total = 0;
-		}
+		return '0';
+	}
 
-		// The total is a cheap countOutput; the distinct-host figure needs hostids, so cap that scan
-		// hard and flag truncation rather than transferring tens of thousands of rows on every refresh.
-		if ($stale_total > 0) {
-			try {
-				$stale_items = API::Item()->get([
-					'output' => ['hostid'],
-					'filter' => ['state' => 1],
-					'monitored' => true,
-					'limit' => self::MAX_STALE_ITEM_SCAN
-				]);
-				$host_ids = [];
-				foreach ($stale_items as $item) {
-					if (!empty($item['hostid'])) {
-						$host_ids[(string) $item['hostid']] = true;
+	private function getMonitoringHealth(\DateTimeImmutable $now): array {
+		$messages = [];
+		$total = $this->query('Item', ['countOutput' => true, 'filter' => ['state' => 1], 'monitored' => true], 'health');
+		$affected = $total === null ? null : 0;
+		$stale_truncated = false;
+		if ($total > 0) {
+			$items = $this->query('Item', ['output' => ['hostid'], 'filter' => ['state' => 1],
+				'monitored' => true, 'sortfield' => 'itemid', 'limit' => self::MAX_STALE_ITEMS], 'health');
+			$affected = $items === null ? null : count(array_unique(array_column($items, 'hostid')));
+			$stale_truncated = $items !== null && count($items) < $total;
+		}
+		if ($total === null || $affected === null) $messages['stale_items_total'] = _('Unsupported-item coverage is unavailable.');
+		if ($stale_truncated) {
+			$messages['stale_items_hosts'] = _('Affected hosts is a minimum from the first 2,000 unsupported items.');
+			$this->issue('health', $messages['stale_items_hosts']);
+		}
+		$hosts = $this->query('Host', ['output' => ['hostid', 'name', 'host', 'active_available'],
+			'filter' => ['status' => 0], 'selectInterfaces' => ['available'],
+			'sortfield' => 'hostid', 'limit' => self::MAX_HEALTH_HOSTS + 1], 'health');
+		$unreachable = null;
+		$details = [];
+		$host_truncated = $hosts !== null && count($hosts) > self::MAX_HEALTH_HOSTS;
+		if ($hosts !== null) {
+			$unreachable = 0;
+			foreach (array_slice($hosts, 0, self::MAX_HEALTH_HOSTS) as $host) {
+				$bad = (int) ($host['active_available'] ?? 0) === 2;
+				foreach ($host['interfaces'] ?? [] as $interface) $bad = $bad || (int) ($interface['available'] ?? 0) === 2;
+				if ($bad) {
+					$unreachable++;
+					if (count($details) < 50) {
+						$details[] = ['hostid' => (string) $host['hostid'], 'name' => (string) ($host['name'] ?? $host['host']),
+							'url' => (new CUrl('zabbix.php'))->setArgument('action', 'latest.view')
+								->setArgument('hostids', [(string) $host['hostid']])->setArgument('filter_set', 1)->getUrl()];
 					}
 				}
-				$stale_hosts = count($host_ids);
-				$stale_hosts_truncated = count($stale_items) >= self::MAX_STALE_ITEM_SCAN;
-			}
-			catch (\Throwable $e) {
-				$stale_hosts = 0;
 			}
 		}
-
-		$unreachable_hosts = 0;
-		$unreachable_hosts_truncated = false;
-		try {
-			$bad = API::HostInterface()->get([
-				'output' => ['hostid'],
-				'filter' => ['available' => 2],
-				'limit' => self::MAX_UNREACHABLE_INTERFACES
-			]);
-			$hostids = [];
-			foreach ($bad as $iface) {
-				if (!empty($iface['hostid'])) {
-					$hostids[(string) $iface['hostid']] = true;
-				}
-			}
-			$unreachable_hosts = count($hostids);
-			$unreachable_hosts_truncated = count($bad) >= self::MAX_UNREACHABLE_INTERFACES;
+		if ($unreachable === null) $messages['unreachable_hosts'] = _('Host availability is unavailable.');
+		elseif ($host_truncated) {
+			$messages['unreachable_hosts'] = _('Minimum count from the first 5,000 monitored hosts.');
+			$this->issue('health', $messages['unreachable_hosts']);
 		}
-		catch (\Throwable $e) {
-			$unreachable_hosts = 0;
+		$proxies = $this->query('Proxy', ['output' => ['proxyid', 'state']], 'health', false);
+		$offline = $proxies === null ? null : 0;
+		$unknown_proxies = 0;
+		foreach ($proxies ?? [] as $proxy) {
+			$state = (int) ($proxy['state'] ?? 0);
+			$offline += $state === 1 ? 1 : 0;
+			$unknown_proxies += $state === 0 ? 1 : 0;
 		}
-
-		$unreachable_proxies = 0;
-		try {
-			$proxies = API::Proxy()->get([
-				'output' => ['proxyid', 'state', 'lastaccess']
-			]);
-			foreach ($proxies as $proxy) {
-				// 7.0 proxy states: 0 unknown, 1 offline, 2 online.
-				if ((int) ($proxy['state'] ?? ZBX_PROXY_STATE_UNKNOWN) === ZBX_PROXY_STATE_OFFLINE) {
-					$unreachable_proxies++;
-				}
-			}
+		if ($offline === null) $messages['unreachable_proxies'] = _('Proxy availability is unavailable.');
+		elseif ($unknown_proxies) {
+			$messages['unreachable_proxies'] = sprintf(_('%1$d proxy states are unknown.'), $unknown_proxies);
+			$this->issue('health', $messages['unreachable_proxies']);
 		}
-		catch (\Throwable $e) {
-			$unreachable_proxies = 0;
+		$queue = null;
+		$queue_clock = null;
+		$queue_items = $this->query('Item', ['output' => ['itemid'], 'selectHosts' => ['monitored_by'],
+			'filter' => ['key_' => 'zabbix[queue,10m]'], 'templated' => false, 'monitored' => true,
+			'sortfield' => 'itemid', 'limit' => 51], 'health', false);
+		$server_item = null;
+		foreach ($queue_items ?? [] as $item) {
+			if ((int) ($item['hosts'][0]['monitored_by'] ?? -1) === 0) { $server_item = $item['itemid']; break; }
 		}
-
-		$queue_backlog = null;
-		try {
-			// Only real, monitored items: the "Zabbix server health" / "Zabbix proxy health" templates
-			// carry the same key and never have history. Prefer the server's own item over a proxy's.
-			$queue_items = API::Item()->get([
-				'output' => ['itemid'],
-				'selectHosts' => ['monitored_by'],
-				'filter' => ['key_' => 'zabbix[queue,10m]'],
-				'templated' => false,
-				'monitored' => true,
-				'sortfield' => 'itemid',
-				'limit' => self::MAX_QUEUE_ITEMS
-			]);
-			if ($queue_items) {
-				$itemid = $queue_items[0]['itemid'];
-				foreach ($queue_items as $queue_item) {
-					if ((int) ($queue_item['hosts'][0]['monitored_by'] ?? -1) === ZBX_MONITORED_BY_SERVER) {
-						$itemid = $queue_item['itemid'];
-						break;
-					}
-				}
-				$history = API::History()->get([
-					'itemids' => [$itemid],
-					'history' => 3,
-					'sortfield' => 'clock',
-					'sortorder' => 'DESC',
-					'limit' => 1
-				]);
-				if ($history) {
-					$queue_backlog = (int) $history[0]['value'];
-				}
-			}
+		if ($server_item !== null) {
+			$history = $this->query('History', ['output' => ['clock', 'value'], 'itemids' => [$server_item],
+				'history' => 3, 'time_from' => $now->getTimestamp() - self::MAX_QUEUE_AGE,
+				'time_till' => $now->getTimestamp(), 'sortfield' => 'clock', 'sortorder' => 'DESC', 'limit' => 1], 'health', false);
+			if ($history) { $queue = (int) $history[0]['value']; $queue_clock = (int) $history[0]['clock']; }
 		}
-		catch (\Throwable $e) {
-			$queue_backlog = null;
+		if ($queue === null) {
+			$messages['queue_backlog'] = _('No permitted Zabbix server queue sample from the last 15 minutes.');
+			$this->issue('health', $messages['queue_backlog']);
 		}
-
-		return [
-			'stale_items_total' => $stale_total,
-			'stale_items_hosts' => $stale_hosts,
-			'stale_items_hosts_truncated' => $stale_hosts_truncated,
-			'unreachable_hosts' => $unreachable_hosts,
-			'unreachable_hosts_truncated' => $unreachable_hosts_truncated,
-			'unreachable_proxies' => $unreachable_proxies,
-			'queue_backlog' => $queue_backlog,
-			'stale_url' => $this->buildStaleItemsUrl(),
-			'unreachable_hosts_url' => $this->buildUnreachableHostsUrl(),
-			'proxy_url' => $this->buildUrl('proxy.list'),
-			'queue_url' => $this->buildUrl('queue.overview')
-		];
+		return ['stale_items_total' => $total, 'stale_items_hosts' => $affected,
+			'stale_items_hosts_truncated' => $stale_truncated, 'unreachable_hosts' => $unreachable,
+			'unreachable_hosts_truncated' => $host_truncated, 'unreachable_details' => $details,
+			'unreachable_details_truncated' => $host_truncated || $unreachable > count($details),
+			'unreachable_proxies' => $offline, 'unknown_proxies' => $unknown_proxies,
+			'queue_backlog' => $queue, 'queue_sample_at' => $queue_clock,
+			'field_messages' => $messages, 'global_metrics' => true,
+			'stale_url' => $this->buildStaleItemsUrl(), 'unreachable_hosts_url' => $this->moduleUrl().'#motd-monitoring-health',
+			'proxy_url' => $this->buildUrl('proxy.list'), 'queue_url' => $this->buildUrl('queue.overview')];
 	}
 
 	private function getNewHosts24h(\DateTimeZone $timezone, \DateTimeImmutable $now): array {
-		$since = $now->getTimestamp() - 86400;
-		$entries = [];
-		$count = 0;
-
-		$resource_host = 4;
-		$action_add = 0;
-		if (class_exists('CAudit')) {
-			if (defined('\CAudit::RESOURCE_HOST')) {
-				$resource_host = constant('\CAudit::RESOURCE_HOST');
-			}
-			if (defined('\CAudit::ACTION_ADD')) {
-				$action_add = constant('\CAudit::ACTION_ADD');
-			}
+		if ($this->scope_failed) {
+			$this->issue('new_hosts', _('Unavailable because the selected host scope could not be loaded.'));
+			return ['count' => null, 'recent' => [], 'url' => $this->moduleUrl().'#motd-monitoring-health'];
 		}
-
+		if ($this->hostids === []) {
+			$this->success['new_hosts'] = true;
+			return ['count' => 0, 'recent' => [], 'url' => $this->moduleUrl().'#motd-monitoring-health'];
+		}
+		$partial_audit = false;
 		try {
-			$audit = API::AuditLog()->get([
-				'output' => ['auditid', 'clock', 'resourceid', 'resourcename'],
-				'filter' => [
-					'resourcetype' => $resource_host,
-					'action' => $action_add
-				],
-				'time_from' => $since,
-				'sortfield' => 'clock',
-				'sortorder' => 'DESC',
-				'limit' => 20
-			]);
-
-			foreach ($audit as $row) {
-				$clock = (int) ($row['clock'] ?? 0);
-				$entries[] = [
-					'name' => (string) ($row['resourcename'] ?? ''),
-					'hostid' => (string) ($row['resourceid'] ?? ''),
-					'clock' => $clock,
-					'clock_text' => $clock > 0 ? $this->formatTimestamp($clock, $timezone) : '',
-					'age_text' => $clock > 0 ? $this->formatAge($clock, $now->getTimestamp()) : ''
-				];
+			if (class_exists('CSettingsHelper') && defined('CSettingsHelper::AUDITLOG_ENABLED')
+					&& (int) \CSettingsHelper::get(\CSettingsHelper::AUDITLOG_ENABLED) !== 1) {
+				$this->issue('new_hosts', _('Audit logging is disabled; new-host activity cannot be assessed.'));
+				return ['count' => null, 'recent' => [], 'url' => $this->moduleUrl().'#motd-monitoring-health'];
 			}
-			$count = count($audit);
+			if (class_exists('CSettingsHelper') && defined('CSettingsHelper::AUDITLOG_MODE')
+					&& (int) \CSettingsHelper::get(\CSettingsHelper::AUDITLOG_MODE) !== 1) {
+				$partial_audit = true;
+				$this->issue('new_hosts', _('System-action audit logging is disabled; discovered or autoregistered hosts may be missing.'));
+			}
 		}
 		catch (\Throwable $e) {
-			$entries = [];
-			$count = 0;
+			$partial_audit = true;
+			$this->issue('new_hosts', _('Audit logging coverage could not be verified.'));
 		}
-
-		return [
-			'count' => $count,
-			'recent' => array_slice($entries, 0, 5),
-			'url' => $this->buildUrl('host.list')
-		];
+		$filter = ['resourcetype' => 4, 'action' => 0];
+		if ($this->hostids !== null) $filter['resourceid'] = $this->hostids;
+		$options = ['filter' => $filter, 'time_from' => $now->getTimestamp() - 86400,
+			'time_till' => $now->getTimestamp()];
+		$count = $this->query('AuditLog', $options + ['countOutput' => true], 'new_hosts', false);
+		$rows = $count > 0 ? $this->query('AuditLog', $options + [
+			'output' => ['clock', 'resourceid', 'resourcename'], 'sortfield' => ['clock', 'auditid'],
+			'sortorder' => 'DESC', 'limit' => 5], 'new_hosts', false) : [];
+		$recent = [];
+		foreach ($rows ?? [] as $row) {
+			$clock = (int) $row['clock'];
+			$recent[] = ['hostid' => (string) $row['resourceid'], 'name' => (string) $row['resourcename'],
+				'clock' => $clock, 'clock_text' => $this->formatTimestamp($clock, $timezone),
+				'age_text' => $this->formatAge($clock, $now->getTimestamp())];
+		}
+		return ['count' => $count, 'recent' => $recent, 'url' => $this->moduleUrl().'#motd-monitoring-health',
+			'count_is_lower_bound' => $partial_audit && $count !== null,
+			'coverage_note' => _('Recorded host additions in the audit log; discovery activity depends on audit settings.')];
 	}
 
-	private function getMaintenanceSummary(
-		\DateTimeImmutable $now,
-		\DateTimeImmutable $today_start,
-		\DateTimeImmutable $tomorrow_start,
-		\DateTimeImmutable $week_end,
-		\DateTimeZone $timezone
-	): array {
-		$maintenances = [];
-
+	private function getMaintenanceSummary(\DateTimeImmutable $now, \DateTimeImmutable $today,
+		\DateTimeImmutable $tomorrow, \DateTimeImmutable $week_end, \DateTimeZone $timezone): array {
+		$today_rows = $week_rows = [];
 		try {
-			$maintenances = API::Maintenance()->get([
+			$schedule_timezone = $this->getMaintenanceTimezone();
+			$this->maintenance_timezone = $schedule_timezone->getName();
+		}
+		catch (\Throwable $e) {
+			$this->issue('maintenances', _('The configured maintenance scheduling timezone is invalid.'));
+			return ['today' => [], 'week' => [], 'today_count' => null, 'week_count' => null, 'has_any' => false];
+		}
+		if ($this->scope_failed) {
+			$this->issue('maintenances', _('Unavailable because the selected host scope could not be loaded.'));
+			$maintenances = null;
+		}
+		elseif ($this->hostids === []) { $this->success['maintenances'] = true; $maintenances = []; }
+		else {
+			$maintenances = $this->query('Maintenance', [
 				'output' => ['maintenanceid', 'name', 'description', 'active_since', 'active_till', 'maintenance_type'],
-				'selectHostGroups' => ['groupid', 'name'],
-				'selectHosts' => ['hostid', 'host', 'name'],
-				'selectTimeperiods' => 'extend',
-				'sortfield' => ['active_since', 'name'],
-				'sortorder' => 'ASC'
-			]);
+				'selectHostGroups' => ['groupid', 'name'], 'selectHosts' => ['hostid', 'host', 'name'],
+				'selectTimeperiods' => 'extend', 'sortfield' => ['active_since', 'name'], 'sortorder' => 'ASC'], 'maintenances', false);
 		}
-		catch (\Throwable $e) {
-			$maintenances = [];
-		}
-
-		$today = [];
-		$week = [];
 		$seen = [];
-
-		foreach ($maintenances as $maintenance) {
-			$occurrences = $this->expandMaintenanceOccurrences($maintenance, $today_start, $week_end, $timezone);
-
+		foreach ($maintenances ?? [] as $maintenance) {
+			if ($this->hostids !== null) {
+				$matches = (bool) array_intersect($this->hostids, array_column($maintenance['hosts'] ?? [], 'hostid'));
+				foreach ($maintenance['hostgroups'] ?? [] as $group) {
+					$matches = $matches || isset($this->scope_groups[(string) $group['groupid']]);
+					foreach ($this->scope_group_names as $name => $_) {
+						$prefix = (string) $group['name'].'/';
+						$matches = $matches || $name === $group['name'] || strncmp($name, $prefix, strlen($prefix)) === 0;
+					}
+				}
+				if (!$matches) continue;
+			}
+			try {
+				$occurrences = MaintenanceSchedule::expand($maintenance, $today->setTimezone($schedule_timezone),
+					$week_end->setTimezone($schedule_timezone), $schedule_timezone);
+			}
+			catch (\Throwable $e) { $this->issue('maintenances', _('Some maintenance windows could not be calculated.')); continue; }
 			foreach ($occurrences as $occurrence) {
-				$key = ($occurrence['maintenanceid'] ?? '').':'.($occurrence['start_ts'] ?? 0).':'.($occurrence['end_ts'] ?? 0);
-				if (array_key_exists($key, $seen)) {
-					continue;
-				}
+				$key = $occurrence['maintenanceid'].':'.$occurrence['start_ts'].':'.$occurrence['end_ts'];
+				if (isset($seen[$key])) continue;
 				$seen[$key] = true;
-
-				if ($occurrence['end_ts'] > $today_start->getTimestamp() && $occurrence['start_ts'] < $tomorrow_start->getTimestamp()) {
-					$today[] = $this->decorateOccurrence($occurrence, $now, $timezone);
+				$occurrence = $this->decorateOccurrence($occurrence, $now, $timezone);
+				if ($occurrence['end_ts'] > $today->getTimestamp() && $occurrence['start_ts'] < $tomorrow->getTimestamp()) {
+					$today_rows[] = $occurrence;
 				}
-				elseif ($occurrence['start_ts'] >= $tomorrow_start->getTimestamp() && $occurrence['start_ts'] < $week_end->getTimestamp()) {
-					$week[] = $this->decorateOccurrence($occurrence, $now, $timezone);
+				elseif ($occurrence['start_ts'] >= $tomorrow->getTimestamp() && $occurrence['start_ts'] < $week_end->getTimestamp()) {
+					$week_rows[] = $occurrence;
 				}
 			}
 		}
-
-		usort($today, static function(array $a, array $b): int {
-			return ($a['start_ts'] <=> $b['start_ts']) ?: strcmp($a['name'], $b['name']);
-		});
-		usort($week, static function(array $a, array $b): int {
-			return ($a['start_ts'] <=> $b['start_ts']) ?: strcmp($a['name'], $b['name']);
-		});
-
-		return [
-			'today' => $today,
-			'week' => $week,
-			'today_count' => count($today),
-			'week_count' => count($week),
-			'has_any' => (bool) ($today || $week)
-		];
-	}
-
-	/**
-	 * Expand a maintenance definition's recurring time periods into concrete occurrences that overlap
-	 * the [$range_start, $range_end) window, clamped to the maintenance active_since/active_till bounds.
-	 *
-	 * Mirrors Zabbix's timeperiod semantics:
-	 *  - ONETIME (0): a single window starting at start_date for `period` seconds.
-	 *  - DAILY (2): every `every` days from active_since, offset start_time seconds into the day.
-	 *  - WEEKLY (3): on the weekdays selected by the `dayofweek` bitmask (bit 0 = Monday … bit 6 = Sunday),
-	 *    every `every` weeks, offset start_time seconds.
-	 *  - MONTHLY (4): in the months selected by the `month` bitmask (bit 0 = January … bit 11 = December);
-	 *    when `dayofweek` is set it is the Nth weekday (every = 1..4, or 5 = last) of the month, otherwise
-	 *    it is calendar `day` (clamped to the month length), offset start_time seconds.
-	 *
-	 * A few days of look-back are scanned so a window that started before $range_start but is still
-	 * running (period spans midnight) is still surfaced.
-	 */
-	private function expandMaintenanceOccurrences(array $maintenance, \DateTimeImmutable $range_start, \DateTimeImmutable $range_end, \DateTimeZone $timezone): array {
-		$occurrences = [];
-
-		$active_since = (int) ($maintenance['active_since'] ?? 0);
-		$active_till = (int) ($maintenance['active_till'] ?? 0);
-		if ($active_till > 0 && $active_till <= $range_start->getTimestamp()) {
-			return [];
-		}
-		if ($active_since > 0 && $active_since >= $range_end->getTimestamp()) {
-			return [];
-		}
-
-		$global_start = $active_since > 0
-			? (new \DateTimeImmutable('@'.$active_since))->setTimezone($timezone)
-			: $range_start;
-		$global_end = $active_till > 0
-			? (new \DateTimeImmutable('@'.$active_till))->setTimezone($timezone)
-			: $range_end;
-
-		$timeperiods = is_array($maintenance['timeperiods'] ?? null) ? $maintenance['timeperiods'] : [];
-		$window_start = $range_start;
-		$window_end = $range_end;
-
-		foreach ($timeperiods as $timeperiod) {
-			$period = max(300, (int) ($timeperiod['period'] ?? 3600));
-			$type = (int) ($timeperiod['timeperiod_type'] ?? self::TIMEPERIOD_TYPE_ONETIME);
-			$start_time = (int) ($timeperiod['start_time'] ?? 0);
-			$every = max(1, (int) ($timeperiod['every'] ?? 1));
-			$dayofweek = (int) ($timeperiod['dayofweek'] ?? 0);
-			$day = (int) ($timeperiod['day'] ?? 0);
-			$month = (int) ($timeperiod['month'] ?? 0);
-
-			switch ($type) {
-				case self::TIMEPERIOD_TYPE_ONETIME:
-					$start_date = (int) ($timeperiod['start_date'] ?? 0);
-					if ($start_date <= 0) {
-						break;
-					}
-					$occurrence_start = (new \DateTimeImmutable('@'.$start_date))->setTimezone($timezone);
-					$this->addOccurrenceIfOverlapping($occurrences, $maintenance, $occurrence_start, $period, $window_start, $window_end, $global_start, $global_end, $timezone);
-					break;
-
-				case self::TIMEPERIOD_TYPE_DAILY:
-					$scan_days = max(1, (int) ceil($period / 86400));
-					$scan_start = $window_start->modify('-'.$scan_days.' days');
-					$cursor = $scan_start < $global_start ? $global_start : $scan_start;
-					$cursor = $cursor->setTime(0, 0, 0);
-					$anchor = $global_start->setTime(0, 0, 0);
-					while ($cursor < $window_end && $cursor < $global_end) {
-						$days = (int) floor(($cursor->getTimestamp() - $anchor->getTimestamp()) / 86400);
-						if ($days >= 0 && $days % $every === 0) {
-							$occurrence_start = $cursor->modify('+'.$start_time.' seconds');
-							$this->addOccurrenceIfOverlapping($occurrences, $maintenance, $occurrence_start, $period, $window_start, $window_end, $global_start, $global_end, $timezone);
-						}
-						$cursor = $cursor->modify('+1 day');
-					}
-					break;
-
-				case self::TIMEPERIOD_TYPE_WEEKLY:
-					$scan_days = max(1, (int) ceil($period / 86400));
-					$scan_start = $window_start->modify('-'.$scan_days.' days');
-					$cursor = $scan_start < $global_start ? $global_start : $scan_start;
-					$cursor = $cursor->setTime(0, 0, 0);
-					$anchor_week = $global_start->setTime(0, 0, 0)->modify('monday this week');
-					while ($cursor < $window_end && $cursor < $global_end) {
-						$weekday_bit = 1 << ((int) $cursor->format('N') - 1);
-						$week_start = $cursor->modify('monday this week');
-						$weeks = (int) floor(($week_start->getTimestamp() - $anchor_week->getTimestamp()) / 604800);
-						if (($dayofweek & $weekday_bit) !== 0 && $weeks >= 0 && $weeks % $every === 0) {
-							$occurrence_start = $cursor->modify('+'.$start_time.' seconds');
-							$this->addOccurrenceIfOverlapping($occurrences, $maintenance, $occurrence_start, $period, $window_start, $window_end, $global_start, $global_end, $timezone);
-						}
-						$cursor = $cursor->modify('+1 day');
-					}
-					break;
-
-				case self::TIMEPERIOD_TYPE_MONTHLY:
-					$scan_days = max(1, (int) ceil($period / 86400));
-					$scan_start = $window_start->modify('-'.$scan_days.' days');
-					$cursor = $scan_start < $global_start ? $global_start : $scan_start;
-					$cursor = $cursor->setTime(0, 0, 0);
-					while ($cursor < $window_end && $cursor < $global_end) {
-						if (!$this->monthMatches($month, (int) $cursor->format('n'))) {
-							$cursor = $cursor->modify('+1 day');
-							continue;
-						}
-
-						$matches = false;
-						if ($dayofweek > 0) {
-							$weekday_bit = 1 << ((int) $cursor->format('N') - 1);
-							if (($dayofweek & $weekday_bit) !== 0) {
-								$week_number = (int) ceil(((int) $cursor->format('j')) / 7);
-								$is_last = (int) $cursor->modify('+7 days')->format('n') !== (int) $cursor->format('n');
-								$matches = ($every === 5) ? (bool) $is_last : ($week_number === $every);
-							}
-						}
-						else {
-							$target_day = $day > 0 ? $day : $every;
-							$last_day = (int) $cursor->format('t');
-							$target_day = min(max(1, $target_day), $last_day);
-							$matches = ((int) $cursor->format('j') === $target_day);
-						}
-
-						if ($matches) {
-							$occurrence_start = $cursor->modify('+'.$start_time.' seconds');
-							$this->addOccurrenceIfOverlapping($occurrences, $maintenance, $occurrence_start, $period, $window_start, $window_end, $global_start, $global_end, $timezone);
-						}
-
-						$cursor = $cursor->modify('+1 day');
-					}
-					break;
-			}
-		}
-
-		return $occurrences;
-	}
-
-	private function addOccurrenceIfOverlapping(
-		array &$occurrences,
-		array $maintenance,
-		\DateTimeImmutable $occurrence_start,
-		int $period,
-		\DateTimeImmutable $window_start,
-		\DateTimeImmutable $window_end,
-		\DateTimeImmutable $global_start,
-		\DateTimeImmutable $global_end,
-		\DateTimeZone $timezone
-	): void {
-		$occurrence_end = $occurrence_start->modify('+'.$period.' seconds');
-		if ($occurrence_end > $global_end) {
-			$occurrence_end = $global_end;
-		}
-
-		if ($occurrence_end <= $window_start || $occurrence_start >= $window_end) {
-			return;
-		}
-		if ($occurrence_end <= $global_start || $occurrence_start >= $global_end) {
-			return;
-		}
-
-		$groups = [];
-		foreach ($maintenance['hostgroups'] ?? [] as $group) {
-			$groups[] = (string) ($group['name'] ?? '');
-		}
-		$hosts = [];
-		foreach ($maintenance['hosts'] ?? [] as $host) {
-			$hosts[] = (string) ($host['name'] ?? $host['host'] ?? '');
-		}
-
-		$groups = array_values(array_filter(array_unique($groups), static function(string $value): bool {
-			return $value !== '';
-		}));
-		$hosts = array_values(array_filter(array_unique($hosts), static function(string $value): bool {
-			return $value !== '';
-		}));
-
-		$occurrences[] = [
-			'maintenanceid' => (string) ($maintenance['maintenanceid'] ?? ''),
-			'name' => (string) ($maintenance['name'] ?? ''),
-			'description' => (string) ($maintenance['description'] ?? ''),
-			'maintenance_type' => (int) ($maintenance['maintenance_type'] ?? 0),
-			'start_ts' => $occurrence_start->getTimestamp(),
-			'end_ts' => $occurrence_end->getTimestamp(),
-			'start_text' => $this->formatTimestamp($occurrence_start->getTimestamp(), $timezone),
-			'end_text' => $this->formatTimestamp($occurrence_end->getTimestamp(), $timezone),
-			'day_text' => $occurrence_start->format('D d M'),
-			'time_text' => $occurrence_start->format('H:i').'–'.$occurrence_end->format('H:i'),
-			'groups' => $groups,
-			'hosts' => $hosts,
-			'scope_text' => $this->buildScopeText($groups, $hosts)
-		];
+		$sort = static function(array $a, array $b): int { return ($a['start_ts'] <=> $b['start_ts']) ?: strcmp($a['name'], $b['name']); };
+		usort($today_rows, $sort);
+		usort($week_rows, $sort);
+		return ['today' => $today_rows, 'week' => $week_rows,
+			'today_count' => $maintenances === null || isset($this->failures['maintenances']) ? null : count($today_rows),
+			'week_count' => $maintenances === null || isset($this->failures['maintenances']) ? null : count($week_rows),
+			'has_any' => (bool) ($today_rows || $week_rows)];
 	}
 
 	private function decorateOccurrence(array $occurrence, \DateTimeImmutable $now, \DateTimeZone $timezone): array {
-		$start_ts = (int) ($occurrence['start_ts'] ?? 0);
-		$end_ts = (int) ($occurrence['end_ts'] ?? 0);
-		$status = 'upcoming';
-		$status_label = _('Upcoming');
-
-		if ($start_ts <= $now->getTimestamp() && $end_ts > $now->getTimestamp()) {
-			$status = 'ongoing';
-			$status_label = _('Ongoing');
-		}
-		elseif ($end_ts <= $now->getTimestamp()) {
-			$status = 'ended';
-			$status_label = _('Ended');
-		}
-
-		$occurrence['status'] = $status;
-		$occurrence['status_label'] = $status_label;
-		$occurrence['start_text'] = $start_ts > 0 ? $this->formatTimestamp($start_ts, $timezone) : '';
-		$occurrence['end_text'] = $end_ts > 0 ? $this->formatTimestamp($end_ts, $timezone) : '';
-
+		$start = (new \DateTimeImmutable('@'.$occurrence['start_ts']))->setTimezone($timezone);
+		$end = (new \DateTimeImmutable('@'.$occurrence['end_ts']))->setTimezone($timezone);
+		$ongoing = $start <= $now && $end > $now;
+		$occurrence['status'] = $ongoing ? 'ongoing' : ($end <= $now ? 'ended' : 'upcoming');
+		$occurrence['status_label'] = $ongoing ? _('Ongoing') : ($end <= $now ? _('Ended') : _('Upcoming'));
+		$occurrence['start_text'] = $start->format('Y-m-d H:i');
+		$occurrence['end_text'] = $end->format('Y-m-d H:i');
+		$occurrence['day_text'] = $start->format('D d M');
+		$occurrence['time_text'] = $start->format('Y-m-d') === $end->format('Y-m-d')
+			? $start->format('H:i').'–'.$end->format('H:i')
+			: $occurrence['start_text'].' – '.$occurrence['end_text'];
+		$occurrence['remaining_text'] = $ongoing
+			? sprintf(_('%1$s remaining'), $this->formatDuration($end->getTimestamp() - $now->getTimestamp())) : '';
+		$parts = [];
+		if ($occurrence['groups']) $parts[] = _('Groups').': '.$this->formatNameList($occurrence['groups'], 3);
+		if ($occurrence['hosts']) $parts[] = _('Hosts').': '.$this->formatNameList($occurrence['hosts'], 3);
+		$occurrence['scope_text'] = implode(' · ', $parts);
 		return $occurrence;
 	}
 
-	private function buildSummaryLine(array $problems, array $unacked, array $maintenances): string {
-		$parts = [
-			sprintf(_('Critical: %1$d'), (int) $problems['critical_count']),
-			sprintf(_('High: %1$d'), (int) $problems['high_count'])
-		];
+	private function primeTriggerCache(array $row_sets): void {
+		$ids = [];
+		foreach ($row_sets as $rows) foreach ($rows as $row) $ids[(string) $row['objectid']] = true;
+		if (!$ids) return;
+		$triggers = $this->query('Trigger', ['output' => ['triggerid'], 'triggerids' => array_keys($ids),
+			'selectHosts' => ['hostid', 'host', 'name'], 'preservekeys' => true], 'details');
+		$this->trigger_cache = $triggers ?? [];
+	}
 
-		if ((int) $unacked['count'] > 0) {
-			$parts[] = sprintf(_('Unacked: %1$d'), (int) $unacked['count']);
+	private function formatProblemRows(array $rows, \DateTimeZone $timezone, \DateTimeImmutable $now): array {
+		$result = [];
+		foreach ($rows as $row) {
+			$severity = (int) ($row['severity'] ?? 0);
+			$clock = (int) ($row['clock'] ?? 0);
+			$triggerid = (string) ($row['objectid'] ?? '');
+			$hosts = [];
+			foreach ($this->trigger_cache[$triggerid]['hosts'] ?? [] as $host) $hosts[] = (string) ($host['name'] ?? $host['host'] ?? '');
+			$hosts = array_values(array_unique(array_filter($hosts)));
+			$result[] = ['eventid' => (string) $row['eventid'], 'triggerid' => $triggerid, 'name' => (string) $row['name'],
+				'severity' => $severity, 'severity_label' => $severity === 5 ? _('Critical') : _('High'),
+				'severity_key' => $severity === 5 ? 'critical' : 'high', 'clock' => $clock,
+				'clock_text' => $clock > 0 ? $this->formatTimestamp($clock, $timezone) : '',
+				'age_text' => $clock > 0 ? $this->formatAge($clock, $now->getTimestamp()) : '',
+				'acknowledged' => (int) ($row['acknowledged'] ?? 0) === 1, 'hosts' => $hosts,
+				'host_text' => $this->formatNameList($hosts, 2),
+				'url' => (new CUrl('tr_events.php'))->setArgument('triggerid', $triggerid)
+					->setArgument('eventid', (string) $row['eventid'])->getUrl()];
 		}
-
-		if ((int) $problems['suppressed_count'] > 0) {
-			$parts[] = sprintf(_('Suppressed: %1$d'), (int) $problems['suppressed_count']);
-		}
-
-		if ($maintenances['today_count'] > 0) {
-			$parts[] = sprintf(_('%1$d maintenance today'), $maintenances['today_count']);
-		}
-		if ($maintenances['week_count'] > 0) {
-			$parts[] = sprintf(_('%1$d more this week'), $maintenances['week_count']);
-		}
-
-		if (
-			(int) $problems['critical_count'] === 0
-			&& (int) $problems['high_count'] === 0
-			&& (int) $unacked['count'] === 0
-			&& (int) $problems['suppressed_count'] === 0
-			&& (int) $maintenances['today_count'] === 0
-			&& (int) $maintenances['week_count'] === 0
-		) {
-			return _('No High/Critical incidents and no maintenance windows scheduled for today or later this week.');
-		}
-
+		return $result;
+	}
+	private function buildSummaryLine(array $problems, array $unacked, array $maintenance): string {
+		$parts = [sprintf(_('Critical: %1$s'), $this->countText($problems['critical_count'])),
+			sprintf(_('High: %1$s'), $this->countText($problems['high_count'])),
+			sprintf(_('Unacked: %1$s'), $this->countText($unacked['count'])),
+			sprintf(_('Suppressed: %1$s'), $this->countText($problems['suppressed_count'])),
+			sprintf(_('Maintenance today: %1$s'), $this->countText($maintenance['today_count'])),
+			sprintf(_('Later this week: %1$s'), $this->countText($maintenance['week_count']))];
+		if ($this->issues) $parts[] = _('Some data is unavailable or incomplete');
 		return implode(' · ', $parts);
 	}
 
-	private function buildBannerItems(array $problems, array $unacked, array $longest, array $maintenances): array {
+	private function buildBannerItems(array $problems, array $unacked, array $longest, array $maintenance): array {
 		$items = [];
-
-		if ((int) $problems['critical_count'] > 0 || (int) $problems['high_count'] > 0) {
-			$items[] = [
-				'type' => 'problems',
-				'text' => sprintf(
-					_('%1$d Critical and %2$d High unresolved problems need attention.'),
-					(int) $problems['critical_count'],
-					(int) $problems['high_count']
-				),
-				'url' => $problems['high_critical_url']
-			];
+		if ($this->issues) {
+			$items[] = ['type' => 'warning', 'text' => _('Some data is unavailable or incomplete. Open details for coverage.'), 'url' => $this->moduleUrl()];
 		}
-
-		if ((int) $unacked['count'] > 0) {
-			$items[] = [
-				'type' => 'unacked',
-				'text' => sprintf(
-					_('%1$d High/Critical problem(s) still unacknowledged.'),
-					(int) $unacked['count']
-				),
-				'url' => $unacked['url']
-			];
+		if ($unacked['count'] > 0) {
+			$items[] = ['type' => 'unacked', 'text' => sprintf(_('%1$d High/Critical problems still unacknowledged.'), $unacked['count']), 'url' => $unacked['url']];
 		}
-
-		if (!empty($longest['recent'])) {
+		if ($longest['recent']) {
 			$oldest = $longest['recent'][0];
-			if (($oldest['age_text'] ?? '') !== '') {
-				$host_prefix = $oldest['host_text'] !== '' ? $oldest['host_text'].' — ' : '';
-				$items[] = [
-					'type' => 'longest',
-					'text' => sprintf(
-						_('Oldest open: %1$s%2$s — %3$s'),
-						$host_prefix,
-						$oldest['name'],
-						$oldest['age_text']
-					),
-					'url' => $oldest['url']
-				];
-			}
+			$items[] = ['type' => 'longest', 'text' => sprintf(_('Oldest open: %1$s — %2$s'), $oldest['name'], $oldest['age_text']), 'url' => $oldest['url']];
 		}
-
-		foreach (array_slice($maintenances['today'], 0, 2) as $occurrence) {
-			$items[] = [
-				'type' => 'maintenance',
-				'text' => sprintf(
-					_('%1$s today %2$s — %3$s'),
-					$occurrence['name'],
-					$occurrence['time_text'],
-					$occurrence['scope_text'] !== '' ? $occurrence['scope_text'] : _('No host scope provided')
-				),
-				'url' => $this->buildUrl('motd.view')
-			];
-		}
-
 		foreach (array_slice($problems['recent'], 0, 3) as $problem) {
-			$host_prefix = $problem['host_text'] !== '' ? $problem['host_text'].' — ' : '';
-			$items[] = [
-				'type' => 'event',
-				'text' => sprintf(
-					_('%1$s%2$s (%3$s)'),
-					$host_prefix,
-					$problem['name'],
-					$problem['severity_label']
-				),
-				'url' => $problem['url']
-			];
+			$items[] = ['type' => 'event', 'text' => ($problem['host_text'] !== '' ? $problem['host_text'].' — ' : '')
+				.$problem['name'].' ('.$problem['severity_label'].')', 'url' => $problem['url']];
 		}
-
-		if (!$items) {
-			$items[] = [
-				'type' => 'info',
-				'text' => _('All clear: there are no active High/Critical incidents and no maintenance windows later this week.'),
-				'url' => ''
-			];
+		foreach (array_slice($maintenance['today'], 0, 2) as $window) {
+			$items[] = ['type' => 'maintenance', 'text' => $window['name'].' — '.$window['time_text'], 'url' => $this->moduleUrl().'#motd-maintenance'];
 		}
-
+		if (!$items) $items[] = ['type' => 'info', 'text' => _('No visible active High/Critical incidents or maintenance windows today.'), 'url' => ''];
 		return $items;
 	}
 
-	private function buildSummaryChips(array $problems, array $unacked, array $health, array $new_hosts, array $maintenances): array {
-		$chips = [
-			[
-				'label' => _('Critical'),
-				'value' => (string) (int) $problems['critical_count'],
-				'kind' => 'critical',
-				'url' => $problems['critical_url']
-			],
-			[
-				'label' => _('High'),
-				'value' => (string) (int) $problems['high_count'],
-				'kind' => 'high',
-				'url' => $problems['high_url']
-			]
-		];
-
-		if ((int) $unacked['count'] > 0) {
-			$chips[] = [
-				'label' => _('Unacked'),
-				'value' => (string) (int) $unacked['count'],
-				'kind' => 'unacked',
-				'url' => $unacked['url']
-			];
+	private function buildSummaryChips(array $problems, array $unacked, array $health, array $new_hosts, array $maintenance): array {
+		$chips = [];
+		foreach ([[_('Critical'), $problems['critical_count'], 'critical', $problems['critical_url']],
+			[_('High'), $problems['high_count'], 'high', $problems['high_url']],
+			[_('Unacked'), $unacked['count'], 'unacked', $unacked['url']],
+			[_('Suppressed'), $problems['suppressed_count'], 'suppressed', $problems['suppressed_url']]] as $chip) {
+			$chips[] = ['label' => $chip[0], 'value' => $this->countText($chip[1]), 'kind' => $chip[2], 'url' => $chip[3]];
 		}
-
-		if ((int) $problems['suppressed_count'] > 0) {
-			$chips[] = [
-				'label' => _('Suppressed'),
-				'value' => (string) (int) $problems['suppressed_count'],
-				'kind' => 'suppressed',
-				'url' => $problems['suppressed_url']
-			];
+		$unsupported = $this->countText($health['stale_items_total']);
+		if ($health['stale_items_total'] !== null && $health['stale_items_hosts'] !== null) {
+			$unsupported = sprintf(_('%1$d items · %2$s hosts'), $health['stale_items_total'],
+				(string) $health['stale_items_hosts'].($health['stale_items_hosts_truncated'] ? '+' : ''));
 		}
-
-		if ((int) $health['stale_items_total'] > 0) {
-			$label = (int) $health['stale_items_hosts'] > 0
-				? sprintf('%d / %d', (int) $health['stale_items_hosts'], (int) $health['stale_items_total'])
-				: (string) (int) $health['stale_items_total'];
-			$chips[] = [
-				'label' => _('Stale items'),
-				'value' => $label,
-				'kind' => 'stale',
-				'url' => $health['stale_url']
-			];
+		$chips[] = ['label' => _('Unsupported'), 'value' => $unsupported, 'kind' => 'stale', 'url' => $health['stale_url']];
+		$chips[] = ['label' => _('Unreachable hosts'), 'value' => $this->countText($health['unreachable_hosts'])
+			.($health['unreachable_hosts_truncated'] ? '+' : ''), 'kind' => 'unreachable', 'url' => $health['unreachable_hosts_url']];
+		foreach ([[_('Queue (global)'), $health['queue_backlog'], 'queue', $health['queue_url']],
+			[_('New hosts 24h'), $new_hosts['count'] === null ? null : (string) $new_hosts['count'].(!empty($new_hosts['count_is_lower_bound']) ? '+' : ''), 'activity', $new_hosts['url']],
+			[_('Today'), $maintenance['today_count'], 'maintenance', $this->moduleUrl().'#motd-maintenance'],
+			[_('This week'), $maintenance['week_count'], 'maintenance', $this->moduleUrl().'#motd-maintenance']] as $chip) {
+			$chips[] = ['label' => $chip[0], 'value' => $this->countText($chip[1]), 'kind' => $chip[2], 'url' => $chip[3]];
 		}
-
-		if ((int) $health['unreachable_hosts'] > 0 || (int) $health['unreachable_proxies'] > 0) {
-			$value = (int) $health['unreachable_hosts'];
-			if ((int) $health['unreachable_proxies'] > 0) {
-				$value = $value.' + '.(int) $health['unreachable_proxies'].'p';
-			}
-			$chips[] = [
-				'label' => _('Unreachable'),
-				'value' => (string) $value,
-				'kind' => 'unreachable',
-				'url' => $health['unreachable_hosts_url']
-			];
-		}
-
-		if ($health['queue_backlog'] !== null && (int) $health['queue_backlog'] > 0) {
-			$chips[] = [
-				'label' => _('Queue'),
-				'value' => (string) (int) $health['queue_backlog'],
-				'kind' => 'queue',
-				'url' => $health['queue_url']
-			];
-		}
-
-		if ((int) $new_hosts['count'] > 0) {
-			$chips[] = [
-				'label' => _('New hosts 24h'),
-				'value' => (string) (int) $new_hosts['count'],
-				'kind' => 'activity',
-				'url' => $new_hosts['url']
-			];
-		}
-
-		$chips[] = [
-			'label' => _('Today'),
-			'value' => (string) (int) $maintenances['today_count'],
-			'kind' => 'maintenance',
-			'url' => $this->buildUrl('maintenance.list')
-		];
-		$chips[] = [
-			'label' => _('This week'),
-			'value' => (string) (int) $maintenances['week_count'],
-			'kind' => 'maintenance',
-			'url' => $this->buildUrl('maintenance.list')
-		];
-
 		return $chips;
 	}
 
-	private function buildScopeText(array $groups, array $hosts): string {
-		$parts = [];
-		if ($groups) {
-			$parts[] = _('Groups').': '.$this->formatNameList($groups, 3);
-		}
-		if ($hosts) {
-			$parts[] = _('Hosts').': '.$this->formatNameList($hosts, 3);
-		}
-		return implode(' · ', $parts);
-	}
+	private function countText($value): string { return $value === null ? _('unavailable') : (string) $value; }
 
 	private function formatNameList(array $items, int $limit): string {
-		$items = array_values(array_filter(array_map(static function($value): string {
-			return trim((string) $value);
-		}, $items), static function(string $value): bool {
-			return $value !== '';
-		}));
-
-		if (!$items) {
-			return '';
-		}
-
-		$display = array_slice($items, 0, $limit);
-		$text = implode(', ', $display);
-		if (count($items) > $limit) {
-			$text .= sprintf(_(' +%1$d more'), count($items) - $limit);
-		}
-		return $text;
+		$items = array_values(array_unique(array_filter($items)));
+		return implode(', ', array_slice($items, 0, $limit))
+			.(count($items) > $limit ? sprintf(_(' +%1$d more'), count($items) - $limit) : '');
 	}
 
 	private function formatTimestamp(int $timestamp, \DateTimeZone $timezone): string {
-		return (new \DateTimeImmutable('@'.$timestamp))
-			->setTimezone($timezone)
-			->format('Y-m-d H:i');
+		return (new \DateTimeImmutable('@'.$timestamp))->setTimezone($timezone)->format('Y-m-d H:i');
 	}
 
 	private function formatAge(int $timestamp, int $now): string {
 		$diff = max(0, $now - $timestamp);
-		if ($diff < 60) {
-			return _('just now');
-		}
-		if ($diff < 3600) {
-			return sprintf(_('%1$dm ago'), (int) floor($diff / 60));
-		}
-		if ($diff < 86400) {
-			return sprintf(_('%1$dh ago'), (int) floor($diff / 3600));
-		}
+		if ($diff < 60) return _('just now');
+		if ($diff < 3600) return sprintf(_('%1$dm ago'), (int) floor($diff / 60));
+		if ($diff < 86400) return sprintf(_('%1$dh ago'), (int) floor($diff / 3600));
 		return sprintf(_('%1$dd ago'), (int) floor($diff / 86400));
-	}
-
-	private function severityLabel(int $severity): string {
-		switch ($severity) {
-			case self::SEVERITY_CRITICAL:
-				return _('Critical');
-			case self::SEVERITY_HIGH:
-				return _('High');
-			default:
-				return _('Unknown');
-		}
-	}
-
-	private function severityKey(int $severity): string {
-		switch ($severity) {
-			case self::SEVERITY_CRITICAL:
-				return 'critical';
-			case self::SEVERITY_HIGH:
-				return 'high';
-			default:
-				return 'info';
-		}
 	}
 
 	private function formatDuration(int $seconds): string {
 		$seconds = max(0, $seconds);
-		if ($seconds < 60) {
-			return sprintf(_('%1$ds'), $seconds);
-		}
-		if ($seconds < 3600) {
-			return sprintf(_('%1$dm'), (int) floor($seconds / 60));
-		}
-		if ($seconds < 86400) {
-			$hours = (int) floor($seconds / 3600);
-			$minutes = (int) floor(($seconds % 3600) / 60);
-			return $minutes > 0
-				? sprintf(_('%1$dh %2$dm'), $hours, $minutes)
-				: sprintf(_('%1$dh'), $hours);
-		}
-		$days = (int) floor($seconds / 86400);
-		$hours = (int) floor(($seconds % 86400) / 3600);
-		return $hours > 0
-			? sprintf(_('%1$dd %2$dh'), $days, $hours)
-			: sprintf(_('%1$dd'), $days);
-	}
-
-	private function monthMatches(int $month_mask, int $month_number): bool {
-		if ($month_mask === 0) {
-			return true;
-		}
-		$bit = 1 << ($month_number - 1);
-		return ($month_mask & $bit) !== 0;
+		if ($seconds < 60) return sprintf(_('%1$ds'), $seconds);
+		if ($seconds < 3600) return sprintf(_('%1$dm'), (int) floor($seconds / 60));
+		if ($seconds < 86400) return sprintf(_('%1$dh %2$dm'), (int) floor($seconds / 3600), (int) floor(($seconds % 3600) / 60));
+		return sprintf(_('%1$dd %2$dh'), (int) floor($seconds / 86400), (int) floor(($seconds % 86400) / 3600));
 	}
 
 	private function getTimezone(): \DateTimeZone {
-		try {
-			return new \DateTimeZone(date_default_timezone_get() ?: 'UTC');
+		try { return new \DateTimeZone(date_default_timezone_get() ?: 'UTC'); }
+		catch (\Throwable $e) { return new \DateTimeZone('UTC'); }
+	}
+
+	private function maintenanceTimezoneName(): string {
+		$override = getenv('MOTD_MAINTENANCE_TIMEZONE');
+		if ($override !== false && $override !== '') return $override;
+		if (class_exists('CSettingsHelper') && defined('CSettingsHelper::DEFAULT_TIMEZONE')) {
+			$name = (string) \CSettingsHelper::get(\CSettingsHelper::DEFAULT_TIMEZONE);
+			if ($name !== '' && $name !== 'system') return $name;
 		}
-		catch (\Throwable $e) {
-			return new \DateTimeZone('UTC');
-		}
+		return (string) (ini_get('date.timezone') ?: 'UTC');
+	}
+
+	private function getMaintenanceTimezone(): \DateTimeZone {
+		return new \DateTimeZone($this->maintenanceTimezoneName());
 	}
 
 	private function buildUrl(string $action): string {
-		return (new CUrl('zabbix.php'))
-			->setArgument('action', $action)
-			->getUrl();
+		return (new CUrl('zabbix.php'))->setArgument('action', $action)->getUrl();
 	}
 
-	private function buildProblemFilterUrl(array $severities): string {
-		$url = (new CUrl('zabbix.php'))
-			->setArgument('action', 'problem.view')
-			->setArgument('show', 3);
-
-		foreach ($severities as $severity) {
-			$url->setArgument('severities['.(int) $severity.']', (int) $severity);
-		}
-
+	private function moduleUrl(): string {
+		$url = (new CUrl('zabbix.php'))->setArgument('action', 'motd.view');
+		foreach ($this->filters as $key => $value) $url->setArgument($key, $value);
 		return $url->getUrl();
 	}
 
-	private function buildProblemSuppressedUrl(): string {
-		$url = (new CUrl('zabbix.php'))
-			->setArgument('action', 'problem.view')
-			->setArgument('show', 3)
-			->setArgument('show_suppressed', 1);
-
-		foreach ([self::SEVERITY_HIGH, self::SEVERITY_CRITICAL] as $severity) {
-			$url->setArgument('severities['.$severity.']', $severity);
-		}
-
-		return $url->getUrl();
-	}
-
-	private function buildProblemUnackedUrl(): string {
-		$url = (new CUrl('zabbix.php'))
-			->setArgument('action', 'problem.view')
-			->setArgument('show', 3)
-			->setArgument('acknowledgement_status', 1);
-
-		foreach ([self::SEVERITY_HIGH, self::SEVERITY_CRITICAL] as $severity) {
-			$url->setArgument('severities['.$severity.']', $severity);
-		}
-
+	private function buildProblemFilterUrl(array $severities, array $extra = []): string {
+		if ($this->scope_failed || $this->hostids === [] || ($this->hostids !== null && count($this->hostids) > 100)) return $this->moduleUrl();
+		$url = (new CUrl('zabbix.php'))->setArgument('action', 'problem.view')->setArgument('show', 3)
+			->setArgument('filter_set', 1)->setArgument('severities', $severities)->setArgument('show_suppressed', 0)
+			->setArgument('show_symptoms', 1);
+		if ($this->hostids !== null) $url->setArgument('hostids', $this->hostids);
+		foreach ($extra as $key => $value) $url->setArgument($key, $value);
 		return $url->getUrl();
 	}
 
 	private function buildStaleItemsUrl(): string {
-		return (new CUrl('zabbix.php'))
-			->setArgument('action', 'latest.view')
-			->setArgument('filter_state', 1)
-			->setArgument('filter_set', 1)
-			->getUrl();
+		if ($this->scope_failed || $this->hostids === [] || ($this->hostids !== null && count($this->hostids) > 100)) return $this->moduleUrl().'#motd-monitoring-health';
+		$url = (new CUrl('zabbix.php'))->setArgument('action', 'latest.view')->setArgument('state', 1)->setArgument('filter_set', 1);
+		if ($this->hostids !== null) $url->setArgument('hostids', $this->hostids);
+		return $url->getUrl();
 	}
 
-	private function buildUnreachableHostsUrl(): string {
-		return (new CUrl('zabbix.php'))
-			->setArgument('action', 'host.view')
-			->setArgument('filter_set', 1)
-			->setArgument('filter_status', 1)
-			->getUrl();
+	private function installSalt(): string {
+		global $DB;
+		return __DIR__.'|'.($DB['DATABASE'] ?? '').'@'.($DB['SERVER'] ?? '').':'.($DB['PORT'] ?? '');
 	}
 
-	private function buildProblemTriggerUrl(string $triggerid): string {
-		if ($triggerid === '') {
-			return $this->buildUrl('problem.view');
-		}
+	private function cacheFile(string $scope): string {
+		$user = class_exists('CWebUser') ? \CWebUser::$data : [];
+		try { $schedule_zone = $this->maintenanceTimezoneName(); }
+		catch (\Throwable $e) { $schedule_zone = 'unavailable'; }
+		$key = [self::CACHE_VERSION, $scope, $this->filters, $this->getTimezone()->getName(), $schedule_zone,
+			$user['lang'] ?? '', $user['roleid'] ?? '', $user['ugsetid'] ?? '', $user['type'] ?? ''];
+		return sys_get_temp_dir().'/zbx_motd_'.hash('sha256', $this->installSalt()).'/'.hash('sha256', json_encode($key)).'.json';
+	}
 
-		return (new CUrl('zabbix.php'))
-			->setArgument('action', 'problem.view')
-			->setArgument('show', 3)
-			->setArgument('triggerids['.$triggerid.']', $triggerid)
-			->getUrl();
+	private function readCache(string $scope): ?array {
+		$file = $this->cacheFile($scope);
+		if (is_link(dirname($file)) || is_link($file) || !is_file($file)) return null;
+		if ((@fileperms(dirname($file)) & 0077) !== 0 || (@fileperms($file) & 0077) !== 0) return null;
+		if (function_exists('posix_geteuid') && (@fileowner(dirname($file)) !== posix_geteuid() || @fileowner($file) !== posix_geteuid())) return null;
+		$mtime = @filemtime($file);
+		if ($mtime === false || time() - $mtime > self::CACHE_TTL || $mtime > time()) return null;
+		$raw = @file_get_contents($file);
+		$decoded = $raw === false ? null : json_decode($raw, true);
+		return is_array($decoded) && isset($decoded['fingerprint'], $decoded['status'], $decoded['generated_at']) ? $decoded : null;
+	}
+
+	private function writeCache(string $scope, array $data): void {
+		$file = $this->cacheFile($scope);
+		$dir = dirname($file);
+		if (is_link($dir) || (!is_dir($dir) && !@mkdir($dir, 0700, true))) return;
+		if (function_exists('posix_geteuid') && @fileowner($dir) !== posix_geteuid()) return;
+		if (!@chmod($dir, 0700)) return;
+		$json = json_encode($data, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+		if ($json === false) return;
+		$tmp = @tempnam($dir, 'write-');
+		if ($tmp === false) return;
+		if (!@chmod($tmp, 0600) || @file_put_contents($tmp, $json, LOCK_EX) === false || !@rename($tmp, $file)) @unlink($tmp);
 	}
 }

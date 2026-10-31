@@ -4,7 +4,7 @@ A Zabbix **frontend report module** that turns the trend and history data you al
 
 Built and tested on **Zabbix 7.0**.
 
-Current release: **1.4.0** (build **1.4.0-20260801.1**).
+Current release: **1.4.3** (build **1.4.3-20261031.3**).
 
 ---
 
@@ -105,7 +105,7 @@ docker compose up -d --force-recreate zabbix-web-nginx-mysql
 
 Treat the PHP controllers and libraries, JavaScript/CSS assets and manifest as one release. A partial copy can leave the browser and PHP-FPM running different builds.
 
-1. Confirm `manifest.json` reports version **1.4.0**, registers `assets/js/capacity-planning-1.4.0-20260801.1.js`, and `lib/Build.php` reports build **1.4.0-20260801.1**. The build-versioned JavaScript URL forces browsers and proxies to fetch each release instead of reusing an older bundle.
+1. Confirm `manifest.json` reports version **1.4.3**, registers `assets/js/capacity-planning-1.4.3-20261031.3.js` and `assets/css/capacity-planning-1.4.3-20261031.3.css`, and `lib/Build.php` reports build **1.4.3-20261031.3**. The build-versioned JavaScript and stylesheet URLs force browsers and proxies to fetch each release instead of reusing older code or layout rules.
 2. Replace the complete runtime set together: `Module.php`, `manifest.json`, `actions/`, `assets/`, `lib/` (including `lib/Build.php`) and `views/`. Both installation examples copy the complete `lib/` directory, so the build handshake is included. Build a clean runtime-only directory first when using a bind mount; do not overlay only the files that appeared in a commit.
 3. Restart the frontend PHP runtime after the copy so no old OPcache bytecode remains (`sudo systemctl restart php-fpm` on the Linux example). Recreate the web frontend container for Docker deployments. Reload Nginx/Apache too when its static-asset policy requires it.
 4. In **Administration → General → Modules**, use **Scan directory** when the module/version is not refreshed automatically, then confirm that Capacity Planning remains enabled.
@@ -148,11 +148,11 @@ The separate **CPU** and **RAM** tabs: sustained utilization against each host's
 
 ## Features
 
-- **Real disk forecasting, not just charts** — a robust Theil–Sen trend (median of pairwise slopes) is fitted over nested 12-month/6-month/3-month/1-month/1-week windows; the best-qualified window is chosen automatically and a well-supported recent acceleration can shorten the estimate. The same acceleration rule is applied to the byte model and to a direct used-percentage series in its own units, so the two models describe the same time period; when their estimates still diverge (for example after a capacity change), the report says so explicitly. The growth noise floor is capacity-relative, so small filesystems with real growth are still forecast while noise-level slopes on large volumes are discarded by both models together. The exact formulas and thresholds are listed in [How the calculations work](#how-the-calculations-work).
-- **Conservative filesystem truth** — stale current metrics are excluded, usable capacity prefers `used + free`, Linux `total` is never treated as usable capacity by itself, and direct `pused` history drives percentage ETAs when available while byte growth independently drives free-space ETAs. Current breaches remain visible even when there is too little history to fit a model.
+- **Consistent disk forecasting** — a robust Theil–Sen trend (median of pairwise slopes) is fitted over nested windows; a qualified recent acceleration can shorten the estimate. When actual used-byte history is available, all dates use that growth and the same fixed current usable capacity. Past disk expansion cannot make a percentage threshold appear later than the full date. Stale or low-confidence models do not publish future dates. The exact formulas and qualification rules are listed in [How the calculations work](#how-the-calculations-work).
+- **Conservative filesystem truth** — stale current metrics are excluded, usable capacity prefers `used + free`, and Linux `total` is never treated as usable capacity by itself. Percentage-only items retain their percentage assessment, with unavailable byte capacity clearly identified. Current breaches remain visible even when there is too little history to forecast.
 - **ETAs to the thresholds that actually alarm** — warning/critical percentage macros (`{$VFS.FS.PUSED.MAX.WARN/CRIT}` with `label(name)`/FSNAME contexts, regex contexts included) and absolute free-space macros are resolved with real Zabbix precedence: host → template chain by depth → global. Fallback defaults are used only when no macro resolves, and every fallback is reported.
 - **Risk classification** — every finding is classified Critical / High / Medium / Watch / Healthy / Unknown from current breaches, projected ETAs and forecast confidence, so the report leads with what needs action.
-- **CPU & memory need from sustained evidence** — coverage-qualified 7-day to 12-month baselines combine average, p95, peak and sample-weighted time above warning/critical thresholds. Sparse evidence stays `Unknown`; a single spike is never presented as proof that capacity must be added.
+- **CPU & memory need from sustained evidence** — coverage-qualified baselines combine average, bucket-average p95, peak and sample-weighted bucket exposure above review/alarm thresholds. These aggregate statistics do not claim raw-sample percentiles or exact time above a threshold. Sparse evidence stays `Unknown`; a single spike is never presented as proof that capacity must be added.
 - **Confirmed saturation episodes** — the most recent 31 days of raw resource history are bucketed to five minutes. Duration is counted only for sufficiently covered buckets with multiple samples, while recurrence, distinct days, longest episode, total duration and near-full peaks are reported separately.
 - **Regime-change isolation** — a persistent recent increase or decrease can replace an older baseline, while pre-change saturation remains visible as historical evidence instead of distorting current need.
 - **Capacity runway chart** — one glance shows which filesystems cross a threshold in the next year, colored by risk.
@@ -187,8 +187,9 @@ All calculations run on the server in `actions/CapacityPlanningData.php`, except
 
 - **Daily points**: hourly trend rows are combined into one value per UTC day, averaged with the hour's sample count (`num`) as weight.
 - **Analysis windows**: 12 months (365 days), 6 months (183), 3 months (92), 1 month (31), 2 weeks (14) and 1 week (7), all ending now and limited by the selected lookback.
-- **Coverage** of a window is the share of its hours that contain data: `distinct hours with data ÷ (window days × 24)`.
-- **Per-window statistics**: sample-weighted average, sample-weighted 95th percentile (p95), peak (highest hourly max), percentage of samples above the review and alarm thresholds, trend slope and R².
+- **Days with data** counts distinct UTC dates actually observed, rather than the calendar span between the first and last sample.
+- **Coverage** estimates represented duration: `sum(bucket duration × bucket sample coverage) ÷ window duration`, clipped at the window boundaries. A sparse five-minute bucket cannot count as a complete hour. Expected sampling cadence is inferred from median observed sample intervals (raw history) or median samples per hour (trends). This is an estimate: consistently missing scheduled samples cannot be identified without the configured item schedule.
+- **Per-window statistics**: sample-weighted average, sample-weighted 95th percentile of bucket averages, peak (highest bucket maximum), sample-weighted share assigned to buckets whose averages exceed review/alarm thresholds, trend slope and R². The p95 and exposure values describe aggregates; exact raw-sample percentiles and exact time above thresholds cannot be recovered from hourly trends.
 
 ### 2. Trend line: Theil–Sen estimator
 
@@ -204,12 +205,14 @@ Theil–Sen is used instead of ordinary least squares because it is robust: up t
 
 **Usable capacity** is `used + free`, otherwise `used ÷ pused`, and on Windows `total`. A Linux `total` is never used on its own, because it includes reserved blocks.
 
-Two independent models are fitted and the worse result wins:
+The forecast uses one coherent projection basis:
 
-- **Byte model**: growth of used bytes per day. It drives the full date and the free-space thresholds.
-- **Percentage model**: growth of used % per day, taken from the `pused` history directly or derived from bytes ÷ capacity. It drives the percentage thresholds.
+- **Actual used-byte history available**: observed byte growth drives percentage, free-space and full dates, assuming current usable capacity remains fixed. Projected percentage growth is `byte growth × 100 ÷ current usable capacity`. Direct percentage history remains visible as historical evidence; it can include past capacity changes and does not independently set future dates.
+- **Only measured percentage history available**: qualified percentage growth can predict percentage thresholds. Byte growth, free-space threshold dates and the full date remain unavailable. Multiplying old percentages or inverting old free bytes using today's capacity cannot establish actual byte growth across disk resizes.
 
-**Window choice**: the first window in this order that meets both minimums is used:
+These projections assume the workload and current capacity remain comparable. They do not predict future disk expansions, unexpected imports, deletions or changes in retention policy.
+
+**Window choice**: the first window in this order that meets the duration and coverage minimums and has R² ≥ 0.35 is used:
 
 | Order | Window | Minimum days with data | Minimum coverage |
 |---|---|---|---|
@@ -219,13 +222,18 @@ Two independent models are fitted and the worse result wins:
 | 4 | 1 month | 21 | 55% |
 | 5 | 1 week | 5 | 55% |
 
-If none qualifies, the longest window with at least 5 days and 25% coverage is used. Otherwise there is no model and the result is **Unknown**.
+The order is preserved rather than choosing whichever window has the highest fit. A poorly fitting longer window therefore cannot block a qualified slower monthly model. Any selected positive monthly model still needs the recent-growth confirmation below. If no window passes the fit rule, the original duration/coverage-qualified window is retained as descriptive evidence; if none meets those minimums, the longest window with at least 5 days and 25% coverage is retained instead. Publication of future dates also requires the freshness and confidence rules below; short or sparse history alone does not justify an ETA.
 
-**Acceleration**: the 1-month slope replaces the selected slope when both of these hold:
+**Acceleration**: the 1-month slope replaces a longer selected baseline only when all of these hold:
 - the 1-month window has ≥ 21 days, ≥ 70% coverage and R² ≥ 0.35;
 - its slope is greater than `max(1.5 × selected slope, noise floor)`.
+- a recent 1-week or 2-week window independently confirms the faster rate: both its fitted slope and its net growth rate must reach `max(1.5 × baseline slope, monthly slope ÷ 1.5, noise floor)`, with ≥ 70% coverage and R² ≥ 0.35. The week needs ≥ 5 observed days; the fortnight needs ≥ 10.
 
-This is the ⚠ "accelerating" marker in the report.
+Net growth uses the observed change divided by the actual first-to-last elapsed time. A contiguous bucket immediately before the cutoff is included when available, so a recurring batch exactly at the boundary is not lost. Net and fitted rates must agree within the same confirmation window. This allows recurring weekly or fortnightly additions without requiring smooth daily growth, while rejecting a monthly line driven by an isolated level increase or cleanup/rebound.
+
+When a candidate fails confirmation, the longer baseline remains in use with confidence capped at Medium, and the report marks **Acceleration unconfirmed**, preserving the observed monthly candidate and recent net change. It does not infer that growth has stopped. If only a 1-month baseline is available, positive growth must pass the same recent confirmation (without the longer-baseline comparison); otherwise future dates are withheld rather than treating a one-off step as sustained growth. A confirmed acceleration retains the ⚠ "accelerating" marker.
+
+The selected lookback controls the history available to inspect. It does not force the trend to use the entire lookback: the window-selection order above and any confirmed acceleration determine the projected rate, and the detail view identifies that selected window.
 
 **Noise floor**: a byte slope below `min(1 MiB/day, capacity × 0.00001 per day)` counts as no growth. The percentage model uses the same floor converted to percentage points, or 0.01 pp/day when capacity is unknown.
 
@@ -242,10 +250,12 @@ When both a percentage and a free-space threshold exist, the earlier ETA is repo
 **Forecast confidence**:
 
 - **High**: ≥ 60 days of data, ≥ 70% coverage, R² ≥ 0.55, and the recent 1-month trend points the same way.
-- **Medium**: ≥ 21 days and ≥ 45% coverage, with the same direction check.
+- **Medium**: ≥ 21 days, ≥ 45% coverage and R² ≥ 0.35, with the same direction check.
 - **Low**: anything else.
 
-The direction check only counts when the 1-month window itself has ≥ 14 days and ≥ 45% coverage.
+The direction check only counts when the 1-month window itself has ≥ 14 days, ≥ 45% coverage and R² ≥ 0.35, and both slopes exceed the applicable noise floor in magnitude. Tiny or poorly fitted opposite slopes do not invalidate a supported model. Future dates require at least Medium confidence, history extending to within the last 24 hours, and at least 5 observed days with 55% coverage in the last week. A single new sample after a long gap cannot revive an old model. Low-confidence, stale or recently sparse models retain their evidence but report an unavailable forecast. These fit thresholds are conservative publication rules, not statistical probabilities that a date will be correct.
+
+**Recent pattern change**: a selected 3-, 6- or 12-month model cannot publish dates when qualified recent net accumulation and fitted growth both reach at least 1.5 times its baseline rate (or the noise floor for a flat/declining baseline). The same safeguard applies to a flat or declining monthly model, so a cleanup cannot imply shrinking use when recent observations show ongoing growth. The recent week/fortnight uses the same coverage, duration and fit checks as acceleration confirmation. A fitted recent week that has settled back to the baseline can distinguish an earlier addition from a continuing change. A faster week alone does not invalidate an established batch pattern when the full fortnight's net rate remains between the baseline divided by 1.5 and the baseline multiplied by 1.5. Otherwise the older model is marked Low confidence and its future dates are withheld with a **recent pattern changed** explanation. Current breaches remain actionable. Positive monthly models continue to use the monthly acceleration/persistence rules; none of these checks proves that a recent rate will continue.
 
 **Filesystem risk**:
 
@@ -255,10 +265,14 @@ The direction check only counts when the 1-month window itself has ≥ 14 days a
 | Above the warning threshold now | at least High |
 | Next critical event (earliest of critical ETA and full ETA) ≤ 7 / 30 / 90 / 180 days | Critical / High / Medium / Watch |
 | Warning ETA ≤ 7 / 30 / 90 days | High / Medium / Watch |
-| A model exists but no ETA falls in these ranges | Healthy |
+| A publishable model exists but no ETA falls in these ranges | Healthy |
 | No qualified model | Unknown |
 
-The higher of the critical-ETA and warning-ETA results wins. **Low confidence caps the result at Medium.**
+The higher of the critical-ETA and warning-ETA results wins. Withheld forecasts remain **Unknown** unless a valid current threshold breach establishes higher risk. An unavailable forecast is never presented as proof of no growth. If an absolute free-space threshold is configured but free bytes are unavailable, a percentage-only model cannot label the filesystem Healthy; it remains Unknown unless known evidence already establishes higher risk.
+
+**Information and forecast status**: the filesystem table includes a short explanation, with separate current-risk, recent-behaviour, longer-term-behaviour and forecast assessments in the detail view. These explanations are also included in CSV and HTML exports. Forecast confidence describes the estimated future trend; it does not weaken an observed current warning or critical breach. A recent increase can reduce headroom even when its continuation cannot be projected reliably.
+
+Unreliable forecasts explain the actual limiting evidence, such as poor fit, insufficient observations, missing recent data or unconfirmed growth. A qualified stable or shrinking model is distinguished from an unavailable model. Small fluctuations around a flat level may be described as little observed net change, but that observation alone does not establish future safety. No finite uncertainty range is invented when there is no supported growth model.
 
 **Threshold macros**: these are resolved with Zabbix precedence (host → templates by depth → global; exact context, then regex context, then the plain macro).
 
@@ -273,6 +287,8 @@ On Windows the context is the item label, for example `System(C:)`. A bare numbe
 ### 4. CPU and memory
 
 CPU and memory are judged on **sustained evidence**, not on a trend line.
+
+On non-Windows systems, native agent `system.cpu.util` without parameters measures user CPU time, so it is excluded as a total-utilization source; the standard template's dependent total-utilization item with the same key remains supported. RAM uses utilization or `100 − pavailable`; non-Windows `pused` is excluded because it can count reclaimable cache as used. Windows `pused` remains supported. See the official [CPU item parameters](https://www.zabbix.com/documentation/7.0/en/manual/config/items/itemtypes/zabbix_agent#system.cpu.util) and [memory parameter definitions](https://www.zabbix.com/documentation/7.0/en/manual/appendix/items/vm.memory.size_params).
 
 **Window choice**: the first window in this order that meets both minimums:
 
@@ -296,7 +312,7 @@ CPU and memory are judged on **sustained evidence**, not on a trend line.
 
 The stock Linux and Windows templates only define the alarm macros, so the review level is normally derived from the alarm.
 
-**Baseline risk**: computed from the selected window. "Above" means the share of samples above the threshold.
+**Baseline risk**: computed from the selected window. Here p95 means the sample-weighted percentile of bucket averages; "above" means the sample-weighted share attributed to buckets whose averages exceed the threshold. These are sustained-load indicators, not raw-sample percentiles or exact elapsed time.
 
 | Risk | Rule |
 |---|---|
@@ -392,7 +408,7 @@ This line never changes any ETA, marker, risk or export value. Those always come
 
 The tests remain in the public source repository for review and development, but they are non-web test runners and are intentionally excluded by the production installation commands above.
 
-The pure calculation suite covers sparse resource data, isolated maxima, recurring saturation episodes, downward regime changes, invalid percentages, Linux/Windows usable-capacity rules, freshness-first item/family selection, sparse disk history, current disk breaches without a model, and same-depth macro precedence:
+The pure calculation suite covers sparse resource data, isolated maxima, recurring saturation episodes, downward regime changes, invalid percentages, Linux/Windows usable-capacity rules, freshness-first item/family selection, sparse disk history, current disk breaches without a model, and same-depth macro precedence. It also runs `CapacityPlanningResourceAccuracyTest.php` for CPU/RAM metric semantics and represented-time coverage. Disk regressions include expansion-induced conflicting percentage/byte slopes, percentage-only monitoring, stale or weak models, isolated samples after long gaps, one-off bulk additions, recurring batch growth, cleanup followed by sustained growth, fit-qualified window fallback, recent growth changes, stable/shrinking observations and explicit forecast explanations:
 
 ```bash
 php tests/CapacityPlanningMathTest.php
@@ -413,7 +429,7 @@ export PLAYWRIGHT_CHROMIUM_EXECUTABLE="$(node -e "process.stdout.write(require('
 npm test
 ```
 
-`npm test` first checks that the manifest, package version, PHP build constant, JavaScript build constant and build-versioned JavaScript filename agree, then runs the browser suite. Use `npm run test:build` or `npm run test:ui` to run either stage alone.
+`npm test` first checks that the manifest, package version, PHP build constant, JavaScript build constant and build-versioned JavaScript filename agree, then runs the display and browser suites. The display checks cover full HTML/CSV exports, unavailable forecasts, stale-value labels, and gaps/summary intervals in charts. Use `npm run test:build`, `npm run test:display` or `npm run test:ui` to run individual stages; `test:ui` also runs the display checks so existing browser CI includes them.
 
 Linux/macOS must set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` as shown (or point it at another compatible Chrome/Chromium). On Windows, set the same environment variable when needed; if it is omitted, the test runner uses the standard Google Chrome installation path.
 

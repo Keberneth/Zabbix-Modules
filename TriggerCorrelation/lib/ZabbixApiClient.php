@@ -700,6 +700,7 @@ final class ZabbixApiClient {
             'template' => 'Template',
             'templategroup' => 'TemplateGroup',
             'trigger' => 'Trigger',
+            'triggerprototype' => 'TriggerPrototype',
             'usergroup' => 'UserGroup',
             'usermacro' => 'UserMacro'
         ];

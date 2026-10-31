@@ -63,6 +63,7 @@
 			this.csvAbort = null;
 			this.drillAbort = null;
 			this.drillCache = new Map();
+			this.drillSeq = 0;
 
 			this.brush = null;
 			this.preZoom = null;
@@ -73,7 +74,7 @@
 
 		emptyTimelineState() {
 			return {sig: null, skeleton: null, sev: {}, totals: {}, loaded: new Set(), inflight: new Set(),
-				granularity: 'day', granularityClamped: false, limitReached: false, ready: false};
+				failed: new Set(), errors: new Set(), granularity: 'day', granularityClamped: false, limitReached: false, ready: false};
 		}
 
 		// ---- date helpers (UTC) ----------------------------------------------------
@@ -85,7 +86,19 @@
 				return null;
 			}
 			const ms = endOfDay ? Date.UTC(p[0], p[1] - 1, p[2], 23, 59, 59) : Date.UTC(p[0], p[1] - 1, p[2], 0, 0, 0);
+			const date = new Date(ms);
+			if (date.getUTCFullYear() !== p[0] || date.getUTCMonth() !== p[1] - 1 || date.getUTCDate() !== p[2]) { return null; }
 			return Math.floor(ms / 1000);
+		}
+
+		static monthsBefore(date, months) {
+			const result = new Date(date);
+			const day = result.getUTCDate();
+			result.setUTCDate(1);
+			result.setUTCMonth(result.getUTCMonth() - months);
+			const lastDay = new Date(Date.UTC(result.getUTCFullYear(), result.getUTCMonth() + 1, 0)).getUTCDate();
+			result.setUTCDate(Math.min(day, lastDay));
+			return result;
 		}
 
 		static epochToDateInput(epoch) {
@@ -104,6 +117,15 @@
 			this.bindEvents();
 			this.applyInitialState();
 			this.loadActiveTab();
+			if (typeof ResizeObserver !== 'undefined') {
+				let width = this.root.clientWidth;
+				this.resizeObserver = new ResizeObserver(() => {
+					if (this.root.clientWidth === width) { return; }
+					width = this.root.clientWidth;
+					if (this.activeTab === 'timeline' && this.tl.skeleton) { this.reRenderTimeline(); }
+				});
+				this.resizeObserver.observe(this.root);
+			}
 		}
 
 		getPalette() {
@@ -143,6 +165,7 @@
 							</div>
 						</div>
 						<div class="incident-actions">
+							<button type="button" class="incident-btn" data-role="refresh">Refresh</button>
 							<button type="button" class="incident-btn incident-btn-primary" data-role="reset-zoom" hidden>Reset zoom</button>
 							<button type="button" class="incident-btn" data-role="export-png">Export PNG</button>
 							<button type="button" class="incident-btn" data-role="export-html">Export HTML</button>
@@ -170,17 +193,17 @@
 						</div>
 					</div>
 
-					<div class="incident-tabs" data-role="tabs">
-						<button type="button" class="incident-tab is-active" data-tab="timeline">Timeline</button>
-						<button type="button" class="incident-tab" data-tab="top">Top triggers</button>
+					<div class="incident-tabs" data-role="tabs" role="tablist" aria-label="Incident reports">
+						<button type="button" class="incident-tab is-active" data-tab="timeline" id="incident-tab-timeline" role="tab" aria-controls="incident-panel-timeline">Timeline</button>
+						<button type="button" class="incident-tab" data-tab="top" id="incident-tab-top" role="tab" aria-controls="incident-panel-top">Top triggers</button>
 					</div>
 
 					<div class="incident-meta" data-role="meta"></div>
-					<div data-role="warning" hidden></div>
-					<div data-role="error" hidden></div>
-					<div class="incident-loading" data-role="loading">Loading…</div>
+					<div data-role="warning" role="status" hidden></div>
+					<div data-role="error" role="alert" hidden></div>
+					<div class="incident-loading" data-role="loading" role="status">Loading…</div>
 
-					<div class="incident-tabpanel" data-panel="timeline">
+					<div class="incident-tabpanel" data-panel="timeline" id="incident-panel-timeline" role="tabpanel" aria-labelledby="incident-tab-timeline">
 						<div class="incident-grid">
 							<div class="incident-card">
 								<h3>Incidents over time</h3>
@@ -219,13 +242,14 @@
 						</div>
 					</div>
 
-					<div class="incident-tabpanel" data-panel="top" hidden>
+					<div class="incident-tabpanel" data-panel="top" id="incident-panel-top" role="tabpanel" aria-labelledby="incident-tab-top" hidden>
 						<div class="incident-card">
 							<h3>Top triggers</h3>
-							<p class="incident-card-subtitle" data-role="top-subtitle">Triggers ranked by number of problems. With filters, every matching trigger is shown; otherwise the top 100.</p>
+							<p class="incident-card-subtitle" data-role="top-subtitle">Triggers ranked by number of problems. Shows up to 1,000 matching triggers with filters, otherwise the top 100. Resolution averages use events with an available recovery time.</p>
 							<div data-role="top-body"></div>
 						</div>
 					</div>
+					<div class="incident-footer-note">All dates and times are UTC.${this.root.dataset.moduleVersion ? ` · Incident Timeline ${this.escapeHtml(this.root.dataset.moduleVersion)}` : ''}</div>
 				</div>
 			`;
 
@@ -235,6 +259,7 @@
 				prev: q('[data-role="prev"]'), next: q('[data-role="next"]'), granularity: q('[data-role="granularity"]'),
 				resetZoom: q('[data-role="reset-zoom"]'),
 				exportPng: q('[data-role="export-png"]'),
+				refresh: q('[data-role="refresh"]'),
 				exportHtml: q('[data-role="export-html"]'), exportCsv: q('[data-role="export-csv"]'),
 				filterbar: q('.incident-filterbar'), filterSummary: q('[data-role="filter-summary"]'),
 				applyFilters: q('[data-role="apply-filters"]'), clearFilters: q('[data-role="clear-filters"]'),
@@ -263,6 +288,7 @@
 		}
 
 		bindEvents() {
+			this.elements.refresh.addEventListener('click', () => { this.invalidateData(); this.loadActiveTab(); });
 			this.elements.presets.addEventListener('click', (e) => {
 				const b = e.target.closest('[data-preset]');
 				if (b) { this.applyPreset(Number(b.dataset.preset)); }
@@ -286,6 +312,13 @@
 			this.elements.tabs.addEventListener('click', (e) => {
 				const b = e.target.closest('[data-tab]');
 				if (b) { this.switchTab(b.dataset.tab); }
+			});
+			this.elements.tabs.addEventListener('keydown', (e) => {
+				if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) { return; }
+				e.preventDefault();
+				const tab = e.key === 'Home' ? 'timeline' : e.key === 'End' ? 'top' : this.activeTab === 'timeline' ? 'top' : 'timeline';
+				this.switchTab(tab);
+				this.elements.tabs.querySelector(`[data-tab="${tab}"]`).focus();
 			});
 
 			this.elements.severityFilter.addEventListener('change', (e) => {
@@ -333,7 +366,7 @@
 				this.elements.to.value = IncidentTimelineApp.epochToDateInput(Date.UTC(y, m, 0) / 1000);
 			}
 			else {
-				const f = new Date(today); f.setUTCMonth(f.getUTCMonth() - 3);
+				const f = IncidentTimelineApp.monthsBefore(today, 3);
 				this.elements.from.value = IncidentTimelineApp.epochToDateInput(f.getTime() / 1000);
 				this.elements.to.value = IncidentTimelineApp.epochToDateInput(today.getTime() / 1000);
 			}
@@ -347,6 +380,10 @@
 			this.filters.template = p('template') || '';
 			this.filters.name = p('name') || '';
 			this.filters.nameRegex = p('name_regex') === '1';
+			if (url.searchParams.has('severities')) {
+				this.activeSeverities = new Set((p('severities') || '').split(',').filter((s) => /^[0-5]$/.test(s)).map(Number));
+				this.elements.severityFilter.querySelectorAll('input').forEach((cb) => { cb.checked = this.activeSeverities.has(Number(cb.value)); });
+			}
 			this.elements.filterbar.querySelector('[data-filter="group"]').value = this.filters.group;
 			this.elements.filterbar.querySelector('[data-filter="host"]').value = this.filters.host;
 			this.elements.filterbar.querySelector('[data-filter="template"]').value = this.filters.template;
@@ -360,11 +397,14 @@
 			this.syncTabs();
 			this.updateNavButtons();
 			this.updateFilterSummary();
+			this.syncLegendState();
 		}
 
 		// ---- tabs ------------------------------------------------------------------
 		switchTab(tab) {
 			if (tab === this.activeTab) { return; }
+			this.hideDrill();
+			this.cancelExport();
 			this.activeTab = tab;
 			this.syncTabs();
 			this.updateLocationState();
@@ -375,6 +415,8 @@
 		syncTabs() {
 			this.elements.tabs.querySelectorAll('[data-tab]').forEach((b) => {
 				b.classList.toggle('is-active', b.dataset.tab === this.activeTab);
+				b.setAttribute('aria-selected', String(b.dataset.tab === this.activeTab));
+				b.tabIndex = b.dataset.tab === this.activeTab ? 0 : -1;
 			});
 			this.elements.panelTimeline.hidden = this.activeTab !== 'timeline';
 			this.elements.panelTop.hidden = this.activeTab !== 'top';
@@ -396,7 +438,7 @@
 		// ---- range controls --------------------------------------------------------
 		applyPreset(months) {
 			const today = IncidentTimelineApp.todayUtcDate();
-			const f = new Date(today); f.setUTCMonth(f.getUTCMonth() - months);
+			const f = IncidentTimelineApp.monthsBefore(today, months);
 			this.elements.from.value = IncidentTimelineApp.epochToDateInput(f.getTime() / 1000);
 			this.elements.to.value = IncidentTimelineApp.epochToDateInput(today.getTime() / 1000);
 			this.hideZoomReset();
@@ -429,6 +471,7 @@
 		setGranularity(bucket) {
 			if (!['auto', 'day', 'week', 'month'].includes(bucket) || bucket === this.bucket) { return; }
 			this.bucket = bucket;
+			this.hideDrill();
 			this.syncGranularityButtons();
 			this.tl.sig = null; // granularity only affects the timeline
 			if (this.activeTab === 'timeline') { this.loadTimeline(); }
@@ -437,6 +480,7 @@
 		syncGranularityButtons() {
 			this.elements.granularity.querySelectorAll('[data-bucket]').forEach((b) => {
 				b.classList.toggle('is-active', b.dataset.bucket === this.bucket);
+				b.setAttribute('aria-pressed', String(b.dataset.bucket === this.bucket));
 			});
 		}
 
@@ -511,7 +555,7 @@
 			this.elements.filterSummary.textContent = parts.length ? `Filter: ${parts.join('  ·  ')}` : '';
 		}
 
-		async ensureResolved() {
+		async ensureResolved(signal) {
 			const fsig = JSON.stringify([this.filters.group, this.filters.host, this.filters.template]);
 			if (this.resolved && this.resolved.fsig === fsig) { return this.resolved; }
 
@@ -523,7 +567,10 @@
 			const r = await this.fetchData({
 				time_from: 0, time_to: 1, mode: 'resolve',
 				group: this.filters.group, host: this.filters.host, template: this.filters.template
-			}, null);
+			}, signal);
+			if ((signal && signal.aborted) || fsig !== JSON.stringify([this.filters.group, this.filters.host, this.filters.template])) {
+				throw new DOMException('The filter changed.', 'AbortError');
+			}
 			this.resolved = {fsig, groupids: r.groupids || [], hostids: r.hostids || [], empty: !!r.empty,
 				truncated: !!r.truncated, summary: r.summary || ''};
 			if (r.truncated) {
@@ -546,11 +593,30 @@
 		}
 
 		invalidateData() {
+			this.cancelLoad();
+			this.cancelExport();
 			this.tl = this.emptyTimelineState();
 			this.top.sig = null;
 			this.top.ready = false;
+			this._incidentsSig = null;
 			this.drillCache.clear();
 			this.hideDrill();
+			this.updateExportState();
+			this.renderEmptyTimeline('Choose a valid range to load incident data.');
+			this.elements.topBody.innerHTML = '';
+		}
+
+		cancelLoad() {
+			if (this.loadAbort) { this.loadAbort.abort(); }
+			this.loadAbort = new AbortController();
+			this.loadSeq++;
+			this.tl.inflight.clear();
+			this.setLoading(false);
+			return this.loadSeq;
+		}
+
+		cancelExport() {
+			if (this.csvAbort) { this.csvAbort.abort(); }
 		}
 
 		// ---- severity filter -------------------------------------------------------
@@ -564,25 +630,9 @@
 		onSeverityToggle() {
 			this.updateActiveSeverities();
 			this.syncLegendState();
-			if (this.activeTab === 'top') {
-				// Severity scope changes the top-triggers result set.
-				this.top.sig = null;
-				this.loadTopTriggers();
-				return;
-			}
-			// Timeline: load any newly-active severity not yet fetched or in flight,
-			// else just re-render (toggle-off needs no network).
-			const missing = SEV_DESC.filter((k) =>
-				this.activeSeverities.has(k) && this.tl.skeleton && !this.tl.loaded.has(k) && !this.tl.inflight.has(k));
-			if (missing.length && this.tl.skeleton) {
-				this.loadTimelineSeverities(missing);
-			}
-			else if (!this.tl.skeleton) {
-				this.loadTimeline();
-			}
-			else {
-				this.reRenderTimeline();
-			}
+			this.hideDrill();
+			this.cancelExport();
+			this.loadActiveTab();
 		}
 
 		onLegendToggle(e) {
@@ -611,6 +661,8 @@
 				try { payload = JSON.parse(text); }
 				catch (_e) { throw new Error('The server returned an invalid JSON response.'); }
 			}
+			else { throw new Error('The server returned an empty response.'); }
+			if (!payload || typeof payload !== 'object' || Array.isArray(payload)) { throw new Error('The server returned an invalid data response.'); }
 			if (payload && payload.error) { throw new Error(payload.error.message || 'Failed to load incident data.'); }
 			if (!response.ok) { throw new Error(`Request failed with HTTP ${response.status}.`); }
 			return payload;
@@ -620,6 +672,7 @@
 			const r = this.getSelectedRange();
 			if (!r) { this.showError('Please choose a valid From and To date.'); return null; }
 			if (r.time_from > r.time_to) { this.showError('The From date must be on or before the To date.'); return null; }
+			if (r.time_to > IncidentTimelineApp.todayUtcDate().getTime() / 1000 + 86399) { this.showError('The To date cannot be later than today (UTC).'); return null; }
 			if (Math.round((r.time_to - r.time_from) / 86400) > this.maxRangeDays) {
 				this.showError(`The selected range is too large (max ${this.maxRangeDays} days).`); return null;
 			}
@@ -628,121 +681,74 @@
 
 		// ---- TIMELINE tab (progressive per-severity) -------------------------------
 		async loadTimeline() {
+			const seq = this.cancelLoad();
+			const signal = this.loadAbort.signal;
 			const range = this.validatedRange();
-			if (!range) { return; }
-
+			if (!range) { this.tl.ready = false; this.updateExportState(); return; }
 			this.requestRange = range;
-			const sig = JSON.stringify([range, this.bucket, this.filterSignature()]);
+			// Severity selection changes which cached series are visible, not their values.
+			const sig = JSON.stringify([range, this.bucket, this.filters]);
+			if (this.tl.sig !== sig) { this.tl = this.emptyTimelineState(); this.tl.sig = sig; }
+			const state = this.tl;
+			state.ready = false;
+			state.failed.clear();
+			state.errors.clear();
 			this.clearMessages();
 			this.updateNavButtons();
 			this.updateGranularityHints(Math.round((range.time_to - range.time_from) / 86400));
 			this.updateLocationState();
-
-			// Cache hit: same range/bucket/filters/severities already fully loaded.
-			if (this.tl.sig === sig && this.tl.ready) {
-				this.reRenderTimeline();
-				this.updateExportState();
-				return;
-			}
-
-			if (this.loadAbort) { this.loadAbort.abort(); }
-			this.loadAbort = new AbortController();
-			const seq = ++this.loadSeq;
-			const signal = this.loadAbort.signal;
-
-			this.tl = this.emptyTimelineState();
-			this.tl.sig = sig;
-			this.updateExportState(); // disable exports until this load completes
+			this.updateExportState();
+			if (!this.activeSeverities.size) { this.renderEmptyTimeline('No severities selected.'); return; }
+			if (state.skeleton) { this.reRenderTimeline(); }
+			else { this.renderEmptyTimeline('Loading incident data…'); }
 			this.setLoading(true, 'Resolving filter…');
-
 			try {
-				const resolved = await this.ensureResolved();
+				const resolved = await this.ensureResolved(signal);
 				if (seq !== this.loadSeq) { return; }
-				if (resolved.empty) {
-					this.setLoading(false);
-					this.renderEmptyTimeline('No hosts or groups matched the filter.');
-					this.updateExportState();
-					return;
-				}
-
-				const order = SEV_DESC.filter((k) => this.activeSeverities.has(k));
-				if (!order.length) {
-					this.setLoading(false);
-					this.renderEmptyTimeline('No severities selected.');
-					return;
-				}
-
+				if (resolved.empty) { this.renderEmptyTimeline('No hosts or groups matched the filter.'); return; }
+				const order = SEV_DESC.filter((k) => this.activeSeverities.has(k) && !state.loaded.has(k));
 				for (let i = 0; i < order.length; i++) {
 					const sev = order[i];
-					if (this.tl.loaded.has(sev) || this.tl.inflight.has(sev)) { continue; }
-					this.setLoading(true, `Loading ${SEV_BY_KEY[sev].label}… (${i + 1}/${order.length})`);
-					this.tl.inflight.add(sev);
+					if (seq !== this.loadSeq) { return; }
+					this.setLoading(true, 'Loading ' + SEV_BY_KEY[sev].label + '… (' + (i + 1) + '/' + order.length + ')');
+					state.inflight.add(sev);
 					try {
-						const resp = await this.fetchData({
-							time_from: range.time_from, time_to: range.time_to, bucket: this.bucket,
-							mode: 'aggregate', severity: String(sev), ...this.baseFilterParams()
-						}, signal);
+						const resp = await this.fetchData({time_from: range.time_from, time_to: range.time_to,
+							bucket: this.bucket, mode: 'aggregate', severity: String(sev), ...this.baseFilterParams()}, signal);
 						if (seq !== this.loadSeq) { return; }
 						this.mergeSeverity(resp, sev);
-						this.reRenderTimeline();
 					}
-					finally {
-						this.tl.inflight.delete(sev);
+					catch (err) {
+						if (seq !== this.loadSeq || (err && err.name === 'AbortError')) { return; }
+						state.failed.add(sev);
+						state.errors.add(err instanceof Error ? err.message : 'The server request failed.');
 					}
+					finally { if (seq === this.loadSeq) { state.inflight.delete(sev); } }
+					this.reRenderTimeline();
 				}
-				this.tl.ready = true;
+				state.ready = this.getFilteredSeverities().every((s) => state.loaded.has(s.key));
+				this.reRenderTimeline();
+				if (state.failed.size) { this.showError(`Some severities could not be loaded. Counts are incomplete. ${Array.from(state.errors).join(' ')} Use Refresh to retry.`); }
 			}
 			catch (err) {
-				if (err && err.name === 'AbortError') { return; }
-				if (seq === this.loadSeq) {
-					this.renderEmptyTimeline(err instanceof Error ? err.message : 'Failed to load incident data.');
-					this.showError(err instanceof Error ? err.message : 'Failed to load incident data.');
-				}
+				if (seq !== this.loadSeq || (err && err.name === 'AbortError')) { return; }
+				this.renderEmptyTimeline('Incident data could not be loaded.');
+				this.showError(err instanceof Error ? err.message : 'Failed to load incident data.');
 			}
 			finally {
-				if (seq === this.loadSeq && !this.tl.inflight.size) {
-					this.setLoading(false);
-					this.updateExportState();
-				}
-			}
-		}
-
-		// Load specific severities (toggled on mid-session) without resetting the rest.
-		async loadTimelineSeverities(severities) {
-			const range = this.requestRange;
-			if (!range || !this.tl.skeleton) { this.loadTimeline(); return; }
-			const seq = this.loadSeq; // piggyback the current generation (keeps existing data)
-			const signal = this.loadAbort ? this.loadAbort.signal : null;
-			this.setLoading(true, 'Loading severity…');
-			try {
-				for (const sev of severities) {
-					if (this.tl.loaded.has(sev) || this.tl.inflight.has(sev)) { continue; }
-					this.tl.inflight.add(sev);
-					try {
-						const resp = await this.fetchData({
-							time_from: range.time_from, time_to: range.time_to, bucket: this.bucket,
-							mode: 'aggregate', severity: String(sev), ...this.baseFilterParams()
-						}, signal);
-						if (seq !== this.loadSeq) { return; }
-						this.mergeSeverity(resp, sev);
-						this.reRenderTimeline();
-					}
-					finally {
-						this.tl.inflight.delete(sev);
-					}
-				}
-			}
-			catch (err) {
-				if (!(err && err.name === 'AbortError')) { this.reRenderTimeline(); }
-			}
-			finally {
-				if (seq === this.loadSeq && !this.tl.inflight.size) { this.setLoading(false); }
+				if (seq === this.loadSeq) { this.setLoading(false); this.updateExportState(); }
 			}
 		}
 
 		mergeSeverity(resp, sev) {
-			const buckets = Array.isArray(resp.buckets) ? resp.buckets : [];
-			if (!this.tl.skeleton || this.tl.skeleton.length !== buckets.length) {
+			if (!Array.isArray(resp.buckets) || !resp.meta || !Number.isFinite(Number(resp.meta.total_incidents))) {
+				throw new Error('The server returned incomplete aggregate data.');
+			}
+			const buckets = resp.buckets;
+			if (this.tl.skeleton && (this.tl.skeleton.length !== buckets.length || buckets.some((b, i) => b.start !== this.tl.skeleton[i].start || b.end !== this.tl.skeleton[i].end))) {
+				throw new Error('The server returned inconsistent time buckets.');
+			}
+			if (!this.tl.skeleton) {
 				this.tl.skeleton = buckets.map((b) => ({key: b.key, label: b.label, start: b.start, end: b.end}));
 				this.tl.sev = {};
 				this.tl.totals = {};
@@ -773,19 +779,24 @@
 		reRenderTimeline() {
 			const buckets = this.displayBuckets();
 			const active = this.getFilteredSeverities();
-			const summaryActive = active.map((s) => ({severity: s.key, label: s.label, count: this.tl.totals[s.key] || 0}));
+			const summaryActive = active.map((s) => ({severity: s.key, label: s.label,
+				count: this.tl.loaded.has(s.key) ? this.tl.totals[s.key] || 0 : null,
+				pending: !this.tl.loaded.has(s.key), failed: this.tl.failed.has(s.key)}));
 			const filteredTotal = summaryActive.reduce((sum, r) => sum + Number(r.count || 0), 0);
 
-			let warning = '';
-			if (this.tl.limitReached) { warning = 'Some severities hit the scan limit; counts may be partial.'; }
-			else if (this.tl.granularityClamped) { warning = `The range is large, so data is grouped by ${this.tl.granularity}.`; }
-			this.renderWarning(warning);
+			const warnings = [];
+			if (this.tl.limitReached) { warnings.push('Some severities hit the scan limit; counts may be partial.'); }
+			if (this.tl.granularityClamped) { warnings.push(`The range is large, so data is grouped by ${this.tl.granularity}.`); }
+			const missing = active.filter((s) => !this.tl.loaded.has(s.key));
+			if (missing.length) { warnings.push(`Incomplete counts: ${missing.map((s) => s.label).join(', ')} ${missing.length === 1 ? 'is' : 'are'} not loaded.`); }
+			if (this.resolved && this.resolved.truncated) { warnings.push(this.resolved.summary || 'Host/group filter results are incomplete.'); }
+			this.renderWarning(warnings.join(' '));
 
 			this.updateTimelineSubtitle(this.tl.granularity);
 			this.renderMeta(filteredTotal);
 			this.renderTimeline(buckets);
 			this.renderTrendLine(buckets);
-			this.renderSeverityChart(summaryActive);
+			this.renderSeverityChart(summaryActive.filter((r) => !r.pending));
 			this.renderSummary(summaryActive, filteredTotal);
 		}
 
@@ -817,10 +828,10 @@
 			const r = this.requestRange || {};
 			const fromLabel = r.time_from ? this.formatDate(new Date(r.time_from * 1000)) : 'n/a';
 			const toLabel = r.time_to ? this.formatDate(new Date(r.time_to * 1000)) : 'n/a';
-			const loadedCount = this.tl.loaded ? this.tl.loaded.size : 0;
-			const progress = (loadedCount < this.activeSeverities.size) ? ` • loading ${loadedCount}/${this.activeSeverities.size} severities…` : '';
+			const loadedCount = this.getFilteredSeverities().filter((s) => this.tl.loaded.has(s.key)).length;
+			const progress = (loadedCount < this.activeSeverities.size) ? ` • ${loadedCount}/${this.activeSeverities.size} severities loaded` : '';
 			this.elements.meta.textContent =
-				`Range: ${fromLabel} → ${toLabel} • Incidents: ${incidentCount} • Grouped by ${this.tl.granularity}${progress}`;
+				`Range: ${fromLabel} → ${toLabel} (UTC) • ${progress ? 'Loaded incidents' : 'Incidents'}: ${incidentCount.toLocaleString()} • Grouped by ${this.tl.granularity}${progress}`;
 		}
 
 		// ---- legends ---------------------------------------------------------------
@@ -849,7 +860,8 @@
 			this.syncLegendState();
 			if (!buckets.length) {
 				this.timelineGeom = null;
-				this.elements.timelineSurface.innerHTML = '<div class="incident-empty">No incidents were found for the selected range.</div>';
+				const incomplete = this.getFilteredSeverities().some((s) => !this.tl.loaded.has(s.key));
+				this.elements.timelineSurface.innerHTML = `<div class="incident-empty">${incomplete ? 'Incident counts are not available for the selected severities.' : 'No incidents were found for the selected range.'}</div>`;
 				return;
 			}
 			const built = this.buildTimelineSvg(buckets, this.getFilteredSeverities(), this.getPalette(), true);
@@ -860,17 +872,17 @@
 		}
 
 		buildTimelineSvg(buckets, visibleSeverities, palette, interactive) {
-			const margin = {top: 18, right: 20, bottom: 78, left: 52};
-			const plotWidth = Math.max(640, buckets.length * 20);
+			const margin = {top: 18, right: 64, bottom: 78, left: 52};
+			const plotWidth = interactive ? Math.max(180, (this.elements.timelineSurface.clientWidth || 712) - margin.left - margin.right) : 1028;
 			const width = margin.left + plotWidth + margin.right;
 			const height = 360;
 			const plotHeight = height - margin.top - margin.bottom;
 			const barSlot = plotWidth / Math.max(buckets.length, 1);
-			const barWidth = Math.max(2, Math.min(22, barSlot - 2));
+			const barWidth = Math.max(0.5, Math.min(22, barSlot * 0.8));
 			const totals = buckets.map((b) => visibleSeverities.reduce((s, sv) => s + Number(b[`sev_${sv.key}`] || 0), 0));
-			const maxValue = Math.max(1, ...totals);
-			const yTicks = this.buildTicks(maxValue, 5);
-			const labelStep = Math.max(1, Math.ceil(buckets.length / 12));
+			const yTicks = this.buildTicks(Math.max(1, ...totals), 5);
+			const maxValue = yTicks[yTicks.length - 1];
+			const labelIndexes = this.chartLabelIndexes(buckets.length, plotWidth);
 
 			let svg = this.createSvgOpenTag(width, height);
 			if (interactive) {
@@ -896,7 +908,7 @@
 					svg += `<rect x="${x}" y="${y}" width="${barWidth}" height="${rectH}" fill="${sev.color}" />`;
 					stacked += rectH;
 				});
-				if (index % labelStep === 0 || index === buckets.length - 1) {
+				if (labelIndexes.has(index)) {
 					const lx = x + (barWidth / 2), ly = margin.top + plotHeight + 14;
 					svg += `<text x="${lx}" y="${ly}" font-size="10" fill="${palette.axisText}" transform="rotate(45 ${lx} ${ly})" text-anchor="start">${this.escapeHtml(bucket.label)}</text>`;
 				}
@@ -923,12 +935,12 @@
 		}
 
 		buildTrendSvg(buckets, visibleSeverities, palette, interactive) {
-			const margin = {top: 24, right: 30, bottom: 78, left: 52};
-			const plotWidth = Math.max(800, buckets.length * 28);
+			const margin = {top: 24, right: 64, bottom: 78, left: 52};
+			const plotWidth = interactive ? Math.max(180, (this.elements.trendSurface.clientWidth || 882) - margin.left - margin.right) : 1018;
 			const width = margin.left + plotWidth + margin.right;
 			const height = 380;
 			const plotHeight = height - margin.top - margin.bottom;
-			const labelStep = Math.max(1, Math.ceil(buckets.length / 12));
+			const labelIndexes = this.chartLabelIndexes(buckets.length, plotWidth);
 			const slotWidth = plotWidth / Math.max(buckets.length - 1, 1);
 
 			let maxValue = 0;
@@ -938,6 +950,7 @@
 			}));
 			maxValue = Math.max(1, maxValue);
 			const yTicks = this.buildTicks(maxValue, 5);
+			maxValue = yTicks[yTicks.length - 1];
 
 			let svg = this.createSvgOpenTag(width, height);
 			if (interactive) {
@@ -953,7 +966,7 @@
 			svg += `<text x="${margin.left}" y="${margin.top - 6}" font-size="12" font-weight="600" fill="${palette.title}">Incidents per period (trend)</text>`;
 
 			buckets.forEach((bucket, index) => {
-				if (index % labelStep === 0 || index === buckets.length - 1) {
+				if (labelIndexes.has(index)) {
 					const lx = margin.left + (index * slotWidth), ly = margin.top + plotHeight + 14;
 					svg += `<text x="${lx}" y="${ly}" font-size="10" fill="${palette.axisText}" transform="rotate(45 ${lx} ${ly})" text-anchor="start">${this.escapeHtml(bucket.label)}</text>`;
 				}
@@ -983,17 +996,17 @@
 				this.elements.severitySurface.innerHTML = '<div class="incident-empty">No severity data is available.</div>';
 				return;
 			}
-			this.elements.severitySurface.innerHTML = this.buildSeveritySvg(summary, palette);
+			this.elements.severitySurface.innerHTML = this.buildSeveritySvg(summary, palette,
+				Math.max(240, Math.min(536, this.elements.severitySurface.clientWidth || 536)));
 		}
 
-		buildSeveritySvg(summary, palette) {
-			const margin = {top: 16, right: 56, bottom: 28, left: 120};
+		buildSeveritySvg(summary, palette, width = 536) {
+			const margin = {top: 16, right: 56, bottom: 28, left: width < 400 ? 110 : 120};
 			const rowHeight = 34;
-			const plotWidth = 360;
-			const width = margin.left + plotWidth + margin.right;
+			const plotWidth = width - margin.left - margin.right;
 			const height = margin.top + (summary.length * rowHeight) + margin.bottom;
-			const maxValue = Math.max(1, ...summary.map((r) => Number(r.count || 0)));
-			const ticks = this.buildTicks(maxValue, 4);
+			const ticks = this.buildTicks(Math.max(1, ...summary.map((r) => Number(r.count || 0))), width < 400 ? 2 : 4);
+			const maxValue = ticks[ticks.length - 1];
 
 			let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMinYMin meet" style="width:100%;height:auto;max-width:${width}px" role="img" aria-label="Incidents by severity">`;
 			svg += `<text x="${margin.left}" y="12" font-size="12" font-weight="600" fill="${palette.title}">Incident count</text>`;
@@ -1021,11 +1034,12 @@
 				return;
 			}
 			const rows = summary.map((row) => {
+				if (row.pending) { return `<tr><td>${this.escapeHtml(row.label)}</td><td>${row.failed ? 'Unavailable' : 'Loading…'}</td><td>—</td></tr>`; }
 				const pct = total > 0 ? ((Number(row.count || 0) / total) * 100).toFixed(1) : '0.0';
-				return `<tr><td><span class="incident-severity-cell"><span class="incident-badge sev-${Number(row.severity)}"></span>${this.escapeHtml(row.label || 'Unknown')}</span></td><td>${Number(row.count || 0)}</td><td>${pct}%</td></tr>`;
+				return `<tr><td><span class="incident-severity-cell"><span class="incident-badge sev-${Number(row.severity)}"></span>${this.escapeHtml(row.label || 'Unknown')}</span></td><td>${Number(row.count || 0).toLocaleString()}</td><td>${summary.some((r) => r.pending) ? '—' : `${pct}%`}</td></tr>`;
 			}).join('');
 			this.elements.summary.innerHTML =
-				`<table class="incident-summary-table"><thead><tr><th>Severity</th><th>Count</th><th>Percentage</th></tr></thead><tbody>${rows}<tr><td><strong>Total</strong></td><td><strong>${total}</strong></td><td><strong>${total > 0 ? '100.0%' : '0.0%'}</strong></td></tr></tbody></table>`;
+				`<table class="incident-summary-table"><thead><tr><th>Severity</th><th>Count</th><th>Percentage</th></tr></thead><tbody>${rows}<tr><td><strong>${summary.some((r) => r.pending) ? 'Loaded subtotal' : 'Total'}</strong></td><td><strong>${total.toLocaleString()}</strong></td><td><strong>${summary.some((r) => r.pending) ? '—' : total > 0 ? '100.0%' : '0.0%'}</strong></td></tr></tbody></table>`;
 		}
 
 		// ---- chart interactivity ---------------------------------------------------
@@ -1074,6 +1088,7 @@
 			const active = this.getFilteredSeverities();
 			let total = 0;
 			const rows = active.map((s) => {
+				if (!this.tl.loaded.has(s.key)) { return `<div class="incident-tt-row">${this.escapeHtml(s.label)}<span class="incident-tt-val">Not loaded</span></div>`; }
 				const v = Number(bucket[`sev_${s.key}`] || 0);
 				total += v;
 				return v > 0 ? `<div class="incident-tt-row"><span class="incident-badge sev-${s.key}"></span>${this.escapeHtml(s.label)}<span class="incident-tt-val">${v}</span></div>` : '';
@@ -1153,8 +1168,8 @@
 			const from = geom.buckets[a], to = geom.buckets[b];
 			if (!from || !to) { return; }
 			this.preZoom = {from: this.elements.from.value, to: this.elements.to.value};
-			this.elements.from.value = IncidentTimelineApp.epochToDateInput(Number(from.start));
-			this.elements.to.value = IncidentTimelineApp.epochToDateInput(Number(to.end));
+			this.elements.from.value = IncidentTimelineApp.epochToDateInput(Math.max(Number(from.start), this.requestRange.time_from));
+			this.elements.to.value = IncidentTimelineApp.epochToDateInput(Math.min(Number(to.end), this.requestRange.time_to));
 			this.bucket = 'auto';
 			this.syncGranularityButtons();
 			this.showZoomReset();
@@ -1164,7 +1179,11 @@
 
 		// ---- drill-down ------------------------------------------------------------
 		async drillInto(bucket) {
-			const start = Number(bucket.start), end = Number(bucket.end);
+			if (!this.activeSeverities.size || !this.requestRange) { return; }
+			if (this.drillAbort) { this.drillAbort.abort(); }
+			const seq = ++this.drillSeq;
+			this.drillAbort = new AbortController();
+			const start = Math.max(Number(bucket.start), this.requestRange.time_from), end = Math.min(Number(bucket.end), this.requestRange.time_to);
 			const cacheKey = `${start}-${end}-${this.filterSignature()}`;
 			this.elements.drillCard.hidden = false;
 			this.elements.drillTitle.textContent = `Incidents — ${bucket.label}`;
@@ -1172,48 +1191,61 @@
 			this.elements.drillBody.innerHTML = '';
 			this.elements.drillCard.scrollIntoView({behavior: 'smooth', block: 'nearest'});
 
-			if (this.drillCache.has(cacheKey)) { this.renderDrill(bucket, this.drillCache.get(cacheKey)); return; }
-			if (this.drillAbort) { this.drillAbort.abort(); }
-			this.drillAbort = new AbortController();
+			if (this.drillCache.has(cacheKey)) { const cached = this.drillCache.get(cacheKey); this.renderDrill(bucket, cached.incidents, cached.meta); return; }
 			try {
 				const params = {time_from: start, time_to: end, bucket: 'day', mode: 'incidents', ...this.baseFilterParams()};
 				const sev = this.activeSeveritiesCsv();
 				if (sev) { params.severities = sev; }
 				const payload = await this.fetchData(params, this.drillAbort.signal);
-				const incidents = Array.isArray(payload.incidents) ? payload.incidents : [];
-				this.drillCache.set(cacheKey, incidents);
-				this.renderDrill(bucket, incidents);
+				if (seq !== this.drillSeq) { return; }
+				if (!Array.isArray(payload.incidents)) { throw new Error('The server returned incomplete incident details.'); }
+				const incidents = payload.incidents;
+				this.drillCache.set(cacheKey, {incidents, meta: payload.meta || {}});
+				this.renderDrill(bucket, incidents, payload.meta || {});
 			}
 			catch (err) {
-				if (err && err.name === 'AbortError') { return; }
+				if (seq !== this.drillSeq || (err && err.name === 'AbortError')) { return; }
 				this.elements.drillSubtitle.textContent = '';
 				this.elements.drillBody.innerHTML = `<div class="incident-error">${this.escapeHtml(err instanceof Error ? err.message : 'Failed to load incident details.')}</div>`;
 			}
 		}
 
-		renderDrill(bucket, incidents) {
+		renderDrill(bucket, incidents, meta = {}) {
 			const visible = incidents
 				.filter((i) => this.activeSeverities.has(Number(i.s ?? i.severity ?? 0)))
 				.sort((a, b) => Number(b.c ?? b.clock ?? 0) - Number(a.c ?? a.clock ?? 0));
-			this.elements.drillSubtitle.textContent = `${visible.length} incident${visible.length === 1 ? '' : 's'} in ${bucket.label} (matching active severities).`;
+			this.elements.drillSubtitle.textContent = `${visible.length.toLocaleString()} incident${visible.length === 1 ? '' : 's'} in ${bucket.label} (matching active severities, UTC).${meta.limit_reached ? ' Partial results: the scan limit was reached; narrow the range or filters.' : ''}${meta.recovery_time_unavailable ? ` Recovery time unavailable for ${meta.recovery_time_unavailable} resolved incidents.` : ''}`;
 			if (!visible.length) {
 				this.elements.drillBody.innerHTML = '<div class="incident-empty">No incidents for the active severities in this period.</div>';
 				return;
 			}
 			const rows = visible.slice(0, 500).map((inc) => {
 				const sev = Number(inc.s ?? inc.severity ?? 0), clock = Number(inc.c ?? inc.clock ?? 0), rc = Number(inc.rc ?? 0);
-				return `<tr><td><span class="incident-severity-cell"><span class="incident-badge sev-${sev}"></span>${this.escapeHtml(SEV_BY_KEY[sev] ? SEV_BY_KEY[sev].label : '')}</span></td><td>${this.escapeHtml(inc.n || inc.name || '')}</td><td>${this.escapeHtml(this.formatDateTime(new Date(clock * 1000)))}</td><td>${rc > 0 ? this.escapeHtml(this.formatDateTime(new Date(rc * 1000))) : '<span class="incident-ongoing">Ongoing</span>'}</td></tr>`;
+				const recovery = this.recoveryLabel(inc);
+				return `<tr><td><span class="incident-severity-cell"><span class="incident-badge sev-${sev}"></span>${this.escapeHtml(SEV_BY_KEY[sev] ? SEV_BY_KEY[sev].label : '')}</span></td><td>${this.escapeHtml(inc.n || inc.name || '')}</td><td>${this.escapeHtml(this.formatDateTime(new Date(clock * 1000)))}</td><td>${this.escapeHtml(recovery)}</td></tr>`;
 			}).join('');
 			const note = visible.length > 500 ? '<div class="incident-footer-note">Showing the first 500 incidents.</div>' : '';
-			this.elements.drillBody.innerHTML = `<table class="incident-summary-table incident-drill-table"><thead><tr><th>Severity</th><th>Name</th><th>Problem time</th><th>Recovery time</th></tr></thead><tbody>${rows}</tbody></table>${note}`;
+			this.elements.drillBody.innerHTML = `<div class="incident-table-scroll"><table class="incident-summary-table incident-drill-table"><thead><tr><th>Severity</th><th>Name</th><th>Problem time (UTC)</th><th>Recovery time (UTC)</th></tr></thead><tbody>${rows}</tbody></table></div>${note}`;
 		}
 
-		hideDrill() { this.elements.drillCard.hidden = true; this.elements.drillBody.innerHTML = ''; }
+		recoveryLabel(incident, iso = false) {
+			const rc = Number(incident.rc || 0);
+			if (rc > 0) { return iso ? this.formatIsoDateTime(rc) : this.formatDateTime(new Date(rc * 1000)); }
+			return incident.status === 'resolved_time_unavailable' || (incident.r && String(incident.r) !== '0') ? 'Resolved (time unavailable)' : 'Ongoing';
+		}
+
+		hideDrill() {
+			this.drillSeq++;
+			if (this.drillAbort) { this.drillAbort.abort(); }
+			this.elements.drillCard.hidden = true; this.elements.drillBody.innerHTML = '';
+		}
 
 		// ---- TOP TRIGGERS tab ------------------------------------------------------
 		async loadTopTriggers() {
+			const seq = this.cancelLoad();
+			const signal = this.loadAbort.signal;
 			const range = this.validatedRange();
-			if (!range) { return; }
+			if (!range) { this.top.ready = false; this.updateExportState(); return; }
 			this.requestRange = range;
 			const sig = JSON.stringify([range, this.filterSignature()]);
 			this.clearMessages();
@@ -1236,16 +1268,14 @@
 				return;
 			}
 
-			if (this.loadAbort) { this.loadAbort.abort(); }
-			this.loadAbort = new AbortController();
-			const seq = ++this.loadSeq;
-			const signal = this.loadAbort.signal;
 			this.setLoading(true, 'Loading top triggers…');
 			this.top = {sig, rows: [], meta: null, sort: this.top.sort, ready: false};
 			this.updateExportState(); // disable exports until this load completes
+			this.elements.topBody.innerHTML = '';
+			this.elements.meta.textContent = '';
 
 			try {
-				const resolved = await this.ensureResolved();
+				const resolved = await this.ensureResolved(signal);
 				if (seq !== this.loadSeq) { return; }
 				if (resolved.empty) {
 					this.setLoading(false);
@@ -1258,14 +1288,15 @@
 				if (sev) { params.severities = sev; }
 				const payload = await this.fetchData(params, signal);
 				if (seq !== this.loadSeq) { return; }
-				this.top.rows = Array.isArray(payload.top_triggers) ? payload.top_triggers : [];
+				if (!Array.isArray(payload.top_triggers) || !payload.meta) { throw new Error('The server returned incomplete trigger data.'); }
+				this.top.rows = payload.top_triggers;
 				this.top.meta = payload.meta || {};
 				this.top.ready = true;
 				this.renderTopMeta();
 				this.renderTopTable();
 			}
 			catch (err) {
-				if (err && err.name === 'AbortError') { return; }
+				if (seq !== this.loadSeq || (err && err.name === 'AbortError')) { return; }
 				this.elements.topBody.innerHTML = `<div class="incident-error">${this.escapeHtml(err instanceof Error ? err.message : 'Failed to load top triggers.')}</div>`;
 				this.showError(err instanceof Error ? err.message : 'Failed to load top triggers.');
 			}
@@ -1279,10 +1310,14 @@
 			const r = this.requestRange || {};
 			const fromLabel = r.time_from ? this.formatDate(new Date(r.time_from * 1000)) : 'n/a';
 			const toLabel = r.time_to ? this.formatDate(new Date(r.time_to * 1000)) : 'n/a';
-			const scope = m.filtered ? `${m.shown} matching trigger${m.shown === 1 ? '' : 's'}` : `top ${m.shown} of ${m.trigger_count} triggers`;
-			this.elements.meta.textContent = `Range: ${fromLabel} → ${toLabel} • ${scope} • ${m.total_incidents || 0} incidents`;
-			if (m.limit_reached) { this.renderWarning('The scan hit its event limit; counts and ranking may be partial — narrow the range or add a filter.'); }
-			else { this.renderWarning(''); }
+			const scope = m.filtered ? `showing ${m.shown} of ${m.trigger_count} matching triggers` : `top ${m.shown} of ${m.trigger_count} triggers`;
+			this.elements.meta.textContent = `Range: ${fromLabel} → ${toLabel} (UTC) • ${scope} • ${Number(m.total_incidents || 0).toLocaleString()} incidents`;
+			const warnings = [];
+			if (m.limit_reached) { warnings.push('The scan hit its event limit; counts and ranking may be partial. Narrow the range or add a filter.'); }
+			if (m.filtered && Number(m.shown) < Number(m.trigger_count)) { warnings.push(`Only the first ${m.shown} matching triggers are shown and exported. Narrow the filters to include all matches.`); }
+			if (m.recovery_time_unavailable) { warnings.push(`${m.recovery_time_unavailable} resolved incidents have no available recovery time and are excluded from resolution averages.`); }
+			if (this.resolved && this.resolved.truncated) { warnings.push(this.resolved.summary || 'Host/group filter results are incomplete.'); }
+			this.renderWarning(warnings.join(' '));
 		}
 
 		topSortedRows() {
@@ -1305,15 +1340,17 @@
 				this.elements.topBody.innerHTML = '<div class="incident-empty">No triggers matched the selected range and filters.</div>';
 				return;
 			}
-			const span = Math.max(1, (this.requestRange.time_to - this.requestRange.time_from));
+			const span = Math.max(1, (this.requestRange.time_to - this.requestRange.time_from + 1));
 			const maxShare = Math.max(...rows.map((r) => Number(r.share || 0)), 0.0001);
 			const sorted = this.topSortedRows();
 			const sortInd = (key) => this.top.sort.key === key ? (this.top.sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+			const sortHeader = (key, label, numeric = false) => `<th class="${numeric ? 'ttr-num' : ''}" aria-sort="${this.top.sort.key === key ? this.top.sort.dir === 'asc' ? 'ascending' : 'descending' : 'none'}"><button type="button" class="ttr-sortable" data-sort="${key}">${label}${sortInd(key)}</button></th>`;
 
 			const body = sorted.map((r) => {
 				const sev = SEV_BY_KEY[Number(r.severity)] || {color: '#999', label: ''};
 				const freq = this.formatFrequency(Number(r.count || 0), span);
 				const mttr = r.mttr == null ? '—' : this.formatDuration(Number(r.mttr));
+				const coverage = r.duration_sample_count == null ? '' : `<div class="ttr-coverage">${Number(r.duration_sample_count)} / ${Number(r.resolved || 0)} resolved</div>`;
 				const last = r.last ? this.formatDateTime(new Date(Number(r.last) * 1000)) : '';
 				const sharePct = (Number(r.share || 0) * 100).toFixed(1);
 				const barW = Math.round((Number(r.share || 0) / maxShare) * 100);
@@ -1323,7 +1360,7 @@
 					<td><span class="incident-severity-cell"><span class="incident-badge sev-${Number(r.severity)}"></span>${this.escapeHtml(sev.label)}</span></td>
 					<td class="ttr-num">${Number(r.count || 0).toLocaleString()}</td>
 					<td class="ttr-num">${this.escapeHtml(freq)}</td>
-					<td class="ttr-num">${this.escapeHtml(mttr)}</td>
+					<td class="ttr-num">${this.escapeHtml(mttr)}${coverage}</td>
 					<td>${this.escapeHtml(last)}</td>
 					<td class="ttr-share"><span class="ttr-share-bar" style="width:${barW}%"></span><span class="ttr-share-val">${sharePct}%</span></td>
 				</tr>`;
@@ -1334,13 +1371,13 @@
 				<table class="incident-summary-table incident-top-table">
 					<thead><tr>
 						<th>#</th>
-						<th class="ttr-sortable" data-sort="name">Trigger / Host${sortInd('name')}</th>
-						<th class="ttr-sortable" data-sort="severity">Severity${sortInd('severity')}</th>
-						<th class="ttr-sortable ttr-num" data-sort="count">Problems${sortInd('count')}</th>
-						<th class="ttr-sortable ttr-num" data-sort="count">Avg frequency${sortInd('count')}</th>
-						<th class="ttr-sortable ttr-num" data-sort="mttr">Mean time to resolve${sortInd('mttr')}</th>
-						<th class="ttr-sortable" data-sort="last">Last occurrence${sortInd('last')}</th>
-						<th class="ttr-sortable" data-sort="share">Share${sortInd('share')}</th>
+						${sortHeader('name', 'Trigger / Host')}
+						${sortHeader('severity', 'Severity')}
+						${sortHeader('count', 'Problems', true)}
+						<th class="ttr-num">Avg frequency</th>
+						${sortHeader('mttr', 'Mean time to resolve', true)}
+						${sortHeader('last', 'Last occurrence (UTC)')}
+						${sortHeader('share', 'Share')}
 					</tr></thead>
 					<tbody>${body}</tbody>
 				</table>
@@ -1350,8 +1387,9 @@
 				th.addEventListener('click', () => {
 					const key = th.dataset.sort;
 					if (this.top.sort.key === key) { this.top.sort.dir = this.top.sort.dir === 'asc' ? 'desc' : 'asc'; }
-					else { this.top.sort.key = key; this.top.sort.dir = (key === 'name' || key === 'last') ? 'asc' : 'desc'; }
+					else { this.top.sort.key = key; this.top.sort.dir = key === 'name' ? 'asc' : 'desc'; }
 					this.renderTopTable();
+					this.elements.topBody.querySelector(`[data-sort="${key}"]`).focus();
 				});
 			});
 		}
@@ -1384,18 +1422,22 @@
 		// ---- exports ---------------------------------------------------------------
 		async ensureIncidents() {
 			const range = this.requestRange;
-			if (!range) { throw new Error('No data range is loaded.'); }
+			if (!range || !this.tl.ready || !this.activeSeverities.size) { throw new Error('Wait for the selected severities to finish loading.'); }
 			const sig = `${range.time_from}-${range.time_to}-${this.filterSignature()}`;
 			if (this._incidents && this._incidentsSig === sig) { return this._incidents; }
 			if (this.csvAbort) { this.csvAbort.abort(); }
 			this.csvAbort = new AbortController();
+			const signal = this.csvAbort.signal;
 			const params = {time_from: range.time_from, time_to: range.time_to, bucket: this.bucket, mode: 'incidents', ...this.baseFilterParams()};
 			const sev = this.activeSeveritiesCsv();
 			if (sev) { params.severities = sev; }
-			const payload = await this.fetchData(params, this.csvAbort.signal);
-			this._incidents = Array.isArray(payload.incidents) ? payload.incidents : [];
+			const payload = await this.fetchData(params, signal);
+			if (signal.aborted || sig !== `${this.requestRange.time_from}-${this.requestRange.time_to}-${this.filterSignature()}` || this.activeTab !== 'timeline') { throw new DOMException('The report changed.', 'AbortError'); }
+			if (!Array.isArray(payload.incidents)) { throw new Error('The server returned incomplete incident details.'); }
+			this._incidents = payload.incidents;
 			this._incidentsSig = sig;
 			this._incidentsLimitReached = !!(payload.meta && payload.meta.limit_reached);
+			this._incidentsRecoveryUnavailable = Number(payload.meta && payload.meta.recovery_time_unavailable || 0);
 			return this._incidents;
 		}
 
@@ -1405,13 +1447,14 @@
 			btn.disabled = true; btn.textContent = 'Exporting…';
 			try {
 				const incidents = await this.ensureIncidents();
-				const header = ['Event ID', 'Trigger ID', 'Name', 'Severity', 'Severity name', 'Problem time', 'Recovery time', 'Resolved'];
+				const coverage = this._incidentsLimitReached ? 'Partial: event scan limit reached' : this.resolved && this.resolved.truncated ? 'Partial: filter match limit reached' : 'Complete within available Zabbix event history';
+				const header = ['Event ID', 'Trigger ID', 'Name', 'Severity', 'Severity name', 'Problem time (UTC)', 'Recovery time (UTC)', 'Resolved', 'Data coverage'];
 				const rows = [header];
 				incidents.forEach((inc) => {
 					const sev = Number(inc.s ?? inc.severity ?? 0), clock = Number(inc.c ?? inc.clock ?? 0), rc = Number(inc.rc ?? 0);
 					if (!this.activeSeverities.has(sev)) { return; }
 					rows.push([inc.eid || '', inc.oid || '', inc.n || '', sev, (SEV_BY_KEY[sev] || {}).label || '',
-						this.formatIsoDateTime(clock), rc > 0 ? this.formatIsoDateTime(rc) : 'Ongoing', rc > 0 ? 'Yes' : 'No']);
+						this.formatIsoDateTime(clock), this.recoveryLabel(inc, true), rc > 0 || (inc.r && String(inc.r) !== '0') || inc.status === 'resolved_time_unavailable' ? 'Yes' : 'No', coverage]);
 				});
 				const csv = rows.map((r) => r.map((v) => this.csvEscape(v)).join(',')).join('\n');
 				this.downloadBlob(new Blob([csv], {type: 'text/csv;charset=utf-8;'}), this.buildFileName('incident-timeline', 'csv'));
@@ -1422,20 +1465,23 @@
 			catch (err) {
 				if (!(err && err.name === 'AbortError')) { this.showError(err instanceof Error ? err.message : 'Failed to export CSV.'); }
 			}
-			finally { btn.textContent = original; btn.disabled = false; }
+			finally { btn.textContent = original; this.updateExportState(); }
 		}
 
 		exportTopCsv() {
-			if (!this.top.rows.length) { return; }
-			const span = Math.max(1, (this.requestRange.time_to - this.requestRange.time_from));
-			const header = ['Rank', 'Trigger', 'Host', 'Severity', 'Problems', 'Avg per day', 'Avg frequency', 'Mean time to resolve (s)', 'Mean time to resolve', 'Last occurrence', 'Share %'];
+			if (!this.top.ready || !this.top.rows.length) { return; }
+			const span = Math.max(1, (this.requestRange.time_to - this.requestRange.time_from + 1));
+			const header = ['Rank', 'Trigger', 'Host', 'Severity', 'Problems', 'Avg per day', 'Avg frequency', 'Mean time to resolve (s)', 'Mean time to resolve', 'Last occurrence (UTC)', 'Share %', 'Resolved incidents', 'Resolution duration samples', 'Recovery time unavailable', 'Report coverage'];
 			const rows = [header];
+			const m = this.top.meta || {};
+			const coverage = `Showing ${m.shown ?? this.top.rows.length} of ${m.trigger_count ?? this.top.rows.length} ${m.filtered ? 'matching ' : ''}triggers. ${this.elements.warning.textContent || 'Counts reflect available Zabbix event history.'}`;
 			this.topSortedRows().forEach((r) => {
 				rows.push([r.rank, r.name || '', r.host || '', (SEV_BY_KEY[Number(r.severity)] || {}).label || '',
 					Number(r.count || 0), (Number(r.count || 0) * 86400 / span).toFixed(3),
 					this.formatFrequency(Number(r.count || 0), span).replace('≈ ', ''),
 					r.mttr == null ? '' : r.mttr, r.mttr == null ? '' : this.formatDuration(Number(r.mttr)),
-					r.last ? this.formatIsoDateTime(Number(r.last)) : '', (Number(r.share || 0) * 100).toFixed(2)]);
+					r.last ? this.formatIsoDateTime(Number(r.last)) : '', (Number(r.share || 0) * 100).toFixed(2),
+					r.resolved ?? '', r.duration_sample_count ?? '', r.recovery_time_unavailable ?? '', coverage]);
 			});
 			const csv = rows.map((r) => r.map((v) => this.csvEscape(v)).join(',')).join('\n');
 			this.downloadBlob(new Blob([csv], {type: 'text/csv;charset=utf-8;'}), this.buildFileName('top-triggers', 'csv'));
@@ -1444,6 +1490,8 @@
 		buildReportHtml() {
 			const metaText = this.escapeHtml(this.elements.meta.textContent || '');
 			const filterText = this.escapeHtml(this.elements.filterSummary.textContent || '');
+			const warningText = this.escapeHtml(this.elements.warning.textContent || '');
+			const severityText = this.escapeHtml(this.getFilteredSeverities().map((s) => s.label).join(', '));
 			let content;
 			if (this.activeTab === 'top') {
 				content = `<div class="card"><h2>Top triggers</h2>${this.elements.topBody.innerHTML}</div>`;
@@ -1475,12 +1523,15 @@
 				</style></head><body>
 				<h1>Incident Timeline Report</h1>
 				<div class="meta">${metaText}</div>${filterText ? `<div class="filter">${filterText}</div>` : ''}
+				<div class="filter">Selected severities: ${severityText}. All times are UTC.</div>
+				${warningText ? `<div class="report-warning" style="padding:12px;border:2px solid #b7791f;background:#fff8e6">${warningText}</div>` : ''}
 				${content}
 				<div class="meta">Generated ${this.escapeHtml(this.formatDateTime(new Date()))}</div>
 				</body></html>`;
 		}
 
 		exportHtml() {
+			if (this.activeTab === 'top' ? !this.top.ready : !this.tl.ready) { return; }
 			try {
 				const html = this.buildReportHtml();
 				const prefix = this.activeTab === 'top' ? 'top-triggers' : 'incident-timeline';
@@ -1492,7 +1543,10 @@
 		}
 
 		async exportPng() {
-			if (this.activeTab === 'top') { return; }
+			if (this.activeTab === 'top' || !this.tl.ready) { return; }
+			const seq = this.loadSeq;
+			const metaText = this.elements.meta.textContent || '';
+			const contextText = [this.elements.filterSummary.textContent, `Severities: ${this.getFilteredSeverities().map((s) => s.label).join(', ')}`, this.elements.warning.textContent].filter(Boolean).join(' · ');
 			const buckets = this.displayBuckets();
 			const active = this.getFilteredSeverities();
 			if (!buckets.length) { throw new Error('Nothing is available to export as PNG.'); }
@@ -1501,25 +1555,30 @@
 			const timelineSvg = this.buildTimelineSvg(buckets, active, PALETTE_LIGHT, false).svg;
 			const trendSvg = this.buildTrendSvg(buckets, active, PALETTE_LIGHT, false).svg;
 			const [tImg, trImg] = await Promise.all([this.svgStringToImage(timelineSvg), this.svgStringToImage(trendSvg)]);
+			if (seq !== this.loadSeq || this.activeTab !== 'timeline') { return; }
 
 			const canvasWidth = Math.max(tImg.width, trImg.width, 900);
 			const summaryRows = summaryActive.map((r) => ({label: r.label || '', count: String(Number(r.count || 0))}));
 			const summaryHeight = 40 + (summaryRows.length * 24);
-			const canvasHeight = 80 + tImg.height + 24 + trImg.height + 24 + summaryHeight;
+			const contextLines = this.wrapText(contextText, 120);
+			const headerHeight = 86 + contextLines.length * 18;
+			const canvasHeight = headerHeight + tImg.height + 24 + trImg.height + 24 + summaryHeight;
 			const canvas = document.createElement('canvas');
 			canvas.width = canvasWidth; canvas.height = canvasHeight;
 			const ctx = canvas.getContext('2d');
 			if (!ctx) { throw new Error('Failed to create a canvas for PNG export.'); }
 			ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
 			ctx.fillStyle = '#1f2b3a'; ctx.font = 'bold 24px Arial'; ctx.fillText('Incident Timeline Report', 20, 34);
-			ctx.font = '13px Arial'; ctx.fillStyle = '#5c6b7a'; ctx.fillText(this.elements.meta.textContent || '', 20, 56);
-			let y = 80;
+			ctx.font = '13px Arial'; ctx.fillStyle = '#5c6b7a'; ctx.fillText(metaText, 20, 56);
+			contextLines.forEach((line, i) => ctx.fillText(line, 20, 76 + i * 18));
+			let y = headerHeight;
 			ctx.drawImage(tImg.image, 0, y, tImg.width, tImg.height); y += tImg.height + 24;
 			ctx.drawImage(trImg.image, 0, y, trImg.width, trImg.height); y += trImg.height + 24;
 			ctx.fillStyle = '#1f2b3a'; ctx.font = 'bold 16px Arial'; ctx.fillText('Summary', 20, y); y += 24;
 			ctx.font = '13px Arial';
 			summaryRows.forEach((row) => { ctx.fillStyle = '#1f2b3a'; ctx.fillText(row.label, 20, y); ctx.fillText(row.count, 280, y); y += 22; });
 			const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'));
+			if (seq !== this.loadSeq || this.activeTab !== 'timeline') { return; }
 			if (!blob) { throw new Error('Failed to render the PNG file.'); }
 			this.downloadBlob(blob, this.buildFileName('incident-timeline', 'png'));
 		}
@@ -1538,6 +1597,11 @@
 		}
 
 		// ---- misc ------------------------------------------------------------------
+		chartLabelIndexes(bucketCount, plotWidth) {
+			const count = Math.min(bucketCount, Math.max(2, Math.floor(plotWidth / 90) + 1));
+			return new Set(Array.from({length: count}, (_, i) => Math.round(i * (bucketCount - 1) / Math.max(1, count - 1))));
+		}
+
 		buildTicks(maxValue, approxCount) {
 			if (maxValue <= 1) { return [0, 1]; }
 			const rawStep = maxValue / Math.max(1, approxCount);
@@ -1547,22 +1611,34 @@
 			else if (rawStep / magnitude > 2) { step = 5 * magnitude; }
 			else if (rawStep / magnitude > 1) { step = 2 * magnitude; }
 			step = Math.max(1, Math.round(step));
-			const ticks = [0];
-			// Skip a round tick that sits so close to the max that the two labels
-			// would overlap (e.g. 1500 next to 1561).
-			for (let v = step; v < maxValue * 0.9; v += step) { ticks.push(v); }
-			ticks.push(maxValue);
-			return Array.from(new Set(ticks));
+			const ceiling = Math.ceil(maxValue / step) * step;
+			const ticks = [];
+			for (let v = 0; v <= ceiling; v += step) { ticks.push(v); }
+			return ticks;
+		}
+
+		wrapText(text, width) {
+			const lines = [];
+			let line = '';
+			for (const word of String(text).split(/\s+/)) {
+				if (line && line.length + word.length + 1 > width) { lines.push(line); line = ''; }
+				line += (line ? ' ' : '') + word;
+				while (line.length > width) { lines.push(line.slice(0, width)); line = line.slice(width); }
+			}
+			if (line) { lines.push(line); }
+			return lines;
 		}
 
 		createSvgOpenTag(width, height) {
-			return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="Incident chart">`;
+			return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" font-family="Arial, Helvetica, sans-serif" role="img" aria-label="Incident chart">`;
 		}
 
 		setLoading(isLoading, message) {
 			this.elements.loading.hidden = !isLoading;
+			this.root.setAttribute('aria-busy', String(isLoading));
 			if (isLoading && message) { this.elements.loading.textContent = message; }
 			[this.elements.from, this.elements.to, this.elements.prev, this.elements.next].forEach((el) => { el.disabled = isLoading; });
+			if (!isLoading) { this.updateNavButtons(); }
 		}
 
 		showError(message) {
@@ -1587,7 +1663,7 @@
 
 		updateExportState() {
 			// Timeline exports stay disabled until the progressive load fully completes.
-			const tlReady = !!this.tl.ready;
+			const tlReady = !!this.tl.ready && this.activeSeverities.size > 0;
 			const topReady = !!(this.top.ready && this.top.rows.length);
 			const has = this.activeTab === 'top' ? topReady : tlReady;
 			this.elements.exportCsv.disabled = !has;
@@ -1603,6 +1679,8 @@
 			sp.set('to', this.elements.to.value);
 			sp.set('bucket', this.bucket);
 			sp.set('tab', this.activeTab);
+			if (this.activeSeverities.size === SEVERITIES.length) { sp.delete('severities'); }
+			else { sp.set('severities', this.activeSeveritiesCsv()); }
 			const setOrDel = (k, v) => { if (v) { sp.set(k, v); } else { sp.delete(k); } };
 			setOrDel('group', this.filters.group);
 			setOrDel('host', this.filters.host);

@@ -1,0 +1,18 @@
+<?php declare(strict_types=1);
+require __DIR__.'/bootstrap.php';
+require __DIR__.'/../helpers/ReportDataHelper.php';
+require __DIR__.'/../helpers/ChartRenderer.php';
+require __DIR__.'/../helpers/ViewFormatter.php';
+require __DIR__.'/../helpers/HtmlExportRenderer.php';
+use Modules\SlaUptimeReport\Helpers\ReportDataHelper;
+use Modules\SlaUptimeReport\Helpers\HtmlExportRenderer;
+$helper = new ReportDataHelper();
+$report = $helper->emptyReport(ReportDataHelper::getDefaultFilter());
+$report['groups'] = [['name'=>'example']];
+$report['fleet']['partial_data'] = 1;
+$export = new HtmlExportRenderer($helper);
+$verdict = new ReflectionMethod($export, 'verdict'); $verdict->setAccessible(true);
+sr_equal($verdict->invoke($export, $report, 99.0)['word'], 'Incomplete coverage', 'Partial evidence cannot give an all-clear cover');
+$report['attention'] = [['severity'=>'critical']];
+sr_equal($verdict->invoke($export, $report, 99.0)['word'], 'Action needed', 'Incomplete coverage does not hide critical findings');
+echo "2 export coverage checks passed\n";

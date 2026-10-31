@@ -1,0 +1,11 @@
+Host name	Measurement label	Exact item key	Healthy value	Poll seconds
+Landshypotek Website URL Monitor	Kundkannedom / (central monitor)	web.test.rspcode[https://kundkannedom.landshypotek.se/,https://kundkannedom.landshypotek.se/]	200	0
+kundkannedom.landshypotek.se	Kundkannedom /	web.test.rspcode[https://kundkannedom.landshypotek.se/,https://kundkannedom.landshypotek.se/]	200	0
+secure.landshypotek.se	Secure /	web.test.rspcode[https://secure.landshypotek.se/,https://secure.landshypotek.se]	200	0
+secure.landshypotek.se	Secure loan login (expected redirect)	web.test.rspcode[https://secure.landshypotek.se/user/loanlogin?nyttBoLan=,https://secure.landshypotek.se/user/loanlogin?nyttBoLan=]	302	0
+secure.landshypotek.se	Secure overview (expected redirect)	web.test.rspcode[https://secure.landshypotek.se/User/Overview,https://secure.landshypotek.se/User/Overview]	302	0
+Landshypotek Website URL Monitor	SME login (central monitor)	web.test.rspcode[https://sme.landshypotek.se/login?nyttLantbruksLan=,https://sme.landshypotek.se/login?nyttLantbruksLan=]	200	0
+sme.landshypotek.se	SME login	web.test.rspcode[https://sme.landshypotek.se/login?nyttLantbruksLan=,https://sme.landshypotek.se/login?nyttLantbruksLan=]	200	0
+loggain.landshypotek.se	Loggain	web.test.rspcode[loggain.landshypotek.se,loggain.landshypotek.se]	200	0
+Landshypotek Website URL Monitor	Secure overview redirected destination (central monitor)	web.test.rspcode[https://secure.landshypotek.se/User/Overview,Redirect 301 - https://secure.landshypotek.se/User/Overview]	200	0
+www.landshypotek.se	WWW	web.test.rspcode[www.landshypotek.se,www.landshypotek.se]	200	0

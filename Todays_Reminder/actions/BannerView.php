@@ -5,10 +5,12 @@ declare(strict_types = 0);
 namespace Modules\MessageOfTheDay\Actions;
 
 require_once __DIR__.'/../helpers/MotdDataProvider.php';
+require_once __DIR__.'/../helpers/RequestContext.php';
 
 use CController;
 use CControllerResponseData;
 use Modules\MessageOfTheDay\Helpers\MotdDataProvider;
+use Modules\MessageOfTheDay\Helpers\RequestContext;
 
 class BannerView extends CController {
 
@@ -17,7 +19,7 @@ class BannerView extends CController {
 	}
 
 	protected function checkInput(): bool {
-		return $this->validateInput([]);
+		return $this->validateInput(['groupid' => 'string', 'tag' => 'string', 'tag_value' => 'string']);
 	}
 
 	protected function checkPermissions(): bool {
@@ -25,18 +27,28 @@ class BannerView extends CController {
 	}
 
 	protected function doAction(): void {
-		$motd = [];
+		$filters = ['groupid' => '0', 'tag' => '', 'tag_value' => ''];
 
 		try {
-			set_time_limit(300);
+			set_time_limit(60);
+			$filters = RequestContext::filters([
+				'groupid' => $this->getInput('groupid', '0'),
+				'tag' => $this->getInput('tag', ''),
+				'tag_value' => $this->getInput('tag_value', '')
+			]);
 
 			$provider = new MotdDataProvider();
-			$motd = $provider->getData((string) (\CWebUser::$data['userid'] ?? '0'));
+			$motd = $provider->getData((string) (\CWebUser::$data['userid'] ?? '0'), $filters);
+		}
+		catch (\InvalidArgumentException $e) {
+			$motd = RequestContext::unavailable($filters, $e->getMessage());
 		}
 		catch (\Throwable $e) {
 			error_log('MOTD BannerView: '.$e->getMessage());
-			$motd = [];
+			$motd = RequestContext::unavailable($filters, _('Unable to load reminder data. Try refreshing.'));
 		}
+		$motd = RequestContext::decorate($motd);
+		header('Cache-Control: private, no-store');
 
 		$this->setResponse(new CControllerResponseData([
 			'title' => _('Today\'s Reminder'),
