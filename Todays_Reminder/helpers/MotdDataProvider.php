@@ -79,6 +79,7 @@ class MotdDataProvider {
 		$new_hosts = $this->getNewHosts24h($timezone, $now);
 		$this->primeTriggerCache([$problems['_recent_raw'], $unacked['_recent_raw'], $longest['_recent_raw']]);
 		$resolved = $this->with_recovery ? $this->getRecoveryReport($now) : self::skippedRecoveryReport();
+		if (isset($resolved['as_of'])) $resolved['as_of_text'] = $this->formatTimestamp($resolved['as_of'], $timezone);
 		$this->primeTriggerCache([$resolved['_top_raw']]);
 		foreach (['problems', 'unacked', 'longest'] as $section) {
 			${$section}['recent'] = $this->formatProblemRows(${$section}['_recent_raw'], $timezone, $now);
@@ -170,8 +171,11 @@ class MotdDataProvider {
 		}
 	}
 
-	/** Failures are data, never a healthy zero. Empty scopes never widen to all hosts. */
-	private function query(string $service, array $options, string $section, bool $scoped = true) {
+	/**
+	 * Failures are data, never a healthy zero. Empty scopes never widen to all hosts. Unbudgeted calls are small
+	 * ID lookups that finish rows already fetched, so they run even after the time budget is spent.
+	 */
+	private function query(string $service, array $options, string $section, bool $scoped = true, bool $budgeted = true) {
 		if ($scoped && $this->scope_failed) {
 			$this->issue($section, _('Unavailable because the selected host scope could not be loaded.'));
 			return null;
@@ -185,7 +189,7 @@ class MotdDataProvider {
 			$this->issue($section, _('New-host activity requires permission to read the audit log.'));
 			return null;
 		}
-		if ($this->deadline !== null && microtime(true) >= $this->deadline) {
+		if ($budgeted && $this->deadline !== null && microtime(true) >= $this->deadline) {
 			$this->issue($section, _('The data collection time budget was reached. Refresh to retry.'));
 			return null;
 		}
@@ -254,11 +258,13 @@ class MotdDataProvider {
 	/** The overview reuses a successful recovery report for five minutes; a failed or cut-short scan is retried. */
 	private function getRecoveryReport(\DateTimeImmutable $now): array {
 		$scope = $this->cache_scope === null ? null : $this->cache_scope.'|recovery';
-		$cached = $scope === null ? null : $this->readCache($scope, self::RECOVERY_CACHE_TTL, ['report', 'issues']);
+		$cached = $scope === null ? null
+			: $this->readCache($scope, self::RECOVERY_CACHE_TTL, ['report', 'issues', 'generated_at']);
 		if ($cached !== null && is_array($cached['report']) && is_array($cached['issues'])) {
 			$this->success['resolved'] = true;
 			foreach ($cached['issues'] as $message) $this->issue('resolved', (string) $message);
-			return $cached['report'];
+			// The card shows when a reused report was made, since it can be older than the page.
+			return ['as_of' => (int) $cached['generated_at']] + $cached['report'];
 		}
 		$report = $this->getRecentlyResolvedProblems($now);
 		$failed = $report['_failed'];
@@ -290,17 +296,23 @@ class MotdDataProvider {
 		$cursor = null;
 		$loaded = $failed = $complete = $missing = false;
 		while ($scanned < self::MAX_EVENT_SCAN) {
+			// The page that reaches the cap asks for one extra row, to tell "exactly at the cap" from "more".
+			$final = $scanned + self::EVENT_PAGE_SIZE >= self::MAX_EVENT_SCAN;
 			$options = $base + ['output' => ['eventid', 'clock', 'name', 'severity', 'objectid', 'r_eventid'],
-				'sortfield' => 'eventid', 'sortorder' => 'DESC', 'limit' => self::EVENT_PAGE_SIZE];
+				'sortfield' => 'eventid', 'sortorder' => 'DESC', 'limit' => self::EVENT_PAGE_SIZE + ($final ? 1 : 0)];
 			if ($cursor !== null) $options['eventid_till'] = $cursor;
 			$events = $this->query('Event', $options, 'resolved');
 			if ($events === null) { $failed = true; break; }
+			$more = count($events) > self::EVENT_PAGE_SIZE;
+			if ($more) $events = array_slice($events, 0, self::EVENT_PAGE_SIZE);
 			$loaded = true;
 			$scanned += count($events);
 			$recovery_ids = [];
 			foreach ($events as $event) if (!empty($event['r_eventid'])) $recovery_ids[(string) $event['r_eventid']] = true;
+			// Finishing a fetched page is a cheap ID lookup: it is not cut off by the time budget, so a slow
+			// history scan that ends just past the budget still produces a report that can be reused.
 			$recoveries = $recovery_ids ? $this->query('Event', ['output' => ['eventid', 'clock'],
-				'eventids' => array_keys($recovery_ids), 'source' => 0, 'object' => 0, 'value' => 0], 'resolved') : [];
+				'eventids' => array_keys($recovery_ids), 'source' => 0, 'object' => 0, 'value' => 0], 'resolved', true, false) : [];
 			if ($recoveries === null) { $failed = true; break; }
 			$clocks = array_column($recoveries, 'clock', 'eventid');
 			foreach ($events as $event) {
@@ -313,7 +325,7 @@ class MotdDataProvider {
 						'resolved_at' => $recovered, 'mttr' => max(0, $recovered - (int) $event['clock'])];
 				}
 			}
-			if (count($events) < self::EVENT_PAGE_SIZE) { $complete = true; break; }
+			if (count($events) < self::EVENT_PAGE_SIZE || ($final && !$more)) { $complete = true; break; }
 			$last = end($events);
 			$next = $this->previousId((string) $last['eventid']);
 			if ($next === '0') { $complete = true; break; }
@@ -567,7 +579,7 @@ class MotdDataProvider {
 		}
 		if (!$ids) return;
 		$triggers = $this->query('Trigger', ['output' => ['triggerid'], 'triggerids' => array_keys($ids),
-			'selectHosts' => ['hostid', 'host', 'name'], 'preservekeys' => true], 'details');
+			'selectHosts' => ['hostid', 'host', 'name'], 'preservekeys' => true], 'details', true, false);
 		$this->trigger_cache += $triggers ?? [];
 	}
 

@@ -42,7 +42,8 @@ use Modules\MessageOfTheDay\Actions\BannerData;
 use Modules\MessageOfTheDay\Actions\BannerView;
 use Modules\MessageOfTheDay\Helpers\RequestContext;
 use Modules\MessageOfTheDay\Helpers\OverviewRenderer;
-$DB = ['SERVER' => 'controller-test-'.getmypid(), 'DATABASE' => 'synthetic'];
+// A random install salt gives each run its own cache directory (a container's PID can repeat between runs).
+$DB = ['SERVER' => 'controller-test-'.bin2hex(random_bytes(8)), 'DATABASE' => 'synthetic'];
 $checks = 0;
 function check($condition, $message) {
 	global $checks;
@@ -106,4 +107,14 @@ $coverage['new_hosts'] = ['status' => 'partial', 'message' => 'System logging di
 $coverage_html = OverviewRenderer::render($coverage);
 check(strpos($coverage_html, '35+') !== false, 'The overview preserves lower-bound audit counts.');
 check(strpos($coverage_html, 'Recorded additions only.') !== false, 'The overview discloses audit coverage.');
+$aged = RequestContext::unavailable([], 'Aged fixture');
+$aged['resolved'] = ['status' => 'ok', 'message' => '', 'count' => 0, 'recent' => [], 'avg_mttr_text' => '',
+	'as_of_text' => '2026-11-06 10:40'];
+check(strpos(OverviewRenderer::render($aged), 'Updated 2026-11-06 10:40') !== false,
+	'A reused recovery report shows its own update time on the overview.');
+$cache_file = new ReflectionMethod(Modules\MessageOfTheDay\Helpers\MotdDataProvider::class, 'cacheFile');
+$cache_file->setAccessible(true);
+$cache_dir = dirname($cache_file->invoke(new Modules\MessageOfTheDay\Helpers\MotdDataProvider(), 'cleanup'));
+foreach (glob($cache_dir.'/*') ?: [] as $file) @unlink($file);
+@rmdir($cache_dir);
 echo 'ControllerTest: '.$checks." assertions passed\n";
