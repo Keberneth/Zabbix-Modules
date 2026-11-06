@@ -45,8 +45,10 @@ class BannerData extends CController {
 				'tag_value' => $this->getInput('tag_value', '')
 			]);
 
+			// Only the overview shows the 24-hour recovery report; banner refreshes skip its event-history scan.
+			$overview = (int) $this->getInput('overview', 0) === 1;
 			$provider = new MotdDataProvider();
-			$data = RequestContext::decorate($provider->getData((string) (\CWebUser::$data['userid'] ?? '0'), $filters));
+			$data = RequestContext::decorate($provider->getData((string) (\CWebUser::$data['userid'] ?? '0'), $filters, $overview));
 
 			$client_fp = $this->hasInput('fingerprint') ? (string) $this->getInput('fingerprint') : '';
 			if ($client_fp !== '' && $client_fp === (string) ($data['fingerprint'] ?? '')) {
@@ -64,7 +66,7 @@ class BannerData extends CController {
 					'ok' => true,
 					'data' => $data
 				];
-				if ((int) $this->getInput('overview', 0) === 1) {
+				if ($overview) {
 					$payload['html'] = OverviewRenderer::render($data);
 				}
 			}

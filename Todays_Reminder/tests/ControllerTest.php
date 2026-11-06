@@ -12,7 +12,8 @@ class CUrl {
 class API {
 	public static $calls = 0;
 	public static $fail = false;
-	public static function __callStatic($name, $arguments) { return new ApiFixture; }
+	public static $services = [];
+	public static function __callStatic($name, $arguments) { self::$services[] = $name; return new ApiFixture; }
 }
 class ApiFixture {
 	public function get($options) {
@@ -75,6 +76,11 @@ $unchanged = endpoint(['fingerprint' => $initial['data']['fingerprint'], 'overvi
 check(!empty($unchanged['not_modified']), 'Unchanged payload suppresses redundant HTML.');
 check(!isset($unchanged['html']) && isset($unchanged['checked_at'], $unchanged['ui'], $unchanged['idle_timeout']),
 	'Unchanged response retains freshness, localization and session policy.');
+API::$services = [];
+$banner = endpoint();
+check($banner['ok'] === true && !isset($banner['html']) && API::$services && !in_array('Event', API::$services, true),
+	'Banner refreshes skip the event-history scan behind the recovery report.');
+check(($banner['data']['resolved']['status'] ?? '') === 'skipped', 'Banner data marks the recovery report as not loaded.');
 $before = API::$calls;
 $invalid = endpoint(['groupid' => 'bad']);
 check($invalid['ok'] === false && http_response_code() === 400, 'Bad filters return a client error.');

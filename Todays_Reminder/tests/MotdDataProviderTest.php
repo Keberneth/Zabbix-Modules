@@ -276,4 +276,64 @@ clearstatcache();
 check(privateCall($cached_provider, 'readCache', $scope) === null, 'Insecure cache permissions are rejected before reads.');
 unlink($cached_path);
 
+// Refresh cost: the recovery report scans event history, so only the overview builds it, it runs last,
+// it makes no separate count query, and a successful report is reused for five minutes.
+$recovered = ['events' => $events, 'recoveries' => [['eventid' => '5000', 'clock' => $now - 120]]];
+$event_calls = static function(): array {
+	return array_values(array_filter(API::$calls, static function($call) { return $call[0] === 'Event'; }));
+};
+fixture($recovered + ['problems' => [$problem]]);
+$banner_provider = new MotdDataProvider();
+privateSet($banner_provider, 'filters', MotdDataProvider::normalizeFilters([]));
+privateSet($banner_provider, 'with_recovery', false);
+$banner = privateCall($banner_provider, 'buildData');
+check(!$event_calls(), 'Banner data never scans event history.');
+check($banner['resolved']['status'] === 'skipped' && $banner['resolved']['count'] === null
+	&& !array_filter($banner['issues'], static function($issue) { return $issue['section'] === 'resolved'; }),
+	'The banner skips the recovery report without reporting it as missing data.');
+$full = fresh();
+check($banner['summary_line'] === $full['summary_line'] && $banner['chips'] === $full['chips']
+	&& $banner['banner_items'] === $full['banner_items'], 'Skipping the recovery report changes nothing the banner shows.');
+check(!array_filter($event_calls(), static function($call) { return !empty($call[1]['countOutput']); }),
+	'The recovery report does not scan event history a second time just to count.');
+
+fixture($recovered + ['problems' => [$problem], 'maintenance' => [$window]]);
+$slow = new MotdDataProvider();
+privateSet($slow, 'filters', MotdDataProvider::normalizeFilters([]));
+$inner = API::$handler;
+API::$handler = static function($service, $args) use ($inner, $slow) {
+	if ($service === 'Event') privateSet($slow, 'deadline', microtime(true) - 1); // the scan uses up the budget
+	return $inner($service, $args);
+};
+$budget = privateCall($slow, 'buildData');
+check($budget['problems']['high_count'] === 1 && $budget['maintenances']['today_count'] === 1,
+	'A slow recovery scan cannot cost the banner its counts or maintenance windows.');
+check(in_array('Alpha', $budget['problems']['recent'][0]['hosts'], true), 'Problem rows keep their hosts when the scan uses up the budget.');
+check($budget['resolved']['status'] !== 'ok' && $budget['resolved']['truncated'], 'A recovery scan cut short is disclosed.');
+
+$reuse_scope = 'recovery-'.bin2hex(random_bytes(6));
+fixture($recovered);
+(new MotdDataProvider())->getData($reuse_scope);
+$reuse = new MotdDataProvider();
+unlink(privateCall($reuse, 'cacheFile', $reuse_scope)); // the 45-second page cache has expired
+fixture($recovered);
+$reused = $reuse->getData($reuse_scope);
+check(!$event_calls() && API::$calls, 'Overview refreshes reuse a recent recovery report and refresh everything else.');
+check($reused['resolved']['count'] === 1 && $reused['resolved']['recent'][0]['eventid'] === '1'
+	&& $reused['resolved']['avg_mttr'] === 199879, 'A reused recovery report keeps its incidents and MTTR.');
+fixture($recovered);
+$banner_data = (new MotdDataProvider())->getData($reuse_scope, [], false);
+check(!$event_calls() && $banner_data['resolved']['status'] === 'skipped', 'Banner requests use their own cache entry and skip the scan.');
+
+$retry_scope = 'recovery-retry-'.bin2hex(random_bytes(6));
+fixture(['fail' => ['Event']]);
+(new MotdDataProvider())->getData($retry_scope);
+$retry = new MotdDataProvider();
+unlink(privateCall($retry, 'cacheFile', $retry_scope));
+fixture($recovered);
+check($retry->getData($retry_scope)['resolved']['count'] === 1 && $event_calls(), 'A failed recovery scan is retried, never cached.');
+foreach ([$reuse_scope, $retry_scope] as $test_scope) {
+	foreach (['', '|recovery', '|banner'] as $suffix) @unlink(privateCall($retry, 'cacheFile', $test_scope.$suffix));
+}
+
 echo 'MotdDataProviderTest: '.$checks." checks passed.\n";

@@ -51,7 +51,7 @@ async function setup(browser, options = {}) {
         window.clearInterval = () => {};
         const nativeTimeout = window.setTimeout.bind(window);
         window.setTimeout = (fn, ms, ...args) => {
-            if (ms === 20000) { window.__timeout = fn; }
+            if (ms === 60000) { window.__timeout = fn; }
             return nativeTimeout(fn, ms, ...args);
         };
         if (blocked) {
