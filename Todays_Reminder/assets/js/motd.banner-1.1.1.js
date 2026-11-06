@@ -44,7 +44,7 @@
         ui = Object.assign({}, labels, data.ui || response.ui || {});
         var nextKey = String(data.preference_key || response.preference_key || '');
         if (nextKey && nextKey !== preferenceKey) {
-            preferenceKey = nextKey; preferencesReady = false; collapsed = true;
+            preferenceKey = nextKey; preferencesReady = false;
         }
         if (!preferencesReady && preferenceKey) {
             preferencesReady = true;

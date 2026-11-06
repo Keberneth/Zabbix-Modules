@@ -253,24 +253,29 @@ async function setup(browser, options = {}) {
             const layout = () => page.evaluate(() => {
                 const box = node => node.getBoundingClientRect();
                 const root = document.getElementById('motd-banner-root');
+                const style = root ? window.getComputedStyle(root) : null;
                 return {parent: root ? root.parentElement.className || root.parentElement.tagName : null,
                     first: root ? root.parentElement.firstElementChild === root : false,
                     sidebar: box(document.querySelector('.sidebar')), wrapper: box(document.querySelector('.wrapper')),
-                    banner: root ? box(root) : null, viewport: window.innerWidth};
+                    banner: root ? box(root) : null, viewport: window.innerWidth,
+                    spacing: style ? [style.marginTop, style.marginLeft, style.marginRight, style.flexShrink].join(' ') : ''};
             });
             const intact = found => found.sidebar.x === 0 && found.wrapper.x === found.sidebar.right
                 && found.wrapper.right === found.viewport && found.banner.x >= found.wrapper.x
                 && found.banner.right <= found.wrapper.right;
             await state.load('?action=hana.dashboard.view');
+            await page.locator('#motd-banner-root').waitFor();
             let found = await layout();
             check(found.parent === 'wrapper' && found.first, 'without <main> the banner goes to the top of the page column');
             check(intact(found), 'banner stays inside the page column and leaves the sidebar in place');
+            check(found.spacing === '10px 10px 10px 0', 'banner in the page column gets the spacing <main> provides and does not shrink');
             // The reported steps: expand, snooze, the hour passes, the next refresh brings the banner back.
             await page.locator('#motd-banner-toggle').click();
             await page.locator('#motd-banner-snooze').click();
             check(await page.locator('#motd-banner-root').count() === 0, 'snooze hides banner on module pages');
             await page.evaluate(() => { window.__clockOffset += 3600001; });
             await state.tick();
+            await page.locator('#motd-banner-root').waitFor();
             found = await layout();
             check(found.parent === 'wrapper' && found.first && intact(found), 'banner returning after snooze keeps the page layout');
             check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'false', 'banner returns collapsed on module pages');
@@ -282,6 +287,7 @@ async function setup(browser, options = {}) {
             const {context, page, state} = await setup(browser,
                 {body: zabbixPage('<header>Problems</header><main><div id="page-body">Problem list</div></main>')});
             await state.load();
+            await page.locator('#motd-banner-root').waitFor();
             check(await page.evaluate(() => {
                 const root = document.getElementById('motd-banner-root');
                 return root.parentElement.tagName === 'MAIN' && root.parentElement.firstElementChild === root;
@@ -292,7 +298,9 @@ async function setup(browser, options = {}) {
             // Unknown layout: a flex-row <body> without a page column must not get an extra column.
             const {context, page, state} = await setup(browser,
                 {body: '<style>body{display:flex}</style><nav>Menu</nav><section>Content</section>'});
+            const answered = page.waitForResponse(item => item.url().includes('action=motd.banner.data'));
             await state.load();
+            await answered; await flush(page);
             check(state.requests.length === 1, 'unknown layout still checks the data');
             check(await page.locator('#motd-banner-root').count() === 0, 'banner is not added beside a flex-row body');
             check(state.errors.length === 0, 'unknown layout has no uncaught errors');
@@ -302,6 +310,7 @@ async function setup(browser, options = {}) {
             // A plain block <body> without <main> can still show the banner at the top.
             const {context, page, state} = await setup(browser, {body: '<section id="plain">Content</section>'});
             await state.load();
+            await page.locator('#motd-banner-root').waitFor();
             check(await page.evaluate(() => document.body.firstElementChild.id === 'motd-banner-root'), 'plain pages fall back to the top of <body>');
             await context.close();
         }

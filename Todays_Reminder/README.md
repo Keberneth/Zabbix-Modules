@@ -26,7 +26,7 @@ The banner and complete overview refresh every 60 seconds while visible. **Refre
 
 For accounts with automatic logout enabled, automatic polling requires new keyboard, pointer, or click activity since the previous request. It pauses while inactive so an abandoned tab cannot keep a session alive indefinitely. Manual refresh requests another check. Accounts with automatic logout disabled (for example, dedicated kiosk accounts) continue polling while visible.
 
-The banner always starts collapsed. **Expand** shows the details on the current page; they stay open while that page refreshes. The next page load, or the banner's return after a snooze, starts collapsed again. **Snooze for 1 hour** hides the banner; **Resume banner** on the overview restores it early.
+The banner always starts collapsed. **Expand** shows the details on the current page; they stay open while that page refreshes. The next page load, or the banner's return after a snooze, starts collapsed again. **Snooze for 1 hour** on the banner, or **Hide banner for 1 hour** on the overview, hides it; **Show banner again** on the overview brings it back early.
 
 Filters and snooze are saved per account and installation in this browser, not across devices. Browsers that block storage use an in-memory fallback for the current page.
 
@@ -69,7 +69,7 @@ Use the actual timezone of your Zabbix server. An invalid override makes mainten
 3. Reload the frontend. Versioned filenames load the updated JavaScript and CSS.
 4. Check the overview with a Super Admin and a restricted account. Verify group/tag filters, an incident link, snooze/resume, and maintenance against native Zabbix views.
 
-No database migration is required. Previous banner storage/cache entries are ignored. This repository update does not deploy files to a running frontend.
+No database migration is required. Upgrading from 1.1.0 keeps saved filters and any active snooze; end a snooze early with **Show banner again** on the overview. Expand/collapse choices saved by 1.1.0, and banner storage from versions before 1.1.0, are ignored. This repository update does not deploy files to a running frontend.
 
 ## Local validation
 
@@ -89,7 +89,7 @@ For a synthetic visual preview, run `php -S 127.0.0.1:18931 tests/Preview.php` f
 
 ## 1.1.1 changes
 
-- Fixed the banner breaking the layout on module pages without a `<main>` element, such as HANA Dashboard and NetBox Sync. In Zabbix 7.0 it was added as an extra column beside the sidebar, which squeezed the page. This was most visible when the banner returned after a snooze. It now sits at the top of the page content.
+- Fixed the banner breaking the layout on module pages without a `<main>` element, such as HANA Dashboard and NetBox Sync. In Zabbix 7.0 it was added as an extra column beside the sidebar, which squeezed the page. This happened every time the banner was shown on such a page, including when it returned after a snooze. Version 1.0.0 handled these pages; the 1.1.0 rewrite lost that. The banner now sits at the top of the page content.
 - The banner now always starts collapsed. Expanding applies to the current page only, and expand/collapse choices saved by 1.1.0 are ignored.
 
 ## 1.1.0 changes
