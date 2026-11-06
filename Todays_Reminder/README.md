@@ -2,7 +2,7 @@
 
 A read-only Zabbix 7.0 frontend module with an operational banner and a detailed overview under **Monitoring → Today's Reminder → Overview**.
 
-Version **1.1.0**. The module ID `Message_of_the_Day` and namespace `MessageOfTheDay` remain stable for upgrades.
+Version **1.1.1**. The module ID `Message_of_the_Day` and namespace `MessageOfTheDay` remain stable for upgrades.
 
 ## What it shows
 
@@ -14,6 +14,8 @@ Version **1.1.0**. The module ID `Message_of_the_Day` and namespace `MessageOfTh
 
 The overview shows one summary and does not repeat the global banner above itself. Tables scroll within their cards on narrow screens. Unreachable hosts can be expanded inline.
 
+The banner appears at the top of the page content on every frontend page, including module pages that print their own HTML instead of using Zabbix's standard page layout (for example HANA Dashboard and NetBox Sync).
+
 ![Version 1.1.0 overview using synthetic data](docs/images/overview-1.1.0.png)
 
 [Mobile layout using synthetic data](docs/images/overview-mobile-1.1.0.png)
@@ -24,9 +26,9 @@ The banner and complete overview refresh every 60 seconds while visible. **Refre
 
 For accounts with automatic logout enabled, automatic polling requires new keyboard, pointer, or click activity since the previous request. It pauses while inactive so an abandoned tab cannot keep a session alive indefinitely. Manual refresh requests another check. Accounts with automatic logout disabled (for example, dedicated kiosk accounts) continue polling while visible.
 
-The banner expands on its first appearance in a tab and collapses on subsequent page loads. An explicit Expand/Collapse choice overrides that default and survives content changes. **Snooze for 1 hour** hides the banner; **Resume banner** on the overview restores it early.
+The banner always starts collapsed. **Expand** shows the details on the current page; they stay open while that page refreshes. The next page load, or the banner's return after a snooze, starts collapsed again. **Snooze for 1 hour** on the banner, or **Hide banner for 1 hour** on the overview, hides it; **Show banner again** on the overview brings it back early.
 
-Filters, expansion choices, and snooze are saved per account and installation in this browser, not across devices. Browsers that block storage use an in-memory fallback for the current page.
+Filters and snooze are saved per account and installation in this browser, not across devices. Browsers that block storage use an in-memory fallback for the current page.
 
 ## Coverage and permissions
 
@@ -67,7 +69,7 @@ Use the actual timezone of your Zabbix server. An invalid override makes mainten
 3. Reload the frontend. Versioned filenames load the updated JavaScript and CSS.
 4. Check the overview with a Super Admin and a restricted account. Verify group/tag filters, an incident link, snooze/resume, and maintenance against native Zabbix views.
 
-No database migration is required. Previous banner storage/cache entries are ignored. This repository update does not deploy files to a running frontend.
+No database migration is required. Upgrading from 1.1.0 keeps saved filters and any active snooze; end a snooze early with **Show banner again** on the overview. Expand/collapse choices saved by 1.1.0, and banner storage from versions before 1.1.0, are ignored. This repository update does not deploy files to a running frontend.
 
 ## Local validation
 
@@ -84,6 +86,11 @@ node tests/MotdUiTest.cjs
 Browser checks use Playwright with headless Microsoft Edge on Windows; the runner supports `MOTD_BROWSER_CHANNEL`. PHP checks can run in disposable `php:8.4-cli` containers with networking disabled, a read-only module mount, and a writable temporary filesystem for cache fixtures.
 
 For a synthetic visual preview, run `php -S 127.0.0.1:18931 tests/Preview.php` from this directory and open `/zabbix.php?action=motd.view`. The preview refuses to run under PHP-FPM/Apache. Local fixtures validate module logic and presentation; API/role/schedule behavior still needs verification on the target deployment.
+
+## 1.1.1 changes
+
+- Fixed the banner breaking the layout on module pages without a `<main>` element, such as HANA Dashboard and NetBox Sync. In Zabbix 7.0 it was added as an extra column beside the sidebar, which squeezed the page. This happened every time the banner was shown on such a page, including when it returned after a snooze. Version 1.0.0 handled these pages; the 1.1.0 rewrite lost that. The banner now sits at the top of the page content.
+- The banner now always starts collapsed. Expanding applies to the current page only, and expand/collapse choices saved by 1.1.0 are ignored.
 
 ## 1.1.0 changes
 

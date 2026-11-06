@@ -54,6 +54,13 @@ html[theme="hc-dark"] .motd-page {
 	margin: 0 0 16px;
 }
 
+/* Module pages that print their own HTML have no <main>, so the banner sits directly in
+   Zabbix's page column (.wrapper). Give it the spacing <main> normally provides. */
+.wrapper > #motd-banner-root {
+	flex-shrink: 0;
+	margin: 10px 10px 16px;
+}
+
 .motd-banner {
 	border: 1px solid var(--motd-border);
 	background: var(--motd-bg);
