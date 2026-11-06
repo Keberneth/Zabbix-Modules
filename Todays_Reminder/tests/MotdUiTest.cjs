@@ -15,6 +15,14 @@ catch (_) {
 const root = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8').replace(/^\uFEFF/, ''));
 const source = fs.readFileSync(path.join(root, 'assets/js', manifest.assets.js[0]), 'utf8');
+const styles = fs.readFileSync(path.join(root, 'assets/css', manifest.assets.css[0]), 'utf8');
+// Zabbix 7.0 page skeleton with the layout rules from its themes: <body> is a flex row holding
+// the sidebar and .wrapper (the scrolling page column). CHtmlPage pages put a <main> in .wrapper.
+const zabbixPage = content => '<style>html,body{height:100vh;margin:0}body{display:flex;overflow:hidden}' +
+    '.sidebar{display:flex;flex-direction:column;width:200px}' +
+    '.wrapper{display:flex;flex:1;flex-direction:column;overflow:auto;position:relative}' +
+    'main{position:relative;min-width:600px;padding:10px}' + styles + '</style>' +
+    '<aside class="sidebar">Menu</aside><div class="wrapper">' + content + '<footer>Zabbix</footer></div>';
 let checks = 0;
 function check(value, message) { assert.ok(value, message); checks++; }
 const base = {
@@ -74,7 +82,8 @@ async function setup(browser, options = {}) {
             '<button type="button" id="motd-filter-reset">Reset</button></form>' +
             '<div id="motd-overview-content"><p id="initial-summary">Initial overview data</p></div>' +
             '<script type="application/json" id="motd-bootstrap">' + JSON.stringify(initial).replace(/</g, '\\u003c') + '</script></div>' : '';
-        await route.fulfill({contentType: 'text/html', body: '<!doctype html><html><head><title>Fixture</title></head><body><main>' + overview + '</main></body></html>'});
+        const body = options.body !== undefined ? options.body : '<main>' + overview + '</main>';
+        await route.fulfill({contentType: 'text/html', body: '<!doctype html><html><head><title>Fixture</title></head><body>' + body + '</body></html>'});
     });
     state.load = async (query = options.overview ? '?action=motd.view' : '?action=problem.view') => {
         await page.goto('https://motd.test/zabbix.php' + query);
@@ -95,18 +104,21 @@ async function setup(browser, options = {}) {
         {
             const {context, page, state} = await setup(browser);
             await state.load();
-            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'true', 'first tab visit expands');
+            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'false', 'first tab visit starts collapsed');
+            check(await page.locator('#motd-banner-body').isHidden(), 'collapsed banner hides its details');
             check(await page.locator('#motd-banner-toggle').getAttribute('aria-controls') === 'motd-banner-body', 'toggle names controlled body');
-            check(await page.locator('.motd-chip--maintenance').count() === 1, 'maintenance chip is visible');
-            await state.load();
-            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'false', 'later page load collapses by default');
             await page.locator('#motd-banner-toggle').click();
+            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'true', 'expand shows the details');
+            check(await page.locator('.motd-chip--maintenance').isVisible(), 'maintenance chip is visible when expanded');
             state.current = response({fingerprint: 'fp-b', banner_items: [{text: 'Incident B'}]});
             await state.tick();
-            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'true', 'explicit expansion survives content change');
+            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'true', 'expansion survives content change on the same page');
             check((await page.locator('.motd-banner__list').innerText()).includes('Incident B'), 'changed incident is replaced');
             await state.load();
-            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'true', 'explicit preference survives navigation');
+            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'false', 'every page load starts collapsed again');
+            check(await page.evaluate(() => Object.keys(localStorage).every(name => !/_(expanded|seen)$/.test(name))
+                && Object.keys(sessionStorage).length === 0), 'expansion is not saved in browser storage');
+            await page.locator('#motd-banner-toggle').click();
             await page.evaluate(() => { window.__oldBanner = document.getElementById('motd-banner-root'); });
             state.current = {ok: true, not_modified: true, fingerprint: 'fp-b', generated_at_text: '2026-10-31 10:01',
                 status: 'ok', preference_key: 'user-a', checked_at_text: '10:01:30'};
@@ -141,16 +153,17 @@ async function setup(browser, options = {}) {
             await page.evaluate(() => { window.__clockOffset += 3600001; });
             state.current = response({}); await state.tick();
             check(await page.locator('#motd-banner-root').count() === 1, 'expired snooze restores banner');
+            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'false', 'banner expanded before snooze returns collapsed');
             check(state.errors.length === 0, 'no uncaught browser errors');
             await context.close();
         }
         {
             const {context, page, state} = await setup(browser, {blocked: true});
             await state.load();
-            check(await page.locator('#motd-banner-toggle').innerText() === 'Collapse', 'storage denial retains working initial toggle');
+            check(await page.locator('#motd-banner-toggle').innerText() === 'Expand', 'storage denial still starts collapsed');
             await page.locator('#motd-banner-toggle').click();
             state.current = response({fingerprint: 'new'}); await state.tick();
-            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'false', 'storage fallback preserves preference in page');
+            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'true', 'expansion survives refresh without storage');
             check(state.errors.length === 0, 'storage denial throws no uncaught errors');
             await context.close();
         }
@@ -158,9 +171,7 @@ async function setup(browser, options = {}) {
             const {context, page, state} = await setup(browser, {writeBlocked: true,
                 saved: {[pref('snooze')]: '0', [pref('expanded')]: 'expanded'}});
             await state.load();
-            await page.locator('#motd-banner-toggle').click();
-            state.current = response({fingerprint: 'write-denied'}); await state.tick();
-            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'false', 'failed preference writes override old stored value in memory');
+            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'false', 'expand choice saved by an older version is ignored');
             await page.locator('#motd-banner-snooze').click();
             check(await page.locator('#motd-banner-root').count() === 0, 'failed snooze write overrides old stored zero');
             check(state.errors.length === 0, 'quota errors do not escape');
@@ -233,7 +244,65 @@ async function setup(browser, options = {}) {
             state.current = response({preference_key: 'user-b'});
             await state.load();
             check(await page.locator('#motd-banner-root').count() === 1, 'another account does not inherit snooze');
-            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'true', 'another account has independent visit state');
+            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'false', 'another account also starts collapsed');
+            await context.close();
+        }
+        {
+            // Zabbix 7.0 module page that prints its own HTML (HANA Dashboard, NetBox Sync): no <main>.
+            const {context, page, state} = await setup(browser, {body: zabbixPage('<div id="module-page">Module page</div>')});
+            const layout = () => page.evaluate(() => {
+                const box = node => node.getBoundingClientRect();
+                const root = document.getElementById('motd-banner-root');
+                return {parent: root ? root.parentElement.className || root.parentElement.tagName : null,
+                    first: root ? root.parentElement.firstElementChild === root : false,
+                    sidebar: box(document.querySelector('.sidebar')), wrapper: box(document.querySelector('.wrapper')),
+                    banner: root ? box(root) : null, viewport: window.innerWidth};
+            });
+            const intact = found => found.sidebar.x === 0 && found.wrapper.x === found.sidebar.right
+                && found.wrapper.right === found.viewport && found.banner.x >= found.wrapper.x
+                && found.banner.right <= found.wrapper.right;
+            await state.load('?action=hana.dashboard.view');
+            let found = await layout();
+            check(found.parent === 'wrapper' && found.first, 'without <main> the banner goes to the top of the page column');
+            check(intact(found), 'banner stays inside the page column and leaves the sidebar in place');
+            // The reported steps: expand, snooze, the hour passes, the next refresh brings the banner back.
+            await page.locator('#motd-banner-toggle').click();
+            await page.locator('#motd-banner-snooze').click();
+            check(await page.locator('#motd-banner-root').count() === 0, 'snooze hides banner on module pages');
+            await page.evaluate(() => { window.__clockOffset += 3600001; });
+            await state.tick();
+            found = await layout();
+            check(found.parent === 'wrapper' && found.first && intact(found), 'banner returning after snooze keeps the page layout');
+            check(await page.locator('#motd-banner-toggle').getAttribute('aria-expanded') === 'false', 'banner returns collapsed on module pages');
+            check(state.errors.length === 0, 'module page has no uncaught errors');
+            await context.close();
+        }
+        {
+            // Zabbix 7.0 page built with CHtmlPage: header and <main> inside .wrapper.
+            const {context, page, state} = await setup(browser,
+                {body: zabbixPage('<header>Problems</header><main><div id="page-body">Problem list</div></main>')});
+            await state.load();
+            check(await page.evaluate(() => {
+                const root = document.getElementById('motd-banner-root');
+                return root.parentElement.tagName === 'MAIN' && root.parentElement.firstElementChild === root;
+            }), 'standard pages keep the banner at the top of <main>');
+            await context.close();
+        }
+        {
+            // Unknown layout: a flex-row <body> without a page column must not get an extra column.
+            const {context, page, state} = await setup(browser,
+                {body: '<style>body{display:flex}</style><nav>Menu</nav><section>Content</section>'});
+            await state.load();
+            check(state.requests.length === 1, 'unknown layout still checks the data');
+            check(await page.locator('#motd-banner-root').count() === 0, 'banner is not added beside a flex-row body');
+            check(state.errors.length === 0, 'unknown layout has no uncaught errors');
+            await context.close();
+        }
+        {
+            // A plain block <body> without <main> can still show the banner at the top.
+            const {context, page, state} = await setup(browser, {body: '<section id="plain">Content</section>'});
+            await state.load();
+            check(await page.evaluate(() => document.body.firstElementChild.id === 'motd-banner-root'), 'plain pages fall back to the top of <body>');
             await context.close();
         }
         console.log('PASS: ' + checks + ' browser assertions.');

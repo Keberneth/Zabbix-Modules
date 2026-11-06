@@ -3,7 +3,7 @@
   "id": "Message_of_the_Day",
   "name": "Today's Reminder",
   "namespace": "MessageOfTheDay",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "Keberneth",
   "description": "Displays a non-intrusive top banner and overview page summarizing High/Critical problems, unacknowledged and longest-running incidents, recently resolved problems with MTTR, monitoring health, new hosts, and maintenance windows. Supports single-server, multi-server, and Docker deployments.",
   "actions": {
@@ -19,10 +19,10 @@
   },
   "assets": {
     "css": [
-      "motd-1.1.0.css"
+      "motd-1.1.1.css"
     ],
     "js": [
-      "motd.banner-1.1.0.js"
+      "motd.banner-1.1.1.js"
     ]
   }
 }

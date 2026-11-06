@@ -12,7 +12,7 @@
     };
     var ui = Object.assign({}, labels), memory = {local: {}, session: {}};
     var overview, preferenceKey = '', preferencesReady = false, fingerprint = '', latest = null;
-    var filters = {groupid: '0', tag: '', tag_value: ''}, collapsed = null, inFlight = null;
+    var filters = {groupid: '0', tag: '', tag_value: ''}, collapsed = true, inFlight = null;
     var requestId = 0, refreshTimer, lastChecked = '', failed = false;
     var activityVersion = 0, consumedActivity = -1, lastActivity = Date.now(), idlePaused = false;
 
@@ -44,7 +44,7 @@
         ui = Object.assign({}, labels, data.ui || response.ui || {});
         var nextKey = String(data.preference_key || response.preference_key || '');
         if (nextKey && nextKey !== preferenceKey) {
-            preferenceKey = nextKey; preferencesReady = false; collapsed = null;
+            preferenceKey = nextKey; preferencesReady = false; collapsed = true;
         }
         if (!preferencesReady && preferenceKey) {
             preferencesReady = true;
@@ -87,9 +87,6 @@
                 filters = savedFilters(); fingerprint = ''; syncForm(); refresh(true);
             } else if (event.key === key('snooze')) {
                 updateSnooze(); if (!isSnoozed()) { refresh(true); }
-            } else if (event.key === key('expanded')) {
-                collapsed = storage('local', key('expanded')) === 'collapsed';
-                if (!overview && latest && !isSnoozed()) { renderBanner(latest); }
             }
         });
         window.addEventListener('beforeunload', function () {
@@ -135,7 +132,8 @@
     function snooze() { storage('local', key('snooze'), String(Date.now() + 3600000)); updateSnooze(); }
     function updateSnooze() {
         var hidden = isSnoozed();
-        if (hidden && el(ROOT)) { el(ROOT).remove(); }
+        // A snoozed banner comes back collapsed, the same as on every page load.
+        if (hidden) { collapsed = true; if (el(ROOT)) { el(ROOT).remove(); } }
         if (overview) {
             el('motd-resume').hidden = !hidden; el('motd-snooze').hidden = !!hidden;
             el('motd-snooze-status').textContent = hidden
@@ -230,9 +228,19 @@
         var result = node('button', '', text); result.type = 'button'; result.id = id;
         result.addEventListener('click', handler); return result;
     }
+    // Zabbix 7.0 lays out <body> as a row: the sidebar, then .wrapper (the scrolling page column).
+    // Pages built with CHtmlPage have a <main> inside .wrapper; module pages that print their own
+    // HTML have none. Never insert into a flex/grid <body>: the banner would become a third column.
+    function bannerTarget() {
+        var target = document.querySelector('body > .wrapper > main') || document.querySelector('body > .wrapper')
+            || document.querySelector('main') || document.querySelector('#page-content');
+        if (target) { return target; }
+        var body = document.body;
+        return body && !/flex|grid/.test(window.getComputedStyle(body).display) ? body : null;
+    }
     function renderBanner(data) {
         if (overview || isSnoozed()) { return; }
-        var target = document.querySelector('main') || document.querySelector('#page-content') || document.body;
+        var target = bannerTarget();
         if (!target) { return; }
         var existing = el(ROOT), focused = existing && existing.contains(document.activeElement) ? document.activeElement.id : '';
         if (existing) { existing.remove(); }
@@ -256,10 +264,9 @@
         details.href = (data.links && data.links.module) || 'zabbix.php?action=motd.view'; actions.appendChild(details);
         actions.appendChild(button('motd-banner-refresh', ui.refresh, function () { refresh(true); }));
         if (preferenceKey) { actions.appendChild(button('motd-banner-snooze', ui.snooze, snooze)); }
+        // Expanding applies to this page only; every page load starts collapsed.
         var toggle = button('motd-banner-toggle', '', function () {
-            collapsed = !collapsed;
-            if (preferenceKey) { storage('local', key('expanded'), collapsed ? 'collapsed' : 'expanded'); }
-            collapse(banner, toggle, body);
+            collapsed = !collapsed; collapse(banner, toggle, body);
         }); actions.appendChild(toggle);
         var body = node('div', 'motd-banner__body'); body.id = 'motd-banner-body'; banner.appendChild(body);
         toggle.setAttribute('aria-controls', body.id);
@@ -287,11 +294,6 @@
             var issues = node('ul', 'motd-issues');
             data.issues.forEach(function (issue) { issues.appendChild(node('li', '', issue.message || ui.partial)); });
             body.appendChild(issues);
-        }
-        if (collapsed === null) {
-            var preference = preferenceKey ? storage('local', key('expanded')) : null;
-            collapsed = preference ? preference === 'collapsed' : !!storage('session', key('seen'));
-            storage('session', key('seen'), '1');
         }
         collapse(banner, toggle, body);
         target.insertBefore(root, target.firstChild); status();
