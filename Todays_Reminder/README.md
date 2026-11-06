@@ -2,7 +2,7 @@
 
 A read-only Zabbix 7.0 frontend module with an operational banner and a detailed overview under **Monitoring → Today's Reminder → Overview**.
 
-Version **1.1.1**. The module ID `Message_of_the_Day` and namespace `MessageOfTheDay` remain stable for upgrades.
+Version **1.1.2**. The module ID `Message_of_the_Day` and namespace `MessageOfTheDay` remain stable for upgrades.
 
 ## What it shows
 
@@ -22,7 +22,7 @@ The banner appears at the top of the page content on every frontend page, includ
 
 ## Refresh and preferences
 
-The banner and complete overview refresh every 60 seconds while visible. **Refresh** checks immediately using the same short server cache. Concurrent requests are prevented. A failed refresh retains the last available result with an explicit stale-data message. The generated time describes the cached data; last checked describes the most recent successful request.
+The banner and complete overview refresh every 60 seconds while visible. **Refresh** checks immediately using the same short server cache. Concurrent requests are prevented. The browser waits up to 60 seconds for an answer. A failed refresh retains the last available result with an explicit stale-data message. The generated time describes the cached data; last checked describes the most recent successful request. The overview's "Recently resolved (24h)" report is reused for up to five minutes, and Refresh reuses it too; when it is older than the page, its card shows its own update time.
 
 For accounts with automatic logout enabled, automatic polling requires new keyboard, pointer, or click activity since the previous request. It pauses while inactive so an abandoned tab cannot keep a session alive indefinitely. Manual refresh requests another check. Accounts with automatic logout disabled (for example, dedicated kiosk accounts) continue polling while visible.
 
@@ -54,12 +54,13 @@ Use the actual timezone of your Zabbix server. An invalid override makes mainten
 
 ## Performance and limits
 
-- A private file cache in the system temporary directory lives for 45 seconds. Keys include installation, user, role/group-set identity, filters, language, display/scheduling timezones, and cache version. Unix cache directories use mode 0700 and files 0600. The module works without a writable cache. Permission changes can take up to the cache lifetime to appear.
+- A private file cache in the system temporary directory lives for 45 seconds; the overview's recovery report is a separate entry kept for five minutes. Keys include installation, user, role/group-set identity, filters, language, display/scheduling timezones, and cache version. Unix cache directories use mode 0700 and files 0600. The module works without a writable cache. Permission changes can take up to the cache lifetime to appear: 45 seconds, or about six minutes in the recovery report.
 - Recovery reporting pages through events overlapping the last 24 hours, including older starts that recovered during the period. It examines up to 20,000 candidates. If incomplete, the count is a lower bound and average MTTR is unavailable.
+- Zabbix evaluates the recovery report's filter across the whole event history, so it is the most expensive part of the collection. Only the overview builds it; banner refreshes skip it. It runs after every other section, and the overview reuses a successful report for five minutes. A scan that ends just past the time budget still finishes its page. A failed or cut-short report is retried on the next refresh.
 - Filter resolution permits up to 20,000 matching hosts; larger scopes require a narrower filter.
 - Host availability examines up to 5,000 monitored hosts. The inline list shows up to 50 unreachable hosts. Truncation is disclosed.
 - Unsupported-item totals use a count query. The affected-host minimum is calculated from at most 2,000 item rows, with a visible qualifier if truncated.
-- Collection checks a 20-second work budget between API calls. A slow individual call can still run longer; the browser times out and marks the previous result stale.
+- Collection checks a 20-second work budget between API calls. A slow individual call can still run longer, and so can the small lookups that finish rows already fetched. The browser waits up to 60 seconds before it marks the previous result stale.
 - Native drill-downs carry supported filters. Large selected scopes that would produce oversized URLs stay in the overview. Incident links open the specific event.
 
 ## Installation / upgrade
@@ -69,7 +70,7 @@ Use the actual timezone of your Zabbix server. An invalid override makes mainten
 3. Reload the frontend. Versioned filenames load the updated JavaScript and CSS.
 4. Check the overview with a Super Admin and a restricted account. Verify group/tag filters, an incident link, snooze/resume, and maintenance against native Zabbix views.
 
-No database migration is required. Upgrading from 1.1.0 keeps saved filters and any active snooze; end a snooze early with **Show banner again** on the overview. Expand/collapse choices saved by 1.1.0, and banner storage from versions before 1.1.0, are ignored. This repository update does not deploy files to a running frontend.
+No database migration is required. Upgrading from 1.1.0 or 1.1.1 keeps saved filters and any active snooze; end a snooze early with **Show banner again** on the overview. Expand/collapse choices saved by 1.1.0, and banner storage from versions before 1.1.0, are ignored. This repository update does not deploy files to a running frontend.
 
 ## Local validation
 
@@ -86,6 +87,12 @@ node tests/MotdUiTest.cjs
 Browser checks use Playwright with headless Microsoft Edge on Windows; the runner supports `MOTD_BROWSER_CHANNEL`. PHP checks can run in disposable `php:8.4-cli` containers with networking disabled, a read-only module mount, and a writable temporary filesystem for cache fixtures.
 
 For a synthetic visual preview, run `php -S 127.0.0.1:18931 tests/Preview.php` from this directory and open `/zabbix.php?action=motd.view`. The preview refuses to run under PHP-FPM/Apache. Local fixtures validate module logic and presentation; API/role/schedule behavior still needs verification on the target deployment.
+
+## 1.1.2 changes
+
+- Fixed frequent "Refresh failed" messages. The browser gave up after 20 seconds, the same length as the server's collection budget, so any slow collection failed. It now waits up to 60 seconds.
+- Banner refreshes no longer build the 24-hour recovery report. It scans the whole event history, and the banner never shows it. The overview builds it last, without a separate count query, and reuses it for five minutes; the card then shows when the report was made.
+- The recovery report, the slowest part, now runs after every other section, so a slow scan can no longer leave the other sections without data. Before, maintenance was collected last and the banner showed "Maintenance today: unavailable".
 
 ## 1.1.1 changes
 

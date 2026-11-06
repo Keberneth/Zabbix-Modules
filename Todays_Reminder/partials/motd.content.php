@@ -103,6 +103,7 @@ if (!empty($scope['tag'])) {
 		<?php if ($card['key'] === 'resolved'): ?>
 			<p class="motd-subtext"><?= $h(_('Average MTTR')) ?>:
 				<?= $h($value['avg_mttr_text'] ?? '') !== '' ? $h($value['avg_mttr_text']) : $h(_('Unavailable')) ?>
+				<?php if (!empty($value['as_of_text'])): ?> · <?= $h(_('Updated')) ?> <?= $h($value['as_of_text']) ?><?php endif; ?>
 			</p>
 		<?php endif; ?>
 		<?php if (!empty($value['recent'])): ?>

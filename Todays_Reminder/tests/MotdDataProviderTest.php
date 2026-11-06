@@ -179,6 +179,14 @@ $bounded = fresh()['resolved'];
 check($bounded['count'] === 1 && $bounded['count_is_lower_bound'] && $bounded['truncated'], 'Scan limits disclose a lower-bound recovery count.');
 check($bounded['candidates_scanned'] === 20000 && $bounded['avg_mttr'] === null, 'Incomplete recovery coverage cannot publish average MTTR.');
 unset($bounded_events);
+$exact_events = [];
+for ($i = 1; $i <= 20000; $i++) $exact_events[] = ['eventid' => (string) (100 + $i), 'objectid' => '20', 'hostid' => '10',
+	'clock' => $now - 200000 + $i, 'name' => 'Incident '.$i, 'severity' => 4, 'r_eventid' => $i === 20000 ? '50000' : '0'];
+fixture(['events' => $exact_events, 'recoveries' => [['eventid' => '50000', 'clock' => $now - 120]]]);
+$exact = fresh()['resolved'];
+check($exact['count'] === 1 && !$exact['truncated'] && !$exact['count_is_lower_bound'] && $exact['avg_mttr'] !== null
+	&& $exact['candidates_scanned'] === 20000, 'Exactly 20,000 candidates is a complete report, not a lower bound.');
+unset($exact_events);
 
 $audit = [];
 for ($i = 0; $i < 35; $i++) $audit[] = ['auditid' => 'a'.$i, 'clock' => $now - $i, 'resourceid' => '10', 'resourcename' => 'Host '.$i];
@@ -275,5 +283,127 @@ chmod($cached_path, 0644);
 clearstatcache();
 check(privateCall($cached_provider, 'readCache', $scope) === null, 'Insecure cache permissions are rejected before reads.');
 unlink($cached_path);
+
+// Refresh cost: the recovery report scans event history, so only the overview builds it, it runs last,
+// it makes no separate count query, and a successful report is reused for five minutes.
+$recovered = ['events' => $events, 'recoveries' => [['eventid' => '5000', 'clock' => $now - 120]]];
+$event_calls = static function(): array {
+	return array_values(array_filter(API::$calls, static function($call) { return $call[0] === 'Event'; }));
+};
+fixture($recovered + ['problems' => [$problem]]);
+$banner_provider = new MotdDataProvider();
+privateSet($banner_provider, 'filters', MotdDataProvider::normalizeFilters([]));
+privateSet($banner_provider, 'with_recovery', false);
+$banner = privateCall($banner_provider, 'buildData');
+check(!$event_calls(), 'Banner data never scans event history.');
+check($banner['resolved']['status'] === 'skipped' && $banner['resolved']['count'] === null
+	&& !array_filter($banner['issues'], static function($issue) { return $issue['section'] === 'resolved'; }),
+	'The banner skips the recovery report without reporting it as missing data.');
+$full = fresh();
+check($banner['summary_line'] === $full['summary_line'] && $banner['chips'] === $full['chips']
+	&& $banner['banner_items'] === $full['banner_items'], 'Skipping the recovery report changes nothing the banner shows.');
+check(!array_filter($event_calls(), static function($call) { return !empty($call[1]['countOutput']); }),
+	'The recovery report does not scan event history a second time just to count.');
+
+fixture($recovered + ['problems' => [$problem], 'maintenance' => [$window]]);
+$slow = new MotdDataProvider();
+privateSet($slow, 'filters', MotdDataProvider::normalizeFilters([]));
+$inner = API::$handler;
+API::$handler = static function($service, $args) use ($inner, $slow) {
+	if ($service === 'Event') privateSet($slow, 'deadline', microtime(true) - 1); // the scan uses up the budget
+	return $inner($service, $args);
+};
+$budget = privateCall($slow, 'buildData');
+check($budget['problems']['high_count'] === 1 && $budget['maintenances']['today_count'] === 1,
+	'A slow recovery scan cannot cost the banner its counts or maintenance windows.');
+check(in_array('Alpha', $budget['problems']['recent'][0]['hosts'], true), 'Problem rows keep their hosts when the scan uses up the budget.');
+check($budget['resolved']['status'] !== 'ok' && $budget['resolved']['truncated'], 'A recovery scan cut short is disclosed.');
+
+$reuse_scope = 'recovery-'.bin2hex(random_bytes(6));
+fixture($recovered);
+$first_build = (new MotdDataProvider())->getData($reuse_scope);
+$reuse = new MotdDataProvider();
+$recovery_file = privateCall($reuse, 'cacheFile', $reuse_scope.'|recovery');
+// The next overview poll, a minute later: the 45-second page cache has expired, the report has not.
+unlink(privateCall($reuse, 'cacheFile', $reuse_scope));
+touch($recovery_file, time() - 60);
+clearstatcache();
+fixture($recovered);
+$reused = $reuse->getData($reuse_scope);
+check(!$event_calls() && API::$calls, 'Overview refreshes reuse a recent recovery report and refresh everything else.');
+check($reused['resolved']['count'] === 1 && $reused['resolved']['recent'][0]['eventid'] === '1'
+	&& $reused['resolved']['avg_mttr'] === 199879, 'A reused recovery report keeps its incidents and MTTR.');
+check(!isset($first_build['resolved']['as_of_text'])
+	&& $reused['resolved']['as_of_text'] === date('Y-m-d H:i', $first_build['generated_at']),
+	'A reused report shows when it was made; a fresh one needs no separate time.');
+fixture($recovered);
+$banner_data = (new MotdDataProvider())->getData($reuse_scope, [], false);
+check(!$event_calls() && $banner_data['resolved']['status'] === 'skipped', 'Banner requests use their own cache entry and skip the scan.');
+unlink(privateCall($reuse, 'cacheFile', $reuse_scope));
+touch($recovery_file, time() - 301);
+clearstatcache();
+fixture($recovered);
+$expired = (new MotdDataProvider())->getData($reuse_scope);
+check($event_calls() && $expired['resolved']['count'] === 1 && !isset($expired['resolved']['as_of_text']),
+	'After five minutes the overview scans the event history again.');
+
+$retry_scope = 'recovery-retry-'.bin2hex(random_bytes(6));
+fixture(['fail' => ['Event']]);
+(new MotdDataProvider())->getData($retry_scope);
+$retry = new MotdDataProvider();
+unlink(privateCall($retry, 'cacheFile', $retry_scope));
+fixture($recovered);
+check($retry->getData($retry_scope)['resolved']['count'] === 1 && $event_calls(), 'A failed recovery scan is retried, never cached.');
+
+// A slow history scan that ends past the budget still finishes its page and is kept for reuse;
+// a scan cut short before its last page is disclosed and never kept.
+$past_budget = static function(MotdDataProvider $provider): void {
+	$inner = API::$handler;
+	API::$handler = static function($service, $args) use ($inner, $provider) {
+		if ($service === 'Event' && !isset($args['eventids'])) privateSet($provider, 'deadline', microtime(true) - 1);
+		return $inner($service, $args);
+	};
+};
+$late_scope = 'recovery-late-'.bin2hex(random_bytes(6));
+fixture(['events' => array_slice($events, 0, 10), 'recoveries' => $recovered['recoveries']]);
+$late = new MotdDataProvider();
+$past_budget($late);
+$late_report = $late->getData($late_scope)['resolved'];
+check($late_report['count'] === 1 && !$late_report['truncated'] && $late_report['status'] === 'ok'
+	&& is_file(privateCall($late, 'cacheFile', $late_scope.'|recovery')), 'A scan that ends past the budget still finishes its page and is reused.');
+$cut_scope = 'recovery-cut-'.bin2hex(random_bytes(6));
+fixture($recovered);
+$cut = new MotdDataProvider();
+$past_budget($cut);
+$cut_report = $cut->getData($cut_scope)['resolved'];
+check($cut_report['truncated'] && $cut_report['status'] === 'partial' && !is_file(privateCall($cut, 'cacheFile', $cut_scope.'|recovery')),
+	'A scan cut short by the budget is disclosed and never kept for reuse.');
+
+// Open and resolved rows from different triggers both keep their hosts (two lookups, merged).
+fixture(['problems' => [$problem], 'events' => array_map(static function($event) { return ['objectid' => '30'] + $event; },
+	array_slice($events, 0, 10)), 'recoveries' => $recovered['recoveries']]);
+$merged = fresh();
+check(in_array('Alpha', $merged['problems']['recent'][0]['hosts'], true) && in_array('Alpha', $merged['resolved']['recent'][0]['hosts'], true)
+	&& count(array_filter(API::$calls, static function($call) { return $call[0] === 'Trigger'; })) === 2,
+	'Open and resolved rows from different triggers both keep their hosts.');
+
+// A capped report is reused with its "incomplete" message, not as a clean result.
+$capped_events = [];
+for ($i = 1; $i <= 20001; $i++) $capped_events[] = ['eventid' => (string) $i, 'objectid' => '20', 'hostid' => '10',
+	'clock' => $now - 200000 + $i, 'name' => 'Incident '.$i, 'severity' => 4, 'r_eventid' => '0'];
+$capped_scope = 'recovery-capped-'.bin2hex(random_bytes(6));
+fixture(['events' => $capped_events]);
+(new MotdDataProvider())->getData($capped_scope);
+$capped = new MotdDataProvider();
+unlink(privateCall($capped, 'cacheFile', $capped_scope));
+fixture(['events' => $capped_events]);
+$capped_reuse = $capped->getData($capped_scope)['resolved'];
+check(!$event_calls() && $capped_reuse['status'] === 'partial' && $capped_reuse['truncated']
+	&& strpos($capped_reuse['message'], 'incomplete') !== false, 'A reused capped report stays marked incomplete.');
+unset($capped_events);
+
+foreach ([$scope, $reuse_scope, $retry_scope, $late_scope, $cut_scope, $capped_scope] as $test_scope) {
+	foreach (['', '|recovery', '|banner'] as $suffix) @unlink(privateCall($retry, 'cacheFile', $test_scope.$suffix));
+}
 
 echo 'MotdDataProviderTest: '.$checks." checks passed.\n";

@@ -12,7 +12,8 @@ use CUrl;
 
 class MotdDataProvider {
 	private const CACHE_TTL = 45;
-	private const CACHE_VERSION = '1.1.0';
+	private const RECOVERY_CACHE_TTL = 300;
+	private const CACHE_VERSION = '1.1.2';
 	private const EVENT_PAGE_SIZE = 1000;
 	private const MAX_EVENT_SCAN = 20000;
 	private const MAX_SCOPE_HOSTS = 20000;
@@ -31,19 +32,27 @@ class MotdDataProvider {
 	private $trigger_cache = [];
 	private $maintenance_timezone = null;
 	private $deadline;
+	private $cache_scope = null;
+	private $with_recovery = true;
 
-	/** A cache is private to one user, installation, filter, language and timezone. */
-	public function getData(string $cache_scope = 'global', array $filters = []): array {
+	/**
+	 * A cache is private to one user, installation, filter, language and timezone. The banner never shows the
+	 * 24-hour recovery report, so banner requests skip it and use their own cache entry.
+	 */
+	public function getData(string $cache_scope = 'global', array $filters = [], bool $with_recovery = true): array {
 		$this->filters = self::normalizeFilters($filters);
 		$this->hostids = null;
 		$this->scope_groups = [];
 		$this->scope_group_names = [];
 		$this->scope_failed = false;
 		$this->issues = $this->success = $this->failures = $this->trigger_cache = [];
-		$cached = $this->readCache($cache_scope);
+		$this->cache_scope = $cache_scope;
+		$this->with_recovery = $with_recovery;
+		$scope = $with_recovery ? $cache_scope : $cache_scope.'|banner';
+		$cached = $this->readCache($scope);
 		if ($cached !== null) return $cached;
 		$data = $this->buildData();
-		$this->writeCache($cache_scope, $data);
+		$this->writeCache($scope, $data);
 		return $data;
 	}
 
@@ -59,16 +68,19 @@ class MotdDataProvider {
 		$this->resolveScope();
 		$groups = $this->query('HostGroup', ['output' => ['groupid', 'name'], 'sortfield' => 'name'], 'filters', false);
 		$this->expandScopeGroups($groups ?? []);
+		// The banner's sections come first. The recovery report scans event history, so it runs last:
+		// a slow scan or a spent time budget can then only affect that report.
 		$problems = $this->getProblemSummary();
 		$unacked = $this->getUnacknowledgedProblems();
 		$longest = $this->getLongestRunningProblems();
-		$resolved = $this->getRecentlyResolvedProblems($now);
-		$health = $this->getMonitoringHealth($now);
-		$new_hosts = $this->getNewHosts24h($timezone, $now);
 		$maintenances = $this->getMaintenanceSummary($now, $today, $today->modify('+1 day'),
 			$today->modify('monday this week')->modify('+7 days'), $timezone);
-		$this->primeTriggerCache([$problems['_recent_raw'], $unacked['_recent_raw'],
-			$longest['_recent_raw'], $resolved['_top_raw']]);
+		$health = $this->getMonitoringHealth($now);
+		$new_hosts = $this->getNewHosts24h($timezone, $now);
+		$this->primeTriggerCache([$problems['_recent_raw'], $unacked['_recent_raw'], $longest['_recent_raw']]);
+		$resolved = $this->with_recovery ? $this->getRecoveryReport($now) : self::skippedRecoveryReport();
+		if (isset($resolved['as_of'])) $resolved['as_of_text'] = $this->formatTimestamp($resolved['as_of'], $timezone);
+		$this->primeTriggerCache([$resolved['_top_raw']]);
 		foreach (['problems', 'unacked', 'longest'] as $section) {
 			${$section}['recent'] = $this->formatProblemRows(${$section}['_recent_raw'], $timezone, $now);
 			unset(${$section}['_recent_raw']);
@@ -159,8 +171,11 @@ class MotdDataProvider {
 		}
 	}
 
-	/** Failures are data, never a healthy zero. Empty scopes never widen to all hosts. */
-	private function query(string $service, array $options, string $section, bool $scoped = true) {
+	/**
+	 * Failures are data, never a healthy zero. Empty scopes never widen to all hosts. Unbudgeted calls are small
+	 * ID lookups that finish rows already fetched, so they run even after the time budget is spent.
+	 */
+	private function query(string $service, array $options, string $section, bool $scoped = true, bool $budgeted = true) {
 		if ($scoped && $this->scope_failed) {
 			$this->issue($section, _('Unavailable because the selected host scope could not be loaded.'));
 			return null;
@@ -174,7 +189,7 @@ class MotdDataProvider {
 			$this->issue($section, _('New-host activity requires permission to read the audit log.'));
 			return null;
 		}
-		if ($this->deadline !== null && microtime(true) >= $this->deadline) {
+		if ($budgeted && $this->deadline !== null && microtime(true) >= $this->deadline) {
 			$this->issue($section, _('The data collection time budget was reached. Refresh to retry.'));
 			return null;
 		}
@@ -240,57 +255,95 @@ class MotdDataProvider {
 		return ['_recent_raw' => $this->query('Problem', $this->problemOptions(5, 'ASC'), 'longest') ?? []];
 	}
 
+	/** The overview reuses a successful recovery report for five minutes; a failed or cut-short scan is retried. */
+	private function getRecoveryReport(\DateTimeImmutable $now): array {
+		$scope = $this->cache_scope === null ? null : $this->cache_scope.'|recovery';
+		$cached = $scope === null ? null
+			: $this->readCache($scope, self::RECOVERY_CACHE_TTL, ['report', 'issues', 'generated_at']);
+		if ($cached !== null && is_array($cached['report']) && is_array($cached['issues'])) {
+			$this->success['resolved'] = true;
+			foreach ($cached['issues'] as $message) $this->issue('resolved', (string) $message);
+			// The card shows when a reused report was made, since it can be older than the page.
+			return ['as_of' => (int) $cached['generated_at']] + $cached['report'];
+		}
+		$report = $this->getRecentlyResolvedProblems($now);
+		$failed = $report['_failed'];
+		unset($report['_failed']);
+		if ($scope !== null && !$failed) {
+			$issues = [];
+			foreach ($this->issues as $issue) if ($issue['section'] === 'resolved') $issues[] = $issue['message'];
+			$this->writeCache($scope, ['report' => $report, 'issues' => $issues, 'generated_at' => $now->getTimestamp()]);
+		}
+		return $report;
+	}
+
+	private static function skippedRecoveryReport(): array {
+		return ['count' => null, 'count_is_lower_bound' => false, 'truncated' => false, 'candidates_scanned' => 0,
+			'avg_mttr' => null, 'avg_mttr_text' => '', '_top_raw' => [], '_top_meta' => [],
+			'status' => 'skipped', 'message' => ''];
+	}
+
 	private function getRecentlyResolvedProblems(\DateTimeImmutable $now): array {
 		$since = $now->getTimestamp() - 86400;
 		// Overlap filters include old starts whose recovery falls in the last 24 hours.
 		// event.get cannot filter r_eventid directly; recoveries are joined by event ID.
+		// Zabbix evaluates this filter across the whole event history, so there is no separate count query:
+		// a page shorter than the page size ends the scan.
 		$base = ['source' => 0, 'object' => 0, 'value' => 1, 'severities' => [4, 5],
 			'problem_time_from' => $since, 'problem_time_till' => $now->getTimestamp()];
-		$total = $this->query('Event', $base + ['countOutput' => true], 'resolved');
 		$resolved = [];
 		$scanned = 0;
 		$cursor = null;
-		$complete = $total !== null;
-		while ($total !== null && $scanned < $total && $scanned < self::MAX_EVENT_SCAN) {
+		$loaded = $failed = $complete = $missing = false;
+		while ($scanned < self::MAX_EVENT_SCAN) {
+			// The page that reaches the cap asks for one extra row, to tell "exactly at the cap" from "more".
+			$final = $scanned + self::EVENT_PAGE_SIZE >= self::MAX_EVENT_SCAN;
 			$options = $base + ['output' => ['eventid', 'clock', 'name', 'severity', 'objectid', 'r_eventid'],
-				'sortfield' => 'eventid', 'sortorder' => 'DESC', 'limit' => self::EVENT_PAGE_SIZE];
+				'sortfield' => 'eventid', 'sortorder' => 'DESC', 'limit' => self::EVENT_PAGE_SIZE + ($final ? 1 : 0)];
 			if ($cursor !== null) $options['eventid_till'] = $cursor;
 			$events = $this->query('Event', $options, 'resolved');
-			if ($events === null || !$events) { $complete = false; break; }
+			if ($events === null) { $failed = true; break; }
+			$more = count($events) > self::EVENT_PAGE_SIZE;
+			if ($more) $events = array_slice($events, 0, self::EVENT_PAGE_SIZE);
+			$loaded = true;
 			$scanned += count($events);
 			$recovery_ids = [];
 			foreach ($events as $event) if (!empty($event['r_eventid'])) $recovery_ids[(string) $event['r_eventid']] = true;
+			// Finishing a fetched page is a cheap ID lookup: it is not cut off by the time budget, so a slow
+			// history scan that ends just past the budget still produces a report that can be reused.
 			$recoveries = $recovery_ids ? $this->query('Event', ['output' => ['eventid', 'clock'],
-				'eventids' => array_keys($recovery_ids), 'source' => 0, 'object' => 0, 'value' => 0], 'resolved') : [];
-			if ($recoveries === null) { $complete = false; break; }
+				'eventids' => array_keys($recovery_ids), 'source' => 0, 'object' => 0, 'value' => 0], 'resolved', true, false) : [];
+			if ($recoveries === null) { $failed = true; break; }
 			$clocks = array_column($recoveries, 'clock', 'eventid');
 			foreach ($events as $event) {
 				$rid = (string) ($event['r_eventid'] ?? '0');
 				if ($rid === '0' || $rid === '') continue;
-				if (!isset($clocks[$rid])) { $complete = false; continue; }
+				if (!isset($clocks[$rid])) { $missing = true; continue; }
 				$recovered = (int) $clocks[$rid];
 				if ($recovered >= $since && $recovered <= $now->getTimestamp()) {
 					$resolved[(string) $event['eventid']] = ['problem_event' => $event,
 						'resolved_at' => $recovered, 'mttr' => max(0, $recovered - (int) $event['clock'])];
 				}
 			}
+			if (count($events) < self::EVENT_PAGE_SIZE || ($final && !$more)) { $complete = true; break; }
 			$last = end($events);
 			$next = $this->previousId((string) $last['eventid']);
-			if ($next === $cursor || $next === '0') { $complete = $complete && $scanned >= $total; break; }
+			if ($next === '0') { $complete = true; break; }
+			if ($next === $cursor) break;
 			$cursor = $next;
 		}
-		$complete = $complete && $scanned >= ($total ?? 0);
-		if (!$complete && $total !== null) {
+		$complete = $complete && !$missing;
+		if ($loaded && !$complete) {
 			$this->issue('resolved', _('The recovery report is incomplete. The count is a minimum; average MTTR is unavailable.'));
 		}
 		usort($resolved, static function(array $a, array $b): int { return $b['resolved_at'] <=> $a['resolved_at']; });
-		$count = $total === null ? null : count($resolved);
+		$count = $loaded ? count($resolved) : null;
 		$mean = $complete && $count > 0 ? (int) round(array_sum(array_column($resolved, 'mttr')) / $count) : null;
 		$top = array_slice($resolved, 0, 5);
 		return ['count' => $count, 'count_is_lower_bound' => !$complete && $count !== null,
-			'truncated' => !$complete, 'candidates_scanned' => $scanned, 'candidates_total' => $total,
+			'truncated' => !$complete, 'candidates_scanned' => $scanned,
 			'avg_mttr' => $mean, 'avg_mttr_text' => $mean === null ? '' : $this->formatDuration($mean),
-			'_top_raw' => array_column($top, 'problem_event'), '_top_meta' => $top];
+			'_top_raw' => array_column($top, 'problem_event'), '_top_meta' => $top, '_failed' => $failed];
 	}
 
 	private function previousId(string $id): string {
@@ -521,11 +574,13 @@ class MotdDataProvider {
 
 	private function primeTriggerCache(array $row_sets): void {
 		$ids = [];
-		foreach ($row_sets as $rows) foreach ($rows as $row) $ids[(string) $row['objectid']] = true;
+		foreach ($row_sets as $rows) foreach ($rows as $row) {
+			if (!isset($this->trigger_cache[(string) $row['objectid']])) $ids[(string) $row['objectid']] = true;
+		}
 		if (!$ids) return;
 		$triggers = $this->query('Trigger', ['output' => ['triggerid'], 'triggerids' => array_keys($ids),
-			'selectHosts' => ['hostid', 'host', 'name'], 'preservekeys' => true], 'details');
-		$this->trigger_cache = $triggers ?? [];
+			'selectHosts' => ['hostid', 'host', 'name'], 'preservekeys' => true], 'details', true, false);
+		$this->trigger_cache += $triggers ?? [];
 	}
 
 	private function formatProblemRows(array $rows, \DateTimeZone $timezone, \DateTimeImmutable $now): array {
@@ -696,16 +751,19 @@ class MotdDataProvider {
 		return sys_get_temp_dir().'/zbx_motd_'.hash('sha256', $this->installSalt()).'/'.hash('sha256', json_encode($key)).'.json';
 	}
 
-	private function readCache(string $scope): ?array {
+	private function readCache(string $scope, int $ttl = self::CACHE_TTL,
+			array $required = ['fingerprint', 'status', 'generated_at']): ?array {
 		$file = $this->cacheFile($scope);
 		if (is_link(dirname($file)) || is_link($file) || !is_file($file)) return null;
 		if ((@fileperms(dirname($file)) & 0077) !== 0 || (@fileperms($file) & 0077) !== 0) return null;
 		if (function_exists('posix_geteuid') && (@fileowner(dirname($file)) !== posix_geteuid() || @fileowner($file) !== posix_geteuid())) return null;
 		$mtime = @filemtime($file);
-		if ($mtime === false || time() - $mtime > self::CACHE_TTL || $mtime > time()) return null;
+		if ($mtime === false || time() - $mtime > $ttl || $mtime > time()) return null;
 		$raw = @file_get_contents($file);
 		$decoded = $raw === false ? null : json_decode($raw, true);
-		return is_array($decoded) && isset($decoded['fingerprint'], $decoded['status'], $decoded['generated_at']) ? $decoded : null;
+		if (!is_array($decoded)) return null;
+		foreach ($required as $key) if (!isset($decoded[$key])) return null;
+		return $decoded;
 	}
 
 	private function writeCache(string $scope, array $data): void {

@@ -1,6 +1,8 @@
 (function () {
     'use strict';
-    var ROOT = 'motd-banner-root', REFRESH = 60000, TIMEOUT = 20000;
+    // Wait well past the server's 20-second collection budget: it is checked only between API calls,
+    // so a query started near its end can still finish.
+    var ROOT = 'motd-banner-root', REFRESH = 60000, TIMEOUT = 60000;
     var labels = {
         expand: 'Expand', collapse: 'Collapse', open_details: 'Open details', updated: 'Updated',
         last_checked: 'Last checked', refreshing: 'Refreshing…', refresh: 'Refresh',
