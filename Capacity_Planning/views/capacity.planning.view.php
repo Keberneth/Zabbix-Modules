@@ -31,5 +31,11 @@ $root = (new CDiv(_('Loading capacity planning report…')))
 
 (new CHtmlPage())
 	->setTitle($data['page_title'])
+	->addItem((new CDiv([
+		(new CTag('p', true, _('Infrastructure insights')))->addClass('zm-eyebrow'),
+		(new CTag('p', true, _('Capacity planning')))->addClass('cap-report-title'),
+		(new CTag('p', true, _('Disk, CPU and memory forecasts across your monitored hosts.')))
+			->addClass('cap-report-description')
+	]))->addClass('cap-report-head'))
 	->addItem($root)
 	->show();

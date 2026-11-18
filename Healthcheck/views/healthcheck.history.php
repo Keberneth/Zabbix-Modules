@@ -46,6 +46,7 @@ ob_start();
 <div id="healthcheck-history-root" class="hc-page hc-history-page" data-healthcheck-theme="<?= $h($hc_theme) ?>">
     <div class="hc-header">
         <div>
+            <p class="zm-eyebrow"><?= $h(_('Monitoring')) ?></p>
             <h1><?= $h($data['title'] ?? _('Healthcheck history')) ?></h1>
             <p class="hc-muted">
                 Aggregated success statistics and recent run history for the selected period.

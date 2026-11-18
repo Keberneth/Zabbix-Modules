@@ -16,9 +16,12 @@ ob_start();
 ?>
 <div class="motd-page">
 	<div class="motd-page__header">
-		<div id="motd-overview-status" class="motd-page__meta motd-status" role="status" aria-live="polite">
-			<?= $h(_('Updated')) ?> <?= $h(!empty($motd['generated_at_text']) ? $motd['generated_at_text'] : _('Unavailable')) ?>
-			<?php if (!empty($motd['timezone'])): ?> · <?= $h($motd['timezone']) ?><?php endif; ?>
+		<div>
+			<span class="zm-eyebrow"><?= $h(_('Monitoring overview')) ?></span>
+			<div id="motd-overview-status" class="motd-page__meta motd-status" role="status" aria-live="polite">
+				<?= $h(_('Updated')) ?> <?= $h(!empty($motd['generated_at_text']) ? $motd['generated_at_text'] : _('Unavailable')) ?>
+				<?php if (!empty($motd['timezone'])): ?> · <?= $h($motd['timezone']) ?><?php endif; ?>
+			</div>
 		</div>
 		<div class="motd-page__header-actions">
 			<button type="button" id="motd-refresh" class="motd-page__btn"><?= $h(_('Refresh')) ?></button>

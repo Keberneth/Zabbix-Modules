@@ -30,7 +30,7 @@
 		}
 	},
 	"assets": {
-		"css": ["widget.css"],
+		"css": ["module-theme.css","widget.css"],
 		"js": ["class.widget.js"]
 	}
 }

@@ -67,6 +67,7 @@ $fallback_url = 'zabbix.php?'.http_build_query(array_merge($base_query,
 
 	<div class="sr-head" data-sr-report-header>
 		<div>
+			<p class="zm-eyebrow"><?= $esc(_('Service reliability')) ?></p>
 			<p class="sr-head-title"><?= $esc(_('SLA & Uptime Report')) ?></p>
 			<div class="sr-head-meta">
 				<span class="sr-head-period"><?= $esc($report['period']['label']) ?></span>

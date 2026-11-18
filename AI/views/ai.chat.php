@@ -68,6 +68,7 @@ ob_start();
 >
     <div class="ai-header">
         <div>
+            <p class="zm-eyebrow"><?= $h(_('Assistant')) ?></p>
             <h1><?= $h($data['title'] ?? _('AI chat')) ?></h1>
             <p class="ai-muted">Conversation history stays in this browser tab. Sensitive values can be masked locally before they are sent to the provider when redaction is enabled.</p>
         </div>

@@ -18,6 +18,7 @@
   },
   "assets": {
     "css": [
+      "module-theme.css",
       "incident-timeline-1.4.0.css"
     ],
     "js": [

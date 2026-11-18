@@ -68,6 +68,7 @@ $build_logo_fields = static function (
 
 	$fields[] = (new CTag('input', false))
 		->setAttribute('type', 'file')
+		->setAttribute('id', $logo_key)
 		->setAttribute('name', $logo_key)
 		->setAttribute('accept', $accept);
 	$fields[] = (new CTag('div', true, $help_text))
@@ -136,14 +137,24 @@ $server_name_fields = [
 		->setAttribute('style', 'margin-top: 4px;')
 ];
 
-// --- Build form list ---
+// --- Brand assets and identity ---
+
+$build_asset_card = static function (string $title, string $input_id, array $fields): CDiv {
+	return (new CDiv([
+		(new CTag('h2', true, new CLabel($title, $input_id))),
+		(new CDiv($fields))->addClass('rebrand-upload-fields')
+	]))->addClass('rebrand-card')->addClass('rebrand-asset-card');
+};
+
+$asset_grid = (new CDiv([
+	$build_asset_card(_('Login page logo'), 'logo_main', $logo_main_fields),
+	$build_asset_card(_('Sidebar logo'), 'logo_sidebar', $logo_sidebar_fields),
+	$build_asset_card(_('Compact sidebar icon'), 'logo_compact', $logo_compact_fields),
+	$build_asset_card(_('Browser favicon'), 'favicon', $favicon_fields)
+]))->addClass('rebrand-assets-grid');
 
 $form_list = (new CFormList())
-	->addRow(_('Login page logo'), $logo_main_fields)
-	->addRow(_('Sidebar logo'), $logo_sidebar_fields)
-	->addRow(_('Compact sidebar icon'), $logo_compact_fields)
 	->addRow(_('Server name'), $server_name_fields)
-	->addRow(_('Browser favicon'), $favicon_fields)
 	->addRow(_('Footer text'),
 		(new CTextBox('brand_footer', $data['brand_footer'], false, 128))
 			->setWidth(ZBX_TEXTAREA_STANDARD_WIDTH)
@@ -171,17 +182,24 @@ if (!$data['storage_writable'] || !$data['conf_writable']) {
 	);
 }
 
-// --- Tab view ---
+$form->addItem($asset_grid);
+$form->addItem((new CDiv([
+	new CTag('h2', true, _('Workspace identity')),
+	$form_list
+]))->addClass('rebrand-card')->addClass('rebrand-identity-card'));
+$form->addItem((new CDiv(makeFormFooter(
+	new CSubmit('update', _('Save branding'))
+)))->addClass('rebrand-actions'));
 
-$tab_view = (new CTabView())->addTab('rebrand_tab', _('Logo settings'), $form_list);
-
-$tab_view->setFooter(makeFormFooter(
-	new CSubmit('update', _('Update'))
-));
-
-$form->addItem($tab_view);
-
-$page_wrapper = (new CDiv($form))
+$page_wrapper = (new CDiv([
+	(new CDiv([
+		(new CTag('p', true, _('Administration')))->addClass('zm-eyebrow'),
+		new CTag('h1', true, _('Branding')),
+		(new CTag('p', true, _('Make this workspace your own with custom logos, a server name, and support links.')))
+			->addClass('rebrand-description')
+	]))->addClass('rebrand-header'),
+	$form
+]))
 	->addClass('rebrand-page')
 	->setAttribute('data-rebrand-theme', $is_dark_theme ? 'dark' : 'light');
 

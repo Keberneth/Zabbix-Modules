@@ -35,6 +35,7 @@ $default_until = gmdate('Y-m-d');
      data-csrf-clear="<?= $h(CCsrfTokenHelper::get('netboxsync.log.clear')) ?>">
     <div class="nbs-header">
         <div>
+            <p class="zm-eyebrow"><?= $h(_('Integrations')) ?></p>
             <h1><?= $h($data['title'] ?? _('NetBox sync log')) ?></h1>
             <p class="nbs-muted"><?= $h(_('Structured change log from every sync run. Switch tabs to focus on additions, updates, removals, or errors. Filters stack — combine OS, disk, sync, or field to isolate what you need.')) ?></p>
             <?php if ($log_path !== ''): ?>

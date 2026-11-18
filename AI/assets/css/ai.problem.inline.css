@@ -8,10 +8,10 @@
     font-size: 11px;
     font-weight: 700;
     line-height: 1.6;
-    border: 1px solid #b0bec5;
-    border-radius: 3px;
-    background: linear-gradient(to bottom, #fafafa, #eceff1);
-    color: #37474f;
+    border: 1px solid var(--zm-border-strong);
+    border-radius: var(--zm-radius-sm);
+    background: var(--zm-accent-soft);
+    color: var(--zm-text);
     cursor: pointer;
     vertical-align: middle;
     white-space: nowrap;
@@ -19,31 +19,19 @@
 }
 
 .ai-problem-btn:hover {
-    background: linear-gradient(to bottom, #e3f2fd, #bbdefb);
-    border-color: #64b5f6;
-    color: #1565c0;
-    box-shadow: 0 1px 3px rgba(25, 118, 210, 0.18);
+    background: var(--zm-accent-soft);
+    border-color: var(--zm-accent);
+    color: var(--zm-accent);
+    box-shadow: var(--zm-focus);
 }
 
 .ai-problem-btn:active {
-    background: #bbdefb;
-    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.12);
+    background: var(--zm-border-strong);
+    box-shadow: var(--zm-focus);
 }
 
-/* ── Dark theme ── */
-html[theme="dark-theme"] .ai-problem-btn,
-html[theme="hc-dark"] .ai-problem-btn {
-    background: linear-gradient(to bottom, #37474f, #263238);
-    border-color: #546e7a;
-    color: #b0bec5;
-}
+/* Colors inherit the selected Zabbix theme through shared tokens. */
 
-html[theme="dark-theme"] .ai-problem-btn:hover,
-html[theme="hc-dark"] .ai-problem-btn:hover {
-    background: linear-gradient(to bottom, #1a3352, #0d47a1);
-    border-color: #42a5f5;
-    color: #90caf9;
-}
 
 /* ── Side Drawer ── */
 .ai-problem-drawer {
@@ -56,9 +44,9 @@ html[theme="hc-dark"] .ai-problem-btn:hover {
     z-index: 10000;
     display: flex;
     flex-direction: column;
-    background: #fff;
-    border-left: 1px solid #cfd8dc;
-    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.12);
+    background: var(--zm-surface);
+    border-left: 1px solid var(--zm-border);
+    box-shadow: var(--zm-shadow);
     animation: ai-drawer-slide-in 0.2s ease-out;
 }
 
@@ -73,8 +61,8 @@ html[theme="hc-dark"] .ai-problem-btn:hover {
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
-    border-bottom: 1px solid #cfd8dc;
-    background: #eceff1;
+    border-bottom: 1px solid var(--zm-border);
+    background: var(--zm-surface-muted);
     flex-shrink: 0;
 }
 
@@ -91,9 +79,9 @@ html[theme="hc-dark"] .ai-problem-btn:hover {
     justify-content: center;
     width: 28px;
     height: 28px;
-    border-radius: 4px;
-    background: #1565c0;
-    color: #fff;
+    border-radius: var(--zm-radius-sm);
+    background: var(--zm-accent);
+    color: var(--zm-on-accent);
     font-size: 12px;
     font-weight: 700;
     flex-shrink: 0;
@@ -102,12 +90,12 @@ html[theme="hc-dark"] .ai-problem-btn:hover {
 .ai-drawer-label {
     font-weight: 700;
     font-size: 14px;
-    color: #263238;
+    color: var(--zm-text);
 }
 
 .ai-drawer-eventid {
     font-size: 12px;
-    color: #78909c;
+    color: var(--zm-muted);
 }
 
 .ai-drawer-header-actions {
@@ -132,22 +120,22 @@ html[theme="hc-dark"] .ai-problem-btn:hover {
     border: none;
     background: transparent;
     font-size: 20px;
-    color: #546e7a;
+    color: var(--zm-muted);
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: var(--zm-radius-sm);
     flex-shrink: 0;
 }
 
 .ai-drawer-close:hover {
-    background: #cfd8dc;
-    color: #263238;
+    background: var(--zm-border);
+    color: var(--zm-text);
 }
 
 /* ── Drawer context ── */
 .ai-drawer-context {
     padding: 10px 16px;
-    border-bottom: 1px solid #e0e0e0;
-    background: #fafafa;
+    border-bottom: 1px solid var(--zm-border);
+    background: var(--zm-surface-muted);
     font-size: 12px;
     flex-shrink: 0;
     max-height: 160px;
@@ -157,26 +145,26 @@ html[theme="hc-dark"] .ai-problem-btn:hover {
 .ai-ctx-row {
     margin-bottom: 4px;
     line-height: 1.45;
-    color: #37474f;
+    color: var(--zm-text);
     word-break: break-word;
 }
 
 .ai-ctx-row strong {
-    color: #263238;
+    color: var(--zm-text);
 }
 
 .ai-drawer-loading {
-    color: #78909c;
-    font-style: italic;
+    color: var(--zm-muted);
+    font-style: normal;
 }
 
 .ai-drawer-context-error {
-    color: #c62828;
+    color: var(--zm-danger);
 }
 
 .ai-drawer-context-empty {
-    color: #78909c;
-    font-style: italic;
+    color: var(--zm-muted);
+    font-style: normal;
 }
 
 /* ── Drawer transcript ── */
@@ -184,7 +172,7 @@ html[theme="hc-dark"] .ai-problem-btn:hover {
     flex: 1 1 auto;
     overflow-y: auto;
     padding: 12px 16px;
-    background: #fafbfd;
+    background: var(--zm-surface-muted);
     min-height: 0;
 }
 
@@ -201,8 +189,8 @@ html[theme="hc-dark"] .ai-problem-btn:hover {
 }
 
 .ai-problem-drawer .ai-empty-state {
-    color: #90a4ae;
-    font-style: italic;
+    color: var(--zm-muted);
+    font-style: normal;
     padding: 20px 0;
     text-align: center;
 }
@@ -217,26 +205,26 @@ html[theme="hc-dark"] .ai-problem-btn:hover {
 /* ── Drawer compose ── */
 .ai-drawer-compose {
     padding: 12px 16px;
-    border-top: 1px solid #cfd8dc;
-    background: #eceff1;
+    border-top: 1px solid var(--zm-border);
+    background: var(--zm-surface-muted);
     flex-shrink: 0;
 }
 
 .ai-drawer-input {
     width: 100%;
     box-sizing: border-box;
-    border: 1px solid #b0bec5;
-    border-radius: 4px;
+    border: 1px solid var(--zm-border-strong);
+    border-radius: var(--zm-radius-sm);
     padding: 8px 10px;
     font: inherit;
     font-size: 13px;
     resize: vertical;
-    background: #fff;
-    color: #263238;
+    background: var(--zm-surface);
+    color: var(--zm-text);
 }
 
 .ai-drawer-input::placeholder {
-    color: #90a4ae;
+    color: var(--zm-muted);
 }
 
 .ai-drawer-actions {
@@ -259,106 +247,14 @@ html[theme="hc-dark"] .ai-problem-btn:hover {
 
 /* ── Confirm buttons inside drawer ── */
 .ai-problem-drawer .ai-action-confirm-buttons {
-    border: 1px dashed #b0bec5;
-    border-radius: 6px;
+    border: 1px dashed var(--zm-border-strong);
+    border-radius: var(--zm-radius-sm);
     margin-bottom: 12px;
     padding: 10px;
     display: flex;
     gap: 10px;
     justify-content: center;
-    background: #eceff1;
-}
-
-/* ── Dark theme for drawer ── */
-html[theme="dark-theme"] .ai-problem-drawer,
-html[theme="hc-dark"] .ai-problem-drawer {
-    background: #1f2c3d;
-    border-left-color: #4a5568;
-    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.35);
-}
-
-html[theme="dark-theme"] .ai-drawer-header,
-html[theme="hc-dark"] .ai-drawer-header {
-    background: #263545;
-    border-bottom-color: #4a5568;
-}
-
-html[theme="dark-theme"] .ai-drawer-label,
-html[theme="hc-dark"] .ai-drawer-label {
-    color: #dadee3;
-}
-
-html[theme="dark-theme"] .ai-drawer-eventid,
-html[theme="hc-dark"] .ai-drawer-eventid {
-    color: #768d99;
-}
-
-html[theme="dark-theme"] .ai-drawer-close,
-html[theme="hc-dark"] .ai-drawer-close {
-    color: #90a4ae;
-}
-
-html[theme="dark-theme"] .ai-drawer-close:hover,
-html[theme="hc-dark"] .ai-drawer-close:hover {
-    background: #37474f;
-    color: #eceff1;
-}
-
-html[theme="dark-theme"] .ai-drawer-context,
-html[theme="hc-dark"] .ai-drawer-context {
-    background: #263545;
-    border-bottom-color: #4a5568;
-}
-
-html[theme="dark-theme"] .ai-ctx-row,
-html[theme="hc-dark"] .ai-ctx-row {
-    color: #b0bec5;
-}
-
-html[theme="dark-theme"] .ai-ctx-row strong,
-html[theme="hc-dark"] .ai-ctx-row strong {
-    color: #dadee3;
-}
-
-html[theme="dark-theme"] .ai-drawer-loading,
-html[theme="dark-theme"] .ai-drawer-context-empty,
-html[theme="hc-dark"] .ai-drawer-loading,
-html[theme="hc-dark"] .ai-drawer-context-empty {
-    color: #768d99;
-}
-
-html[theme="dark-theme"] .ai-drawer-transcript,
-html[theme="hc-dark"] .ai-drawer-transcript {
-    background: #1a2636;
-}
-
-html[theme="dark-theme"] .ai-drawer-compose,
-html[theme="hc-dark"] .ai-drawer-compose {
-    background: #263545;
-    border-top-color: #4a5568;
-}
-
-html[theme="dark-theme"] .ai-drawer-input,
-html[theme="hc-dark"] .ai-drawer-input {
-    background: #1f2c3d;
-    border-color: #4a5568;
-    color: #dadee3;
-}
-
-html[theme="dark-theme"] .ai-drawer-input::placeholder,
-html[theme="hc-dark"] .ai-drawer-input::placeholder {
-    color: #768d99;
-}
-
-html[theme="dark-theme"] .ai-problem-drawer .ai-action-confirm-buttons,
-html[theme="hc-dark"] .ai-problem-drawer .ai-action-confirm-buttons {
-    border-color: #4a5568;
-    background: #263545;
-}
-
-html[theme="dark-theme"] .ai-problem-drawer .ai-empty-state,
-html[theme="hc-dark"] .ai-problem-drawer .ai-empty-state {
-    color: #768d99;
+    background: var(--zm-surface-muted);
 }
 
 /* ── Responsive ── */
@@ -368,3 +264,23 @@ html[theme="hc-dark"] .ai-problem-drawer .ai-empty-state {
         max-width: 100vw;
     }
 }
+
+/* Shared interaction treatment for inline assistance. */
+
+.ai-problem-btn { border-color: var(--zm-border-strong); color: var(--zm-accent); border-radius: 6px; }
+.ai-problem-btn:hover { border-color: var(--zm-accent); color: var(--zm-accent); }
+.ai-problem-drawer { color: var(--zm-text); }
+.ai-problem-drawer .ai-drawer-header { padding: 18px 20px; border-top: 3px solid var(--zm-accent); background: var(--zm-surface); }
+.ai-problem-drawer .ai-drawer-icon { width: 32px; height: 32px; border-radius: 10px; }
+.ai-problem-drawer .ai-drawer-transcript { padding: 18px; }
+.ai-problem-drawer .ai-drawer-compose { padding: 18px; background: var(--zm-surface); }
+.ai-problem-drawer .ai-drawer-input { border-radius: var(--zm-radius-sm); padding: 10px 12px; }
+.ai-problem-drawer .ai-drawer-actions { flex-wrap: wrap; }
+.ai-problem-drawer .ai-empty-state { padding: 28px 16px; border: 1px dashed var(--zm-border-strong); border-radius: var(--zm-radius-sm); font-style: normal; }
+.ai-problem-drawer .ai-msg { border-radius: 12px; }
+.ai-problem-drawer :is(.btn, .btn-alt) { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; box-sizing: border-box; padding: 7px 12px; background: var(--zm-surface); color: var(--zm-text); border: 1px solid var(--zm-border-strong); border-radius: var(--zm-radius-sm); font-weight: 600; }
+.ai-problem-drawer .ai-drawer-send { background: var(--zm-accent); border-color: var(--zm-accent); color: var(--zm-on-accent); }
+.ai-problem-drawer .ai-drawer-send:hover:not(:disabled) { background: var(--zm-accent-hover); color: var(--zm-on-accent); }
+.ai-problem-btn:focus-visible, .ai-problem-drawer :is(button, input, select, textarea, a):focus-visible { outline: 2px solid var(--zm-accent); outline-offset: 3px; }
+.ai-problem-drawer :is(.btn, .btn-alt):disabled { opacity: .55; cursor: not-allowed; }
+@media (prefers-reduced-motion: reduce) { .ai-problem-btn, .ai-problem-drawer, .ai-problem-drawer * { animation: none !important; transition: none !important; } }

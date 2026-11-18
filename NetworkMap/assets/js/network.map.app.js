@@ -58,6 +58,11 @@
     root.classList.add("knm-root");
     root.innerHTML = `
       <section id="knm-filters" class="knm-panel knm-filters-panel">
+        <div class="knm-filter-heading">
+          <span class="zm-eyebrow">Network visibility</span>
+          <h2>Explore your connections</h2>
+          <p>Trace traffic between hosts and focus on the connections that matter.</p>
+        </div>
         <div class="knm-form-grid">
           <label class="knm-form-field">
             <span>Host scope</span>

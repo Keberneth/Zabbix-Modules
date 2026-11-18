@@ -258,6 +258,7 @@ ob_start();
 
     <div class="ai-header">
         <div>
+            <span class="zm-eyebrow"><?= $h(_('Incident intelligence')) ?></span>
             <h1><?= $h($data['title'] ?? _('Trigger Correlation')) ?></h1>
             <p class="ai-muted"><?= $h(_('Correlate trigger problems across hosts: raise one combined problem when related triggers fire together, or escalate existing problems while a condition holds.')) ?></p>
         </div>
@@ -283,7 +284,7 @@ ob_start();
         <button type="button" role="tab" class="ai-settings-tab" data-tab="help" aria-selected="false" tabindex="-1"><?= $h(_('Help')) ?></button>
     </nav>
     <noscript>
-        <style>.ai-settings-tabs{display:none!important}.ai-tab-section{display:block!important}</style>
+        <style>#tc-root .ai-settings-tabs{display:none!important}#tc-root .ai-tab-section{display:block!important}</style>
     </noscript>
 
     <!-- ── DASHBOARD ─────────────────────────────────────────────────── -->

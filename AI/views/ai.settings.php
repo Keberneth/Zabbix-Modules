@@ -260,6 +260,7 @@ ob_start();
 <div id="ai-settings-root" class="ai-page ai-settings-page" data-ai-theme="<?= $h($ai_theme) ?>" data-test-provider-url="<?= $h($test_provider_url) ?>" data-test-provider-csrf="<?= $h($test_provider_csrf) ?>" data-test-netbox-url="<?= $h($test_netbox_url) ?>" data-test-netbox-csrf="<?= $h($test_netbox_csrf) ?>" data-csrf-field-name="<?= $h($csrf_field_name) ?>">
     <div class="ai-header">
         <div>
+            <p class="zm-eyebrow"><?= $h(_('Assistant')) ?></p>
             <h1><?= $h($data['title'] ?? _('AI settings')) ?></h1>
             <p class="ai-muted">Configure providers, prompt policy, integrations, redaction, and local logging.</p>
         </div>

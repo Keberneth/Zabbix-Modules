@@ -192,6 +192,7 @@ $runner_cli = '/usr/bin/php /usr/share/zabbix/modules/NetBoxSync/bin/netboxsync.
 <div id="nbs-settings-root" class="nbs-page nbs-settings-page" data-nbs-theme="<?= $h($nbs_theme) ?>">
     <div class="nbs-header">
         <div>
+            <p class="zm-eyebrow"><?= $h(_('Integrations')) ?></p>
             <h1><?= $h($data['title'] ?? _('NetBox sync settings')) ?></h1>
             <p class="nbs-muted"><?= $h(_('Configure integrations, choose what to sync, and review the latest run. Save settings applies changes from every tab. Run now uses the saved settings.')) ?></p>
         </div>

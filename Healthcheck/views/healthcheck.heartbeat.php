@@ -69,6 +69,7 @@ ob_start();
      data-i18n-unexpected="<?= $h(_('Unexpected response from server.')) ?>">
     <div class="hc-header">
         <div>
+            <p class="zm-eyebrow"><?= $h(_('Monitoring')) ?></p>
             <h1><?= $h($data['title'] ?? _('Healthcheck heartbeat')) ?></h1>
             <p class="hc-muted">
                 <?= $h(_('Latest health state per configured check, with the most recent step-level details and recent failures.')) ?>

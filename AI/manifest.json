@@ -82,6 +82,7 @@
   },
   "assets": {
     "css": [
+      "module-theme.css",
       "ai.css",
       "ai.config.inline.css"
     ],

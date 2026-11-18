@@ -53,6 +53,7 @@ ob_start();
 
     <div class="vr-head">
         <div>
+            <p class="zm-eyebrow"><?= $esc(_('Data protection')) ?></p>
             <?php /* Zabbix already renders the page <h1>; a second one would
                      give the page two top-level headings. */ ?>
             <p class="vr-head-title"><?= $esc(_('Veeam Backup Report')) ?></p>

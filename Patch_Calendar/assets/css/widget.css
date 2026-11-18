@@ -613,3 +613,171 @@ html[color-scheme="dark"] .pc-hint {
 .pc-hint-day-list .pc-chip {
 	cursor: default;
 }
+
+/* Shared module theme; window colours and no-data hatching stay semantic. */
+:root .patch-calendar,
+:root .pc-hint,
+html[color-scheme="dark"] .patch-calendar,
+html[color-scheme="dark"] .pc-hint {
+	--pc-border: var(--zm-border);
+	--pc-muted: var(--zm-muted);
+	--pc-shade: var(--zm-surface-muted);
+	--pc-outside: var(--zm-bg);
+	--pc-accent: var(--zm-accent);
+	--pc-accent-text: var(--zm-on-accent);
+	--pc-today-bg: var(--zm-accent-soft);
+	--pc-active: var(--zm-success);
+	--pc-upcoming: var(--zm-accent);
+	--pc-past: var(--zm-muted);
+	color: var(--zm-text);
+}
+
+.patch-calendar {
+	background: var(--zm-surface);
+	border-radius: var(--zm-radius-sm);
+}
+
+.patch-calendar .pc-toolbar {
+	gap: 8px 12px;
+	padding: 8px 4px 12px;
+}
+
+.patch-calendar .pc-title {
+	font-size: 16px;
+	letter-spacing: -0.02em;
+}
+
+.patch-calendar .pc-nav { gap: 4px; }
+
+.patch-calendar .pc-nav button {
+	border-radius: var(--zm-radius-sm);
+	border-color: var(--zm-border-strong);
+	background: var(--zm-surface);
+	color: var(--zm-text);
+}
+
+.patch-calendar .pc-nav button:hover:not(:disabled) {
+	background: var(--zm-accent-soft);
+	color: var(--zm-accent);
+}
+
+.patch-calendar .pc-nav button:disabled { opacity: 0.5; }
+
+.patch-calendar .pc-views {
+	gap: 3px;
+	padding: 3px;
+	border: 1px solid var(--zm-border);
+	border-radius: var(--zm-radius-sm);
+	background: var(--zm-surface-muted);
+}
+
+.patch-calendar .pc-views button {
+	height: 28px;
+	border: 1px solid transparent;
+	border-radius: 6px;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.patch-calendar .pc-views button.pc-view-selected {
+	border-color: var(--pc-accent);
+	background: var(--pc-accent);
+	color: var(--pc-accent-text);
+}
+
+.patch-calendar :is(button, [tabindex]):focus-visible,
+.pc-hint :is(button, [tabindex]):focus-visible {
+	outline: 2px solid var(--zm-accent);
+	outline-offset: 2px;
+}
+
+.patch-calendar .pc-body {
+	border: 1px solid var(--pc-border);
+	border-radius: var(--zm-radius-sm);
+}
+
+.patch-calendar .pc-month-head {
+	background: var(--zm-surface-muted);
+	padding: 4px 0;
+}
+
+.patch-calendar .pc-weekday {
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.06em;
+}
+
+.patch-calendar .pc-day {
+	padding: 4px;
+}
+
+.patch-calendar .pc-day-head {
+	height: 22px;
+	line-height: 20px;
+}
+
+.patch-calendar .pc-day-number {
+	min-width: 20px;
+	border-radius: 6px;
+	font-variant-numeric: tabular-nums;
+}
+
+.patch-calendar .pc-chip,
+.patch-calendar .pc-entry,
+.pc-hint .pc-chip {
+	border-radius: 4px;
+}
+
+.patch-calendar .pc-week-day-head {
+	background: var(--zm-surface-muted);
+	padding: 8px 2px;
+}
+
+.patch-calendar .pc-week-entries { gap: 6px; padding: 6px; }
+.patch-calendar .pc-week .pc-entry { padding: 6px 12px 6px 7px; }
+.patch-calendar .pc-agenda-day { padding: 10px; }
+.patch-calendar .pc-agenda .pc-entry { padding: 8px 16px 8px 10px; }
+
+.patch-calendar .pc-empty {
+	margin: 12px;
+	padding: 28px 12px;
+	border: 1px dashed var(--zm-border-strong);
+	border-radius: var(--zm-radius-sm);
+	background: var(--zm-surface-muted);
+	line-height: 1.6;
+}
+
+.pc-hint {
+	background: var(--zm-surface);
+	padding: 10px;
+	border-radius: var(--zm-radius-sm);
+}
+
+.pc-hint .pc-hint-header {
+	gap: 8px;
+	margin-bottom: 12px;
+	padding-bottom: 10px;
+	border-bottom: 1px solid var(--pc-border);
+	flex-wrap: wrap;
+}
+
+.pc-hint .pc-hint-name { font-size: 14px; }
+.pc-hint .pc-hint-rows { gap: 7px 14px; }
+.pc-hint .pc-badge { padding: 2px 8px; font-weight: 600; }
+.pc-hint .pc-badge-active { color: var(--zm-success); background: var(--zm-success-soft); }
+.pc-hint .pc-badge-upcoming { color: var(--zm-accent); background: var(--zm-accent-soft); }
+.pc-hint .pc-badge-past { color: var(--zm-muted); background: var(--zm-surface-muted); }
+
+@container (max-width: 560px) {
+	.patch-calendar .pc-toolbar { gap: 6px; padding: 4px 0 8px; }
+	.patch-calendar .pc-title { font-size: 14px; }
+	.patch-calendar .pc-day { padding: 2px; }
+	.patch-calendar .pc-day-head { height: 18px; line-height: 18px; }
+	.patch-calendar .pc-week-entries { padding: 3px; gap: 3px; }
+	.patch-calendar .pc-agenda .pc-entry { gap: 6px; padding: 6px 12px 6px 8px; }
+}
+
+@container (max-width: 380px) {
+	.patch-calendar .pc-views button { padding: 0 6px; height: 24px; }
+	.patch-calendar .pc-views { gap: 1px; padding: 2px; }
+}

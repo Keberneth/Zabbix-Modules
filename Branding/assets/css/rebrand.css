@@ -1,75 +1,65 @@
-/*
- * Branding (Rebrand) module styles.
- * Convention A theming: light values inline below, paired dark overrides under
- * html[theme="dark-theme"] / html[theme="hc-dark"] / .rebrand-page[data-rebrand-theme="dark"].
- * Every rule that sets a color/background/border has a matching dark override.
- */
-
-.rebrand-banner {
-	padding: 10px 12px;
-	border-radius: 6px;
-	margin-bottom: 12px;
-	font-weight: 600;
+/* Branding uses the same visual roles as every module and respects Zabbix's theme. */
+.rebrand-page { max-width: 1480px; color: var(--zm-text); line-height: 1.5; }
+.rebrand-header {
+    padding: 24px;
+    margin-bottom: 20px;
+    border: 1px solid var(--zm-border);
+    border-top: 3px solid var(--zm-accent);
+    border-radius: var(--zm-radius);
+    background: var(--zm-surface);
+    box-shadow: var(--zm-shadow);
 }
-
-.rebrand-banner-error {
-	color: #b22f2f;
-	background: #fff1f0;
-	border: 1px solid #f2c2bf;
-}
-
-.rebrand-banner-warning {
-	color: #c08a1f;
-	background: #fff8dd;
-	border: 1px solid #f1c40f;
-}
-
-.rebrand-remove-label {
-	display: block;
-	margin-bottom: 8px;
-	color: #c14545;
-}
-
-.rebrand-logo-preview {
-	display: block;
-	margin-bottom: 8px;
-	padding: 8px;
-	border-radius: 4px;
-	background: #2b3648;
-	border: 1px solid #dfe4ea;
-}
-
-.rebrand-logo-preview-compact {
-	padding: 4px;
-}
-
-/* --- Dark theme overrides --- */
-
-html[theme="dark-theme"] .rebrand-banner-error,
-html[theme="hc-dark"] .rebrand-banner-error,
-.rebrand-page[data-rebrand-theme="dark"] .rebrand-banner-error {
-	color: #f0a8a4;
-	background: #3d1f1f;
-	border-color: #6b3030;
-}
-
-html[theme="dark-theme"] .rebrand-banner-warning,
-html[theme="hc-dark"] .rebrand-banner-warning,
-.rebrand-page[data-rebrand-theme="dark"] .rebrand-banner-warning {
-	color: #e0c060;
-	background: #3d3520;
-	border-color: #7a6a1e;
-}
-
-html[theme="dark-theme"] .rebrand-remove-label,
-html[theme="hc-dark"] .rebrand-remove-label,
-.rebrand-page[data-rebrand-theme="dark"] .rebrand-remove-label {
-	color: #e08a8a;
-}
-
-html[theme="dark-theme"] .rebrand-logo-preview,
-html[theme="hc-dark"] .rebrand-logo-preview,
-.rebrand-page[data-rebrand-theme="dark"] .rebrand-logo-preview {
-	background: #1f2c3d;
-	border-color: #4a5568;
+.rebrand-header h1 { margin: 0 0 8px; color: var(--zm-text); font-size: 26px; line-height: 1.2; letter-spacing: -.025em; font-weight: 700; }
+.rebrand-description { margin: 0; color: var(--zm-muted); max-width: 78ch; }
+.rebrand-assets-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin-bottom: 20px; }
+.rebrand-card { padding: 22px; border: 1px solid var(--zm-border); border-radius: var(--zm-radius); background: var(--zm-surface); box-shadow: var(--zm-shadow); min-width: 0; }
+.rebrand-card h2 { margin: 0 0 18px; color: var(--zm-text); font-size: 17px; line-height: 1.4; font-weight: 700; letter-spacing: -.015em; }
+.rebrand-upload-fields { padding: 18px; border: 1px dashed var(--zm-border-strong); border-radius: var(--zm-radius-sm); background: var(--zm-surface-muted); }
+.rebrand-page .grey { color: var(--zm-muted); line-height: 1.6; }
+.rebrand-page input[type="file"] { box-sizing: border-box; max-width: 100%; height: auto; padding: 8px; border: 1px solid var(--zm-border-strong); border-radius: var(--zm-radius-sm); background: var(--zm-surface); color: var(--zm-text); }
+.rebrand-page input[type="file"]::file-selector-button { margin-right: 12px; padding: 7px 12px; border: 1px solid var(--zm-border-strong); border-radius: 6px; background: var(--zm-accent-soft); color: var(--zm-text); cursor: pointer; font-weight: 600; }
+.rebrand-page input[type="text"] { box-sizing: border-box; max-width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid var(--zm-border-strong); border-radius: var(--zm-radius-sm); background: var(--zm-surface); color: var(--zm-text); }
+.rebrand-page input::placeholder { color: var(--zm-muted); opacity: 1; }
+.rebrand-page input:disabled { opacity: .55; cursor: not-allowed; }
+.rebrand-page .radio-list-control { border-radius: var(--zm-radius-sm); }
+.rebrand-page .radio-list-control input + label { background: var(--zm-surface-muted); color: var(--zm-text); border-color: var(--zm-border-strong); padding: 7px 14px; }
+.rebrand-page .radio-list-control input:checked + label { background: var(--zm-accent); color: var(--zm-on-accent); border-color: var(--zm-accent); }
+.rebrand-page :is(input, button, a):focus-visible { outline: 2px solid var(--zm-accent); outline-offset: 3px; }
+.rebrand-page .table-forms { margin: 0; max-width: 100%; min-width: 0; background: transparent; }
+.rebrand-page .table-forms > li { padding-top: 10px; padding-bottom: 10px; }
+.rebrand-identity-card { margin-bottom: 20px; }
+.rebrand-actions { padding: 14px 18px; border: 1px solid var(--zm-border); border-radius: var(--zm-radius-sm); background: var(--zm-surface); box-shadow: var(--zm-shadow); }
+.rebrand-actions .tfoot-buttons { padding: 0; margin: 0; background: transparent; border: 0; }
+.rebrand-page .rebrand-actions button[type="submit"] { min-height: 38px; padding: 8px 16px; border: 1px solid var(--zm-accent); border-radius: var(--zm-radius-sm); background: var(--zm-accent); color: var(--zm-on-accent); font-weight: 600; }
+.rebrand-page .rebrand-actions button[type="submit"]:hover { background: var(--zm-accent-hover); }
+.rebrand-banner { padding: 12px 14px; border-radius: var(--zm-radius-sm); margin-bottom: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.rebrand-banner-error { color: var(--zm-danger); background: var(--zm-danger-soft); border: 1px solid var(--zm-danger); }
+.rebrand-banner-warning { color: var(--zm-warning); background: var(--zm-warning-soft); border: 1px solid var(--zm-warning); }
+.rebrand-remove-label { display: block; margin-bottom: 12px; color: var(--zm-danger); }
+.rebrand-logo-preview { display: block; margin-bottom: 12px; padding: 12px; border-radius: var(--zm-radius-sm); background: var(--zm-surface); border: 1px solid var(--zm-border-strong); object-fit: contain; }
+.rebrand-logo-preview-compact { padding: 8px; }
+@media (max-width: 800px) {
+    .rebrand-assets-grid { grid-template-columns: minmax(0, 1fr); }
+    .rebrand-header, .rebrand-card { padding: 18px; }
+    .rebrand-header h1 { font-size: 23px; }
+    .rebrand-upload-fields { padding: 14px; }
+    .rebrand-identity-card .table-forms,
+    .rebrand-identity-card .table-forms > li,
+    .rebrand-identity-card .table-forms-td-left,
+    .rebrand-identity-card .table-forms-td-right {
+        display: block;
+        box-sizing: border-box;
+        float: none;
+        margin-left: 0;
+        padding-left: 0;
+        padding-right: 0;
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+        text-align: left;
+    }
+    .rebrand-identity-card .table-forms-td-left { padding-bottom: 8px; }
+    .rebrand-identity-card .table-forms input[type="text"] { width: 100% !important; }
+    .rebrand-identity-card .radio-list-control { display: flex; flex-wrap: wrap; max-width: 100%; }
+    .rebrand-identity-card .grey { overflow-wrap: anywhere; }
 }

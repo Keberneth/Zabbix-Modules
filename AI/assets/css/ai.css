@@ -453,7 +453,7 @@ html[theme="hc-dark"] .ai-msg-action .ai-msg-title,
 }
 
 /* ── Buttons ── */
-.btn-alt {
+:where(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .btn-alt {
     display: inline-block;
     padding: 6px 12px;
     border: 1px solid var(--ai-btn-border);
@@ -464,7 +464,7 @@ html[theme="hc-dark"] .ai-msg-action .ai-msg-title,
     cursor: pointer;
 }
 
-.btn-alt:hover {
+:where(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .btn-alt:hover {
     text-decoration: none;
     background: var(--ai-bg-accent);
 }
@@ -1580,3 +1580,172 @@ html[theme="hc-dark"] .ai-md .ai-link-btn:focus,
 #ai-settings-form[data-active-tab="security"] .ai-tab-section[data-tab="security"] {
     display: block;
 }
+
+/* Shared module theme. Keep visual roles in sync through --zm-* tokens. */
+html .ai-page.ai-page:not(#tc-root) {
+    --ai-bg: var(--zm-surface);
+    --ai-bg-subtle: var(--zm-surface-muted);
+    --ai-bg-accent: var(--zm-surface-muted);
+    --ai-fg: var(--zm-text);
+    --ai-fg-muted: var(--zm-muted);
+    --ai-border: var(--zm-border);
+    --ai-border-light: var(--zm-border);
+    --ai-btn-bg: var(--zm-surface);
+    --ai-btn-border: var(--zm-border-strong);
+    --ai-input-bg: var(--zm-surface);
+    --ai-input-border: var(--zm-border-strong);
+    --ai-user-bg: var(--zm-accent-soft);
+    --ai-assistant-bg: var(--zm-surface-muted);
+    --ai-warning-bg: var(--zm-warning-soft);
+    --ai-warning-border: var(--zm-warning);
+    --ai-ok-bg: var(--zm-success-soft);
+    --ai-ok-border: var(--zm-success);
+    --ai-error-bg: var(--zm-danger-soft);
+    --ai-error-border: var(--zm-danger);
+    color: var(--zm-text);
+    line-height: 1.5;
+}
+
+.ai-page:not(#tc-root) .ai-header {
+    padding: 24px;
+    border: 1px solid var(--zm-border);
+    border-top: 3px solid var(--zm-accent);
+    border-radius: var(--zm-radius);
+    background: var(--zm-surface);
+    box-shadow: var(--zm-shadow);
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+}
+.ai-page:not(#tc-root) .ai-header > div:first-child { flex: 1 1 360px; min-width: 0; }
+.ai-page:not(#tc-root) .ai-header h1 { margin: 0 0 8px; font-size: 26px; line-height: 1.2; letter-spacing: -.025em; font-weight: 700; }
+.ai-page:not(#tc-root) .ai-header .ai-muted { max-width: 78ch; line-height: 1.6; }
+.ai-page:not(#tc-root) .ai-header-actions { align-items: center; }
+.ai-page:not(#tc-root) .ai-card { border-radius: var(--zm-radius); padding: 22px; box-shadow: var(--zm-shadow); min-width: 0; }
+.ai-page:not(#tc-root) .ai-card h2 { margin-bottom: 18px; font-size: 17px; line-height: 1.4; font-weight: 700; letter-spacing: -.015em; }
+.ai-page:not(#tc-root) .ai-repeat-row { border-radius: var(--zm-radius-sm); padding: 18px; }
+.ai-page:not(#tc-root) :is(.ai-input, .ai-textarea, select) { border-radius: var(--zm-radius-sm); min-height: 38px; padding: 8px 10px; font: inherit; }
+.ai-page:not(#tc-root) :is(.ai-input, .ai-textarea)::placeholder { color: var(--zm-muted); opacity: 1; }
+.ai-page:not(#tc-root) :is(.ai-input, .ai-textarea, select):focus { outline: 2px solid var(--zm-accent); outline-offset: 2px; border-color: var(--zm-accent); box-shadow: var(--zm-focus); }
+.ai-page:not(#tc-root) :is(.btn, .btn-alt, .ai-btn-primary, .ai-btn-danger) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    min-height: 36px;
+    padding: 7px 14px;
+    border: 1px solid var(--zm-border-strong);
+    border-radius: var(--zm-radius-sm);
+    background: var(--zm-surface);
+    color: var(--zm-text);
+    line-height: 1.4;
+    font: inherit;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.ai-page:not(#tc-root) :is(.btn, .btn-alt, .ai-btn-primary, .ai-btn-danger):disabled { opacity: .55; cursor: not-allowed; }
+.ai-page:not(#tc-root) :is(.ai-status, .ai-warning, .ai-note-box) { border-radius: var(--zm-radius-sm); }
+.ai-page:not(#tc-root) .ai-empty-state { padding: 28px 20px; margin: 0; border: 1px dashed var(--zm-border-strong); border-radius: var(--zm-radius-sm); background: var(--zm-surface-muted); text-align: center; font-style: normal; color: var(--zm-muted); }
+.ai-page:not(#tc-root) .ai-log-grid-card { padding: 0; }
+.ai-page:not(#tc-root) .ai-log-tabs { gap: 5px; padding: 5px; border: 1px solid var(--zm-border); border-radius: 12px; background: var(--zm-surface-muted); }
+.ai-page:not(#tc-root) .ai-log-tab { min-height: 36px; padding: 8px 15px; margin: 0; border: 1px solid transparent; border-radius: var(--zm-radius-sm); background: transparent; color: var(--zm-muted); opacity: 1; font-weight: 600; }
+.ai-page:not(#tc-root) .ai-log-tab:hover { background: var(--zm-surface); color: var(--zm-text); opacity: 1; }
+.ai-page:not(#tc-root) .ai-log-tab.is-active { margin: 0; border-color: var(--zm-border); background: var(--zm-surface); color: var(--zm-accent); box-shadow: var(--zm-shadow); }
+.ai-page:not(#tc-root) .ai-log-grid tbody td { padding: 10px; }
+.ai-page:not(#tc-root) .ai-log-col-filter { border-radius: 6px; }
+.ai-page:not(#tc-root) .ai-log-empty { padding: 36px 20px; }
+@media (max-width: 720px) {
+    .ai-page:not(#tc-root) .ai-header { padding: 18px; }
+    .ai-page:not(#tc-root) .ai-header > div:first-child { flex-basis: auto; }
+    .ai-page:not(#tc-root) .ai-card { padding: 16px; }
+    .ai-page:not(#tc-root) .ai-log-grid-card { padding: 0; }
+    .ai-page:not(#tc-root) .ai-header h1 { font-size: 23px; }
+    .ai-page:not(#tc-root) .ai-log-filter-actions { flex-wrap: wrap; }
+}
+
+.ai-page:not(#tc-root) .ai-settings-tabs {
+    gap: 5px;
+    padding: 5px;
+    border: 1px solid var(--zm-border);
+    border-radius: 12px;
+    background: var(--zm-surface-muted);
+}
+.ai-page:not(#tc-root) .ai-settings-tab {
+    min-height: 36px;
+    margin: 0;
+    padding: 8px 15px;
+    border: 1px solid transparent;
+    border-radius: var(--zm-radius-sm);
+    background: transparent;
+    color: var(--zm-muted);
+    opacity: 1;
+}
+.ai-page:not(#tc-root) .ai-settings-tab:hover { background: var(--zm-surface); color: var(--zm-text); opacity: 1; }
+.ai-page:not(#tc-root) .ai-settings-tab.is-active { margin: 0; background: var(--zm-surface); color: var(--zm-accent); border-color: var(--zm-border); box-shadow: var(--zm-shadow); }
+.ai-page:not(#tc-root) .ai-btn-danger { background: var(--zm-danger); color: var(--zm-on-accent); border-color: var(--zm-danger); }
+.ai-page:not(#tc-root) .ai-btn-danger:hover:not(:disabled) { background: var(--zm-danger); color: var(--zm-on-accent); box-shadow: var(--zm-focus); }
+.ai-page:not(#tc-root) .ai-grid { grid-template-columns: minmax(290px, 360px) minmax(0, 1fr); align-items: start; }
+.ai-page:not(#tc-root) .ai-transcript { min-height: 440px; padding: 18px; border-radius: var(--zm-radius-sm); }
+.ai-page:not(#tc-root) .ai-msg { border-radius: 12px; box-shadow: var(--zm-shadow); }
+.ai-page:not(#tc-root) .ai-msg-title { padding: 10px 14px; font-size: 12px; letter-spacing: .025em; }
+.ai-page:not(#tc-root) .ai-msg-body { padding: 16px; line-height: 1.65; }
+.ai-page:not(#tc-root) .ai-msg-user .ai-msg-title { color: var(--zm-accent); }
+.ai-page:not(#tc-root) .ai-msg-action .ai-msg-title { background: var(--zm-success-soft); border-left-color: var(--zm-success); }
+.ai-page:not(#tc-root) .ai-section-header { margin-bottom: 16px; }
+.ai-page:not(#tc-root) .ai-section-header h2 { margin-bottom: 0; }
+.ai-page:not(#tc-root) .ai-sticky-actions { z-index: 2; padding: 14px; border: 1px solid var(--zm-border); border-radius: var(--zm-radius-sm); background: var(--zm-surface); box-shadow: var(--zm-shadow); }
+.ai-page:not(#tc-root) .ai-defaults-block { border-left-color: var(--zm-accent); border-radius: var(--zm-radius-sm); }
+.ai-page:not(#tc-root) :is(.ai-faq-toggle, .ai-log-col-filter) { border-color: var(--zm-border-strong); }
+.ai-page:not(#tc-root) :is(.ai-recommended-badge, .ai-log-status-ok, .ai-test-provider-status.ai-status-ok) { color: var(--zm-success); }
+.ai-page:not(#tc-root) :is(.ai-log-status-error, .ai-test-provider-status.ai-status-error, .ai-checkbox-danger, .ai-checkbox-danger:has(input:checked), .ai-danger-notice strong) { color: var(--zm-danger); }
+.ai-page:not(#tc-root) :is(.ai-log-status-warn, .ai-test-provider-status.ai-status-warn, .ai-provider-temperature-hint.ai-status-warn) { color: var(--zm-warning); }
+.ai-page:not(#tc-root) .ai-danger-notice { border-left-color: var(--zm-danger); border-radius: var(--zm-radius-sm); }
+.ai-page:not(#tc-root) .ai-log-path-error { color: var(--zm-danger); }
+@media (max-width: 1100px) { .ai-page:not(#tc-root) .ai-grid { grid-template-columns: 1fr; } }
+
+html :is(.ai-problem-drawer, .ai-config-drawer) {
+    --ai-bg: var(--zm-surface);
+    --ai-bg-subtle: var(--zm-surface-muted);
+    --ai-bg-accent: var(--zm-surface-muted);
+    --ai-fg: var(--zm-text);
+    --ai-fg-muted: var(--zm-muted);
+    --ai-border: var(--zm-border);
+    --ai-border-light: var(--zm-border);
+    --ai-btn-bg: var(--zm-surface);
+    --ai-btn-border: var(--zm-border-strong);
+    --ai-input-bg: var(--zm-surface);
+    --ai-input-border: var(--zm-border-strong);
+    --ai-user-bg: var(--zm-accent-soft);
+    --ai-assistant-bg: var(--zm-surface-muted);
+    --ai-warning-bg: var(--zm-warning-soft);
+    --ai-warning-border: var(--zm-warning);
+    --ai-ok-bg: var(--zm-success-soft);
+    --ai-ok-border: var(--zm-success);
+    --ai-error-bg: var(--zm-danger-soft);
+    --ai-error-border: var(--zm-danger);
+    color: var(--zm-text);
+    line-height: 1.5;
+}
+
+.ai-page:not(#tc-root) :is(.btn, .btn-alt):hover:not(:disabled) { border-color: var(--zm-accent); background: var(--zm-accent-soft); color: var(--zm-text); }
+.ai-page:not(#tc-root) [hidden] { display: none !important; }
+.ai-page:not(#tc-root) :is(.ai-sticky-actions button[type="submit"], #ai-send-button, #ai-log-apply) { background: var(--zm-accent); color: var(--zm-on-accent); border-color: var(--zm-accent); }
+.ai-page:not(#tc-root) :is(.ai-sticky-actions button[type="submit"], #ai-send-button, #ai-log-apply):hover:not(:disabled) { background: var(--zm-accent-hover); color: var(--zm-on-accent); }
+.ai-page:not(#tc-root) .ai-btn-danger:hover:not(:disabled) { background: var(--zm-danger); color: var(--zm-on-accent); border-color: var(--zm-danger); }
+
+/* Generated replies and both drawers use the same palette as the surrounding UI. */
+:is(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .ai-dropdown-list { border-radius: 0 0 var(--zm-radius-sm) var(--zm-radius-sm); box-shadow: var(--zm-shadow); }
+:is(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .ai-msg-action .ai-msg-title { background: var(--zm-success-soft); border-left-color: var(--zm-success); }
+:is(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .ai-md :is(.ai-md-table th, .ai-md-code-block, .ai-md-code-inline) { background: var(--zm-surface-muted); color: var(--zm-text); }
+:is(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .ai-md .ai-md-img { background: var(--zm-surface); }
+:is(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .ai-md .ai-md-link { color: var(--zm-accent); }
+:is(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .ai-md .ai-md-link:hover { color: var(--zm-accent-hover); }
+:is(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .ai-md .ai-download-btn { background: var(--zm-accent); color: var(--zm-on-accent); border: 1px solid var(--zm-accent); border-radius: var(--zm-radius-sm); box-shadow: var(--zm-shadow); }
+:is(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .ai-md .ai-download-btn:is(:hover, :focus) { background: var(--zm-accent-hover); color: var(--zm-on-accent); box-shadow: var(--zm-focus); }
+:is(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .ai-md .ai-download-btn:active { box-shadow: none; }
+:is(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .ai-md .ai-download-icon { color: var(--zm-on-accent); }
+:is(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .ai-md .ai-link-btn { color: var(--zm-accent); border-color: var(--zm-accent); border-radius: var(--zm-radius-sm); }
+:is(.ai-page:not(#tc-root), .ai-problem-drawer, .ai-config-drawer) .ai-md .ai-link-btn:is(:hover, :focus) { background: var(--zm-accent); color: var(--zm-on-accent); box-shadow: var(--zm-focus); }
+.ai-page:not(#tc-root) :is(.ai-log-tab, .ai-settings-tab):focus-visible { outline: 2px solid var(--zm-accent); outline-offset: 2px; }

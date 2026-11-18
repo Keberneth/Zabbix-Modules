@@ -30,6 +30,7 @@
   },
   "assets": {
     "css": [
+      "module-theme.css",
       "healthcheck.css"
     ],
     "js": [

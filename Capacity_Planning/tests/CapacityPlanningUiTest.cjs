@@ -8,6 +8,7 @@ const {chromium} = require('playwright');
 const root = path.resolve(__dirname, '..');
 const jsAsset = path.join(root, 'assets', 'js', 'capacity-planning-1.4.3-20261031.3.js');
 const cssAsset = path.join(root, 'assets', 'css', 'capacity-planning-1.4.3-20261031.3.css');
+const themeAsset = path.join(root, 'assets', 'css', 'module-theme.css');
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
 	|| 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const MODULE_VERSION = '1.4.3';
@@ -299,6 +300,7 @@ async function run() {
 			status: 200, contentType: 'text/html', body: settingsDocument(true)
 		}));
 		await adminPage.goto('http://settings-admin.test/zabbix.php?action=capacity.planning.view&tab=settings');
+		await adminPage.addStyleTag({path: themeAsset});
 		await adminPage.addStyleTag({path: cssAsset});
 		await adminPage.addScriptTag({path: jsAsset});
 		await adminPage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
@@ -407,6 +409,7 @@ async function run() {
 			status: 200, contentType: 'text/html', body: settingsDocument(false, false, 0)
 		}));
 		await readOnlyPage.goto('http://settings-user.test/zabbix.php?action=capacity.planning.view&tab=settings');
+		await readOnlyPage.addStyleTag({path: themeAsset});
 		await readOnlyPage.addStyleTag({path: cssAsset});
 		await readOnlyPage.addScriptTag({path: jsAsset});
 		await readOnlyPage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
@@ -436,6 +439,7 @@ async function run() {
 			status: 200, contentType: 'text/html', body: settingsDocument(true)
 		}));
 		await statusFailurePage.goto('http://settings-fallback.test/zabbix.php?action=capacity.planning.view&tab=settings');
+		await statusFailurePage.addStyleTag({path: themeAsset});
 		await statusFailurePage.addStyleTag({path: cssAsset});
 		await statusFailurePage.addScriptTag({path: jsAsset});
 		await statusFailurePage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
@@ -481,6 +485,7 @@ async function run() {
 				status: 200, contentType: 'text/html', body: settingsDocument(true)
 			}));
 			await failurePage.goto(`http://${host}/zabbix.php?action=capacity.planning.view&tab=settings`);
+			await failurePage.addStyleTag({path: themeAsset});
 			await failurePage.addStyleTag({path: cssAsset});
 			await failurePage.addScriptTag({path: jsAsset});
 			await failurePage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
@@ -528,6 +533,7 @@ async function run() {
 			status: 200, contentType: 'text/html', body: settingsDocument(true)
 		}));
 		await noProgressPage.goto('http://settings-no-progress.test/zabbix.php?action=capacity.planning.view&tab=settings');
+		await noProgressPage.addStyleTag({path: themeAsset});
 		await noProgressPage.addStyleTag({path: cssAsset});
 		await noProgressPage.addScriptTag({path: jsAsset});
 		await noProgressPage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
@@ -665,6 +671,7 @@ async function run() {
 			status: 200, contentType: 'text/html', body: appDocument('disks')
 		}));
 		await scopePage.goto('http://scope.test/zabbix.php?action=capacity.planning.view&tab=disks');
+		await scopePage.addStyleTag({path: themeAsset});
 		await scopePage.addStyleTag({path: cssAsset});
 		await scopePage.addScriptTag({path: jsAsset});
 		await scopePage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
@@ -831,6 +838,7 @@ async function run() {
 			'Refresh now should request inventory only after the applied scope resolves completely again.');
 
 		await scopePage.goto('http://scope.test/zabbix.php?action=capacity.planning.view&tab=disks&group=wide');
+		await scopePage.addStyleTag({path: themeAsset});
 		await scopePage.addStyleTag({path: cssAsset});
 		await scopePage.addScriptTag({path: jsAsset});
 		await scopePage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
@@ -937,6 +945,7 @@ async function run() {
 			body: appDocument('disks')
 		}));
 		await poolPage.goto('http://forecast-pool.test/zabbix.php?action=capacity.planning.view&tab=disks');
+		await poolPage.addStyleTag({path: themeAsset});
 		await poolPage.addStyleTag({path: cssAsset});
 		await poolPage.addScriptTag({path: jsAsset});
 		await poolPage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
@@ -1032,6 +1041,7 @@ async function run() {
 			status: 200, contentType: 'text/html', body: appDocument('disks')
 		}));
 		await page.goto('http://capacity.test/zabbix.php?action=capacity.planning.view&tab=resources');
+		await page.addStyleTag({path: themeAsset});
 		await page.addStyleTag({path: cssAsset});
 		await page.addScriptTag({path: jsAsset});
 		await page.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));
@@ -1349,6 +1359,7 @@ async function run() {
 			status: 200, contentType: 'text/html', body: appDocument('disks')
 		}));
 		await patternPage.goto('http://pattern.test/zabbix.php?action=capacity.planning.view&tab=disks');
+		await patternPage.addStyleTag({path: themeAsset});
 		await patternPage.addStyleTag({path: cssAsset});
 		await patternPage.addScriptTag({path: jsAsset});
 		await patternPage.evaluate(() => document.dispatchEvent(new Event('DOMContentLoaded')));

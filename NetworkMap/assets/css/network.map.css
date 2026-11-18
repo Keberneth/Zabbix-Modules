@@ -1,4 +1,4 @@
-/* Network Map - frontend module styles (theme-aware) */
+/* Network Map - frontend module styles (theme-aware). */
 
 #network-map-root.knm-root {
   --knm-panel-bg: #ffffff;
@@ -607,5 +607,166 @@ html.knm-fullscreen-lock body {
   border-radius: 3px;
   font-size: 12px;
   padding: 1px 4px;
+}
+
+/* Shared module theme. Graph category colours remain unchanged. */
+:root #network-map-root.knm-root {
+  --knm-panel-bg: var(--zm-surface);
+  --knm-panel-border: var(--zm-border);
+  --knm-panel-shadow: var(--zm-shadow);
+  --knm-input-bg: var(--zm-surface);
+  --knm-input-border: var(--zm-border-strong);
+  --knm-input-focus: var(--zm-accent);
+  --knm-text: var(--zm-text);
+  --knm-muted: var(--zm-muted);
+  --knm-danger: var(--zm-danger);
+  --knm-primary-bg: var(--zm-accent);
+  --knm-primary-border: var(--zm-accent);
+  --knm-primary-hover: var(--zm-accent-hover);
+  --knm-primary-text: var(--zm-on-accent);
+  --knm-secondary-bg: var(--zm-surface);
+  --knm-secondary-border: var(--zm-border-strong);
+  --knm-secondary-text: var(--zm-text);
+  --knm-secondary-hover: var(--zm-accent-soft);
+  --knm-ac-hover-bg: var(--zm-accent-soft);
+  --knm-graph-bg: var(--zm-surface-muted);
+  --knm-overlay-bg: var(--zm-surface);
+  --knm-edge-text: var(--zm-muted);
+  --knm-fullscreen-bg: var(--zm-bg);
+  --knm-banner-loading-bg: var(--zm-accent-soft);
+  --knm-banner-loading-border: var(--zm-border);
+  --knm-banner-loading-text: var(--zm-text);
+  --knm-banner-error-bg: var(--zm-danger-soft);
+  --knm-banner-error-border: var(--zm-danger);
+  --knm-banner-error-text: var(--zm-danger);
+  --knm-banner-warning-bg: var(--zm-warning-soft);
+  --knm-banner-warning-border: var(--zm-warning);
+  --knm-banner-warning-text: var(--zm-warning);
+  --knm-banner-empty-bg: var(--zm-surface-muted);
+  --knm-banner-empty-border: var(--zm-border);
+  --knm-banner-empty-text: var(--zm-muted);
+  gap: 20px;
+  line-height: 1.5;
+}
+
+#network-map-root .knm-panel {
+  border-radius: var(--zm-radius);
+  padding: 22px;
+}
+
+#network-map-root .knm-filters-panel {
+  border-top: 3px solid var(--zm-accent);
+}
+
+#network-map-root .knm-filter-heading {
+  margin-bottom: 20px;
+}
+
+#network-map-root .knm-filter-heading h2 {
+  margin: 3px 0 6px;
+  font-size: 24px;
+  letter-spacing: -0.025em;
+  line-height: 1.3;
+  color: var(--zm-text);
+}
+
+#network-map-root .knm-filter-heading p {
+  margin: 0;
+  color: var(--zm-muted);
+}
+
+#network-map-root .knm-panel-header h2,
+#network-map-root .knm-panel-header h3 {
+  font-size: 17px;
+  letter-spacing: -0.015em;
+}
+
+#network-map-root .knm-form-grid {
+  gap: 16px 20px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+}
+
+#network-map-root input[type="text"],
+#network-map-root input[type="number"],
+#network-map-root select {
+  min-height: 38px;
+  border-radius: var(--zm-radius-sm);
+  padding: 8px 12px;
+}
+
+#network-map-root select { appearance: auto; }
+
+#network-map-root :is(input, select, button):focus-visible {
+  outline: 2px solid var(--zm-accent);
+  outline-offset: 2px;
+  box-shadow: var(--zm-focus);
+}
+
+#network-map-root .knm-checkbox-row {
+  gap: 12px 24px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--zm-border);
+}
+
+#network-map-root .knm-btn,
+#network-map-root .knm-panel-toggle {
+  min-height: 38px;
+  border-radius: var(--zm-radius-sm);
+  padding: 8px 16px;
+}
+
+#network-map-root .knm-btn.knm-btn-compact {
+  min-height: 32px;
+  padding: 6px 12px;
+}
+
+#network-map-root .knm-graph-panel { padding: 0; }
+
+#network-map-root #knm-cy {
+  background-image: radial-gradient(var(--zm-border) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+#network-map-root .knm-graph-toolbar {
+  top: 14px;
+  right: 14px;
+  padding: 6px;
+  border: 1px solid var(--zm-border);
+  border-radius: 12px;
+  background: var(--zm-surface);
+  box-shadow: var(--zm-shadow);
+  flex-wrap: wrap;
+  max-width: calc(100% - 40px);
+}
+
+#network-map-root .knm-banner,
+#network-map-root .knm-guide {
+  border-radius: var(--zm-radius-sm);
+}
+
+#network-map-root .knm-autocomplete-list {
+  margin-top: 4px;
+  border-top: 1px solid var(--zm-border-strong);
+  border-radius: var(--zm-radius-sm);
+  padding: 4px;
+  box-shadow: var(--zm-shadow);
+}
+
+#network-map-root .knm-autocomplete-list li {
+  padding: 9px 10px;
+  border-radius: 6px;
+}
+
+#network-map-root .knm-empty,
+#network-map-root .knm-graph-empty {
+  line-height: 1.6;
+}
+
+@media (max-width: 600px) {
+  #network-map-root .knm-panel { padding: 16px; }
+  #network-map-root .knm-graph-panel { padding: 0; }
+  #network-map-root .knm-panel-header { flex-wrap: wrap; }
+  #network-map-root.knm-root.knm-fullscreen { padding: 8px; gap: 8px; }
+  #network-map-root.knm-fullscreen .knm-filters-panel { max-height: 45vh; overflow: auto; }
 }
 

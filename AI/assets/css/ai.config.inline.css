@@ -9,10 +9,10 @@
     font-size: 12px;
     font-weight: 700;
     line-height: 1.6;
-    border: 1px solid #b0bec5;
-    border-radius: 3px;
-    background: linear-gradient(to bottom, #fafafa, #eceff1);
-    color: #37474f;
+    border: 1px solid var(--zm-border-strong);
+    border-radius: var(--zm-radius-sm);
+    background: var(--zm-accent-soft);
+    color: var(--zm-text);
     cursor: pointer;
     vertical-align: middle;
     white-space: nowrap;
@@ -20,31 +20,19 @@
 }
 
 .ai-config-btn:hover {
-    background: linear-gradient(to bottom, #e3f2fd, #bbdefb);
-    border-color: #64b5f6;
-    color: #1565c0;
-    box-shadow: 0 1px 3px rgba(25, 118, 210, 0.18);
+    background: var(--zm-accent-soft);
+    border-color: var(--zm-accent);
+    color: var(--zm-accent);
+    box-shadow: var(--zm-focus);
 }
 
 .ai-config-btn:active {
-    background: #bbdefb;
-    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.12);
+    background: var(--zm-border-strong);
+    box-shadow: var(--zm-focus);
 }
 
-/* ── Dark theme ── */
-html[theme="dark-theme"] .ai-config-btn,
-html[theme="hc-dark"] .ai-config-btn {
-    background: linear-gradient(to bottom, #37474f, #263238);
-    border-color: #546e7a;
-    color: #b0bec5;
-}
+/* Colors inherit the selected Zabbix theme through shared tokens. */
 
-html[theme="dark-theme"] .ai-config-btn:hover,
-html[theme="hc-dark"] .ai-config-btn:hover {
-    background: linear-gradient(to bottom, #1a3352, #0d47a1);
-    border-color: #42a5f5;
-    color: #90caf9;
-}
 
 /* ── Side Drawer (reuse structure from problem drawer) ── */
 .ai-config-drawer {
@@ -57,9 +45,9 @@ html[theme="hc-dark"] .ai-config-btn:hover {
     z-index: 100001; /* Above Zabbix overlay dialogs (z-index ~10000) */
     display: flex;
     flex-direction: column;
-    background: #fff;
-    border-left: 1px solid #cfd8dc;
-    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.12);
+    background: var(--zm-surface);
+    border-left: 1px solid var(--zm-border);
+    box-shadow: var(--zm-shadow);
     animation: ai-config-slide-in 0.2s ease-out;
 }
 
@@ -74,8 +62,8 @@ html[theme="hc-dark"] .ai-config-btn:hover {
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
-    border-bottom: 1px solid #cfd8dc;
-    background: #eceff1;
+    border-bottom: 1px solid var(--zm-border);
+    background: var(--zm-surface-muted);
     flex-shrink: 0;
 }
 
@@ -92,9 +80,9 @@ html[theme="hc-dark"] .ai-config-btn:hover {
     justify-content: center;
     width: 28px;
     height: 28px;
-    border-radius: 4px;
-    background: #1565c0;
-    color: #fff;
+    border-radius: var(--zm-radius-sm);
+    background: var(--zm-accent);
+    color: var(--zm-on-accent);
     font-size: 12px;
     font-weight: 700;
     flex-shrink: 0;
@@ -103,7 +91,7 @@ html[theme="hc-dark"] .ai-config-btn:hover {
 .ai-config-drawer .ai-drawer-label {
     font-weight: 700;
     font-size: 14px;
-    color: #263238;
+    color: var(--zm-text);
 }
 
 .ai-config-drawer .ai-drawer-header-actions {
@@ -122,22 +110,22 @@ html[theme="hc-dark"] .ai-config-btn:hover {
     border: none;
     background: transparent;
     font-size: 20px;
-    color: #546e7a;
+    color: var(--zm-muted);
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: var(--zm-radius-sm);
     flex-shrink: 0;
 }
 
 .ai-config-drawer .ai-drawer-close:hover {
-    background: #cfd8dc;
-    color: #263238;
+    background: var(--zm-border);
+    color: var(--zm-text);
 }
 
 /* ── Context section ── */
 .ai-config-context {
     padding: 10px 16px;
-    border-bottom: 1px solid #e0e0e0;
-    background: #fafafa;
+    border-bottom: 1px solid var(--zm-border);
+    background: var(--zm-surface-muted);
     font-size: 12px;
     flex-shrink: 0;
     max-height: 180px;
@@ -147,32 +135,32 @@ html[theme="hc-dark"] .ai-config-btn:hover {
 .ai-config-drawer .ai-ctx-row {
     margin-bottom: 4px;
     line-height: 1.45;
-    color: #37474f;
+    color: var(--zm-text);
     word-break: break-word;
 }
 
 .ai-config-drawer .ai-ctx-row strong {
-    color: #263238;
+    color: var(--zm-text);
 }
 
 .ai-ctx-hint {
     margin-top: 8px;
-    color: #1565c0 !important;
-    font-style: italic;
+    color: var(--zm-accent);
+    font-style: normal;
 }
 
 .ai-config-drawer .ai-drawer-loading {
-    color: #78909c;
-    font-style: italic;
+    color: var(--zm-muted);
+    font-style: normal;
 }
 
 .ai-config-drawer .ai-drawer-context-error {
-    color: #c62828;
+    color: var(--zm-danger);
 }
 
 .ai-config-drawer .ai-drawer-context-empty {
-    color: #78909c;
-    font-style: italic;
+    color: var(--zm-muted);
+    font-style: normal;
 }
 
 /* ── Transcript ── */
@@ -180,24 +168,24 @@ html[theme="hc-dark"] .ai-config-btn:hover {
     flex: 1 1 auto;
     overflow-y: auto;
     padding: 12px 16px;
-    background: #fafbfd;
+    background: var(--zm-surface-muted);
     min-height: 0;
 }
 
 .ai-config-drawer .ai-msg {
     margin-bottom: 14px;
-    border-radius: 6px;
+    border-radius: var(--zm-radius-sm);
     overflow: hidden;
 }
 
 .ai-config-drawer .ai-msg-user {
-    background: #e3f2fd;
-    border: 1px solid #bbdefb;
+    background: var(--zm-accent-soft);
+    border: 1px solid var(--zm-border-strong);
 }
 
 .ai-config-drawer .ai-msg-assistant {
-    background: #f5f5f5;
-    border: 1px solid #e0e0e0;
+    background: var(--zm-surface-muted);
+    border: 1px solid var(--zm-border);
 }
 
 .ai-config-drawer .ai-msg-title {
@@ -209,20 +197,20 @@ html[theme="hc-dark"] .ai-config-btn:hover {
 }
 
 .ai-config-drawer .ai-msg-user .ai-msg-title {
-    color: #1565c0;
-    background: rgba(21, 101, 192, 0.06);
+    color: var(--zm-accent);
+    background: var(--zm-accent-soft);
 }
 
 .ai-config-drawer .ai-msg-assistant .ai-msg-title {
-    color: #37474f;
-    background: rgba(0, 0, 0, 0.03);
+    color: var(--zm-text);
+    background: var(--zm-surface-muted);
 }
 
 .ai-config-drawer .ai-msg-body {
     padding: 10px 12px;
     font-size: 13px;
     line-height: 1.55;
-    color: #263238;
+    color: var(--zm-text);
 }
 
 .ai-config-drawer .ai-msg-body pre {
@@ -234,8 +222,8 @@ html[theme="hc-dark"] .ai-config-btn:hover {
 }
 
 .ai-config-drawer .ai-empty-state {
-    color: #90a4ae;
-    font-style: italic;
+    color: var(--zm-muted);
+    font-style: normal;
     padding: 20px 0;
     text-align: center;
 }
@@ -248,36 +236,36 @@ html[theme="hc-dark"] .ai-config-btn:hover {
 }
 
 .ai-config-drawer .ai-status-ok {
-    color: #2e7d32;
+    color: var(--zm-success);
 }
 
 .ai-config-drawer .ai-status-error {
-    color: #c62828;
+    color: var(--zm-danger);
 }
 
 /* ── Compose ── */
 .ai-config-drawer .ai-drawer-compose {
     padding: 12px 16px;
-    border-top: 1px solid #cfd8dc;
-    background: #eceff1;
+    border-top: 1px solid var(--zm-border);
+    background: var(--zm-surface-muted);
     flex-shrink: 0;
 }
 
 .ai-config-drawer .ai-drawer-input {
     width: 100%;
     box-sizing: border-box;
-    border: 1px solid #b0bec5;
-    border-radius: 4px;
+    border: 1px solid var(--zm-border-strong);
+    border-radius: var(--zm-radius-sm);
     padding: 8px 10px;
     font: inherit;
     font-size: 13px;
     resize: vertical;
-    background: #fff;
-    color: #263238;
+    background: var(--zm-surface);
+    color: var(--zm-text);
 }
 
 .ai-config-drawer .ai-drawer-input::placeholder {
-    color: #90a4ae;
+    color: var(--zm-muted);
 }
 
 .ai-config-drawer .ai-drawer-actions {
@@ -301,17 +289,17 @@ html[theme="hc-dark"] .ai-config-btn:hover {
 
 .ai-config-field-label {
     font-weight: 700;
-    color: #1565c0;
+    color: var(--zm-accent);
     white-space: nowrap;
 }
 
 .ai-config-field-value {
     flex: 1;
     font-family: 'Courier New', Courier, monospace;
-    background: #fff;
+    background: var(--zm-surface);
     padding: 2px 6px;
-    border: 1px solid #e0e0e0;
-    border-radius: 3px;
+    border: 1px solid var(--zm-border);
+    border-radius: var(--zm-radius-sm);
     word-break: break-all;
     min-width: 0;
 }
@@ -322,10 +310,10 @@ html[theme="hc-dark"] .ai-config-btn:hover {
     padding: 1px 8px;
     font-size: 11px;
     font-weight: 600;
-    border: 1px solid #b0bec5;
-    border-radius: 3px;
-    background: #eceff1;
-    color: #37474f;
+    border: 1px solid var(--zm-border-strong);
+    border-radius: var(--zm-radius-sm);
+    background: var(--zm-surface-muted);
+    color: var(--zm-text);
     cursor: pointer;
     white-space: nowrap;
     transition: background 0.15s, border-color 0.15s;
@@ -333,15 +321,15 @@ html[theme="hc-dark"] .ai-config-btn:hover {
 }
 
 .ai-copy-btn:hover {
-    background: #e3f2fd;
-    border-color: #64b5f6;
-    color: #1565c0;
+    background: var(--zm-accent-soft);
+    border-color: var(--zm-accent);
+    color: var(--zm-accent);
 }
 
 .ai-copy-btn.ai-copy-success {
-    background: #c8e6c9;
-    border-color: #66bb6a;
-    color: #2e7d32;
+    background: var(--zm-success-soft);
+    border-color: var(--zm-success);
+    color: var(--zm-success);
 }
 
 .ai-copy-block {
@@ -351,15 +339,15 @@ html[theme="hc-dark"] .ai-config-btn:hover {
 .ai-config-code-block {
     position: relative;
     margin: 8px 0;
-    background: #263238;
-    border-radius: 4px;
+    background: var(--zm-surface-muted);
+    border-radius: var(--zm-radius-sm);
     overflow: hidden;
 }
 
 .ai-config-code-block pre {
     padding: 10px 12px;
     margin: 0;
-    color: #eceff1;
+    color: var(--zm-text);
     font-family: 'Courier New', Courier, monospace;
     font-size: 12px;
     line-height: 1.5;
@@ -376,163 +364,18 @@ html[theme="hc-dark"] .ai-config-btn:hover {
 }
 
 .ai-config-inline-code {
-    background: #eceff1;
+    background: var(--zm-surface-muted);
     padding: 1px 4px;
-    border-radius: 3px;
+    border-radius: var(--zm-radius-sm);
     font-family: 'Courier New', Courier, monospace;
     font-size: 12px;
-}
-
-/* ── Dark theme for config drawer ── */
-html[theme="dark-theme"] .ai-config-drawer,
-html[theme="hc-dark"] .ai-config-drawer {
-    background: #1f2c3d;
-    border-left-color: #4a5568;
-    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.35);
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-drawer-header,
-html[theme="hc-dark"] .ai-config-drawer .ai-drawer-header {
-    background: #263545;
-    border-bottom-color: #4a5568;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-drawer-label,
-html[theme="hc-dark"] .ai-config-drawer .ai-drawer-label {
-    color: #dadee3;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-drawer-close,
-html[theme="hc-dark"] .ai-config-drawer .ai-drawer-close {
-    color: #90a4ae;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-drawer-close:hover,
-html[theme="hc-dark"] .ai-config-drawer .ai-drawer-close:hover {
-    background: #37474f;
-    color: #eceff1;
-}
-
-html[theme="dark-theme"] .ai-config-context,
-html[theme="hc-dark"] .ai-config-context {
-    background: #263545;
-    border-bottom-color: #4a5568;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-ctx-row,
-html[theme="hc-dark"] .ai-config-drawer .ai-ctx-row {
-    color: #b0bec5;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-ctx-row strong,
-html[theme="hc-dark"] .ai-config-drawer .ai-ctx-row strong {
-    color: #dadee3;
-}
-
-html[theme="dark-theme"] .ai-ctx-hint,
-html[theme="hc-dark"] .ai-ctx-hint {
-    color: #64b5f6 !important;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-drawer-loading,
-html[theme="dark-theme"] .ai-config-drawer .ai-drawer-context-empty,
-html[theme="hc-dark"] .ai-config-drawer .ai-drawer-loading,
-html[theme="hc-dark"] .ai-config-drawer .ai-drawer-context-empty {
-    color: #768d99;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-drawer-transcript,
-html[theme="hc-dark"] .ai-config-drawer .ai-drawer-transcript {
-    background: #1a2636;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-msg-user,
-html[theme="hc-dark"] .ai-config-drawer .ai-msg-user {
-    background: #1a3352;
-    border-color: #1e4976;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-msg-assistant,
-html[theme="hc-dark"] .ai-config-drawer .ai-msg-assistant {
-    background: #263545;
-    border-color: #4a5568;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-msg-user .ai-msg-title,
-html[theme="hc-dark"] .ai-config-drawer .ai-msg-user .ai-msg-title {
-    color: #64b5f6;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-msg-assistant .ai-msg-title,
-html[theme="hc-dark"] .ai-config-drawer .ai-msg-assistant .ai-msg-title {
-    color: #b0bec5;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-msg-body,
-html[theme="hc-dark"] .ai-config-drawer .ai-msg-body {
-    color: #dadee3;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-drawer-compose,
-html[theme="hc-dark"] .ai-config-drawer .ai-drawer-compose {
-    background: #263545;
-    border-top-color: #4a5568;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-drawer-input,
-html[theme="hc-dark"] .ai-config-drawer .ai-drawer-input {
-    background: #1f2c3d;
-    border-color: #4a5568;
-    color: #dadee3;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-drawer-input::placeholder,
-html[theme="hc-dark"] .ai-config-drawer .ai-drawer-input::placeholder {
-    color: #768d99;
-}
-
-html[theme="dark-theme"] .ai-config-drawer .ai-empty-state,
-html[theme="hc-dark"] .ai-config-drawer .ai-empty-state {
-    color: #768d99;
-}
-
-html[theme="dark-theme"] .ai-config-field-label,
-html[theme="hc-dark"] .ai-config-field-label {
-    color: #64b5f6;
-}
-
-html[theme="dark-theme"] .ai-config-field-value,
-html[theme="hc-dark"] .ai-config-field-value {
-    background: #1a2636;
-    border-color: #4a5568;
-    color: #e0e0e0;
-}
-
-html[theme="dark-theme"] .ai-copy-btn,
-html[theme="hc-dark"] .ai-copy-btn {
-    background: #37474f;
-    border-color: #546e7a;
-    color: #b0bec5;
-}
-
-html[theme="dark-theme"] .ai-copy-btn:hover,
-html[theme="hc-dark"] .ai-copy-btn:hover {
-    background: #1a3352;
-    border-color: #42a5f5;
-    color: #90caf9;
-}
-
-html[theme="dark-theme"] .ai-config-inline-code,
-html[theme="hc-dark"] .ai-config-inline-code {
-    background: #37474f;
-    color: #e0e0e0;
 }
 
 /* ── History time range controls ── */
 .ai-history-controls {
     padding: 8px 16px;
-    border-bottom: 1px solid #e0e0e0;
-    background: #f5f5f5;
+    border-bottom: 1px solid var(--zm-border);
+    background: var(--zm-surface-muted);
     flex-shrink: 0;
     font-size: 12px;
 }
@@ -548,17 +391,17 @@ html[theme="hc-dark"] .ai-config-inline-code {
     display: flex;
     align-items: center;
     gap: 4px;
-    color: #37474f;
+    color: var(--zm-text);
     white-space: nowrap;
 }
 
 .ai-history-range select,
 .ai-history-range input[type="number"] {
     padding: 3px 6px;
-    border: 1px solid #b0bec5;
-    border-radius: 3px;
-    background: #fff;
-    color: #263238;
+    border: 1px solid var(--zm-border-strong);
+    border-radius: var(--zm-radius-sm);
+    background: var(--zm-surface);
+    color: var(--zm-text);
     font-size: 12px;
 }
 
@@ -569,8 +412,8 @@ html[theme="hc-dark"] .ai-config-inline-code {
 
 .ai-history-info {
     margin-top: 4px;
-    color: #78909c;
-    font-style: italic;
+    color: var(--zm-muted);
+    font-style: normal;
     font-size: 11px;
 }
 
@@ -586,56 +429,18 @@ html[theme="hc-dark"] .ai-config-inline-code {
     display: flex;
     align-items: center;
     gap: 4px;
-    color: #37474f;
+    color: var(--zm-text);
     white-space: nowrap;
     font-size: 12px;
 }
 
 .ai-history-custom input[type="datetime-local"] {
     padding: 3px 6px;
-    border: 1px solid #b0bec5;
-    border-radius: 3px;
-    background: #fff;
-    color: #263238;
+    border: 1px solid var(--zm-border-strong);
+    border-radius: var(--zm-radius-sm);
+    background: var(--zm-surface);
+    color: var(--zm-text);
     font-size: 12px;
-}
-
-/* Dark theme */
-html[theme="dark-theme"] .ai-history-controls,
-html[theme="hc-dark"] .ai-history-controls {
-    background: #263545;
-    border-bottom-color: #4a5568;
-}
-
-html[theme="dark-theme"] .ai-history-range label,
-html[theme="hc-dark"] .ai-history-range label {
-    color: #b0bec5;
-}
-
-html[theme="dark-theme"] .ai-history-range select,
-html[theme="dark-theme"] .ai-history-range input[type="number"],
-html[theme="hc-dark"] .ai-history-range select,
-html[theme="hc-dark"] .ai-history-range input[type="number"] {
-    background: #1f2c3d;
-    border-color: #4a5568;
-    color: #dadee3;
-}
-
-html[theme="dark-theme"] .ai-history-info,
-html[theme="hc-dark"] .ai-history-info {
-    color: #768d99;
-}
-
-html[theme="dark-theme"] .ai-history-custom label,
-html[theme="hc-dark"] .ai-history-custom label {
-    color: #b0bec5;
-}
-
-html[theme="dark-theme"] .ai-history-custom input[type="datetime-local"],
-html[theme="hc-dark"] .ai-history-custom input[type="datetime-local"] {
-    background: #1f2c3d;
-    border-color: #4a5568;
-    color: #dadee3;
 }
 
 /* ── Responsive ── */
@@ -645,3 +450,23 @@ html[theme="hc-dark"] .ai-history-custom input[type="datetime-local"] {
         max-width: 100vw;
     }
 }
+
+/* Shared interaction treatment for inline assistance. */
+
+.ai-config-btn { border-color: var(--zm-border-strong); color: var(--zm-accent); border-radius: 6px; }
+.ai-config-btn:hover { border-color: var(--zm-accent); color: var(--zm-accent); }
+.ai-config-drawer { color: var(--zm-text); }
+.ai-config-drawer .ai-drawer-header { padding: 18px 20px; border-top: 3px solid var(--zm-accent); background: var(--zm-surface); }
+.ai-config-drawer .ai-drawer-icon { width: 32px; height: 32px; border-radius: 10px; }
+.ai-config-drawer .ai-drawer-transcript { padding: 18px; }
+.ai-config-drawer .ai-drawer-compose { padding: 18px; background: var(--zm-surface); }
+.ai-config-drawer .ai-drawer-input { border-radius: var(--zm-radius-sm); padding: 10px 12px; }
+.ai-config-drawer .ai-drawer-actions { flex-wrap: wrap; }
+.ai-config-drawer .ai-empty-state { padding: 28px 16px; border: 1px dashed var(--zm-border-strong); border-radius: var(--zm-radius-sm); font-style: normal; }
+.ai-config-drawer .ai-msg { border-radius: 12px; }
+.ai-config-drawer :is(.btn, .btn-alt) { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; box-sizing: border-box; padding: 7px 12px; background: var(--zm-surface); color: var(--zm-text); border: 1px solid var(--zm-border-strong); border-radius: var(--zm-radius-sm); font-weight: 600; }
+.ai-config-drawer .ai-drawer-send { background: var(--zm-accent); border-color: var(--zm-accent); color: var(--zm-on-accent); }
+.ai-config-drawer .ai-drawer-send:hover:not(:disabled) { background: var(--zm-accent-hover); color: var(--zm-on-accent); }
+.ai-config-btn:focus-visible, .ai-config-drawer :is(button, input, select, textarea, a):focus-visible { outline: 2px solid var(--zm-accent); outline-offset: 3px; }
+.ai-config-drawer :is(.btn, .btn-alt):disabled { opacity: .55; cursor: not-allowed; }
+@media (prefers-reduced-motion: reduce) { .ai-config-btn, .ai-config-drawer, .ai-config-drawer * { animation: none !important; transition: none !important; } }

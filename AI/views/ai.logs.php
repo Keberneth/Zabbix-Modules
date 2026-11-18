@@ -45,6 +45,7 @@ ob_start();
      data-csrf-clear="<?= $h(CCsrfTokenHelper::get('ai.logs.clear')) ?>">
     <div class="ai-header">
         <div>
+            <p class="zm-eyebrow"><?= $h(_('Assistant')) ?></p>
             <h1><?= $h($data['title'] ?? _('AI logs')) ?></h1>
             <p class="ai-muted"><?= $h(_('JSONL audit trail across chat, webhook, tool reads/writes, redaction, settings, and errors. Use the tabs to focus on a category, then narrow down with the facets, time range, or column filters.')) ?></p>
             <?php if (!empty($summary['current_log_file'])): ?>
@@ -80,8 +81,8 @@ ob_start();
             <div><strong><?= $h(_('Retention')) ?>:</strong><div class="ai-muted"><?= $h($summary['retention_days'] ?? 0) ?> <?= $h(_('days')) ?></div></div>
             <div><strong><?= $h(_('Live files')) ?>:</strong><div class="ai-muted"><?= $h($summary['live_file_count'] ?? 0) ?></div></div>
             <div><strong><?= $h(_('Archived files')) ?>:</strong><div class="ai-muted"><?= $h($summary['archive_file_count'] ?? 0) ?></div></div>
-            <div><strong><?= $h(_('Log path writable')) ?>:</strong><div class="ai-muted"><?= $log_writable ? $h(_('Yes')) : '<strong style="color:#c00">'.$h(_('No')).'</strong>' ?></div></div>
-            <div><strong><?= $h(_('Archive path writable')) ?>:</strong><div class="ai-muted"><?= $archive_writable ? $h(_('Yes')) : '<strong style="color:#c00">'.$h(_('No')).'</strong>' ?></div></div>
+            <div><strong><?= $h(_('Log path writable')) ?>:</strong><div class="ai-muted"><?= $log_writable ? $h(_('Yes')) : '<strong class="ai-log-path-error">'.$h(_('No')).'</strong>' ?></div></div>
+            <div><strong><?= $h(_('Archive path writable')) ?>:</strong><div class="ai-muted"><?= $archive_writable ? $h(_('Yes')) : '<strong class="ai-log-path-error">'.$h(_('No')).'</strong>' ?></div></div>
         </div>
         <?php if ($any_unwritable && $permission_note !== ''): ?>
             <p class="ai-muted ai-top-margin"><strong><?= $h(_('How to fix:')) ?></strong> <?= $h($permission_note) ?></p>

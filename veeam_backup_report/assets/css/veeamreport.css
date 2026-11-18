@@ -833,3 +833,83 @@
 
     .vr-table thead th { position: static; }
 }
+
+/* Shared module theme. Chart categories and severity colours remain stable. */
+.veeamreport.veeamreport {
+    --vr-surface: var(--zm-surface);
+    --vr-surface-2: var(--zm-surface-muted);
+    --vr-border: var(--zm-border);
+    --vr-border-strong: var(--zm-border-strong);
+    --vr-ink: var(--zm-text);
+    --vr-ink-2: var(--zm-muted);
+    --vr-muted: var(--zm-muted);
+    --vr-accent: var(--zm-accent);
+    --vr-grid: var(--zm-border);
+    --vr-axis: var(--zm-border-strong);
+    --vr-track: var(--zm-surface-muted);
+    background: var(--zm-bg);
+    padding: 0 16px 16px;
+    border-radius: var(--zm-radius);
+    line-height: 1.5;
+}
+.veeamreport .vr-head {
+    margin: 0 -16px 20px;
+    padding: 24px;
+    background: var(--zm-surface);
+    border: 1px solid var(--zm-border);
+    border-top: 3px solid var(--zm-accent);
+    border-radius: var(--zm-radius);
+    box-shadow: var(--zm-shadow);
+}
+.veeamreport .vr-head-title { font-size: 26px; line-height: 1.2; font-weight: 700; letter-spacing: -0.025em; margin: 4px 0 12px; }
+.veeamreport :is(.vr-filter, .vr-panel, .vr-kpi) { border-radius: var(--zm-radius); box-shadow: var(--zm-shadow); min-width: 0; }
+.veeamreport .vr-filter { padding: 20px; }
+.veeamreport .vr-panel { padding: 22px; }
+.veeamreport .vr-panel-title { font-size: 17px; font-weight: 700; letter-spacing: -0.015em; }
+.veeamreport .vr-panel-sub { margin-top: 5px; margin-bottom: 18px; }
+.veeamreport .vr-kpis { gap: 16px; }
+.veeamreport .vr-kpi { padding: 22px; }
+.veeamreport .vr-kpi-value { font-size: 32px; font-weight: 700; letter-spacing: -0.035em; font-variant-numeric: tabular-nums; }
+.veeamreport .vr-kpi-label { margin-bottom: 10px; }
+.veeamreport .vr-kpi::before { inset: 0 0 auto; width: auto; height: 3px; }
+.veeamreport .vr-btn { box-sizing: border-box; min-height: 38px; padding: 8px 16px; border-radius: var(--zm-radius-sm); transition: background 150ms ease, border-color 150ms ease, box-shadow 150ms ease; }
+.veeamreport .vr-btn:hover { background: var(--zm-accent-soft); }
+.veeamreport .vr-btn--primary { background: var(--zm-accent); border-color: var(--zm-accent); color: var(--zm-on-accent); }
+.veeamreport .vr-btn--primary:hover { background: var(--zm-accent-hover); border-color: var(--zm-accent-hover); color: var(--zm-on-accent); }
+.veeamreport :is(.vr-field input:not([type="checkbox"]), .vr-field select, .vr-chip-search) { min-height: 38px; border-radius: var(--zm-radius-sm); }
+.veeamreport input[type="checkbox"] { accent-color: var(--zm-accent); }
+.veeamreport :is(button, a, input, select):focus-visible { outline: 2px solid var(--zm-accent); outline-offset: 2px; box-shadow: var(--zm-focus); }
+.veeamreport .vr-chip { padding: 7px 12px; }
+.veeamreport .vr-chip.is-on { background: var(--zm-accent-soft); }
+.veeamreport .vr-chip-static { padding: 4px 10px; }
+.veeamreport .vr-tabs { width: fit-content; max-width: 100%; padding: 6px; gap: 6px; box-sizing: border-box; background: var(--zm-surface); border: 1px solid var(--zm-border); border-radius: 12px; }
+.veeamreport .vr-tab { min-height: 38px; padding: 9px 18px; border: 0; border-radius: var(--zm-radius-sm); margin: 0; background: transparent; color: var(--zm-muted); }
+.veeamreport .vr-tab:hover { background: var(--zm-accent-soft); color: var(--zm-accent); }
+.veeamreport .vr-tab.is-active { background: var(--zm-accent); color: var(--zm-on-accent); margin: 0; }
+.veeamreport .vr-table-wrap { border: 1px solid var(--zm-border); border-radius: 10px; }
+.veeamreport .vr-table :is(th, td) { padding: 12px; }
+.veeamreport .vr-alert { padding: 14px 16px; border-radius: var(--zm-radius-sm); }
+.veeamreport :is(.vr-empty, .vr-chart-empty) { padding: 36px 20px; background: var(--zm-surface-muted); border-radius: var(--zm-radius-sm); line-height: 1.6; }
+.veeamreport .vr-all-clear { padding: 20px; background: var(--zm-success-soft); color: var(--zm-success); border-radius: var(--zm-radius-sm); }
+.veeamreport .vr-attention-item { padding: 14px 4px; }
+.veeamreport .vr-grid-2 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); }
+@media (max-width: 700px) {
+    .veeamreport.veeamreport { padding: 0 8px 12px; }
+    .veeamreport .vr-head { padding: 20px 16px; margin-inline: -8px; }
+    .veeamreport .vr-head-title { font-size: 23px; }
+    .veeamreport :is(.vr-panel, .vr-filter) { padding: 16px; }
+    .veeamreport .vr-field { min-width: 0; max-width: 100%; flex-basis: 100%; }
+    .veeamreport .vr-tabs { width: 100%; }
+    .veeamreport .vr-tab { flex: 1 1 auto; padding-inline: 12px; }
+    .veeamreport .vr-kpis { grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); }
+    .veeamreport .vr-actions { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .veeamreport :is(.vr-btn, .vr-tab) { transition: none; }
+}
+@media print {
+    .veeamreport.veeamreport { padding: 0; background: transparent; }
+    .veeamreport :is(.vr-head, .vr-panel, .vr-kpi) { box-shadow: none; }
+}
+
+.vr-tooltip { background: var(--zm-surface-raised); color: var(--zm-text); border: 1px solid var(--zm-border-strong); border-radius: var(--zm-radius-sm); box-shadow: var(--zm-shadow); }

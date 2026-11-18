@@ -1,0 +1,180 @@
+/*
+ * Zabbix Modules — shared visual tokens and accessibility foundations.
+ * Self-contained theme for this module. No shared folder or other module is
+ * required; install this stylesheet together with the module manifest.
+ * Zabbix resolves "System default" into html[theme]; never use the OS color
+ * preference to override a theme explicitly selected in Zabbix.
+ */
+:root {
+	--zm-bg: #f3f6fb;
+	--zm-surface: #ffffff;
+	--zm-surface-muted: #f7f9fc;
+	--zm-surface-raised: #ffffff;
+	--zm-text: #172b4d;
+	--zm-muted: #52647e;
+	--zm-border: #dce4ef;
+	--zm-border-strong: #8293ab;
+	--zm-accent: #2563eb;
+	--zm-accent-hover: #1d4ed8;
+	--zm-accent-soft: #eaf1ff;
+	--zm-on-accent: #ffffff;
+	--zm-success: #157347;
+	--zm-success-soft: #eaf7ef;
+	--zm-warning: #946200;
+	--zm-warning-soft: #fff6df;
+	--zm-danger: #c03545;
+	--zm-danger-soft: #fff0f2;
+	--zm-radius: 14px;
+	--zm-radius-sm: 8px;
+	--zm-shadow: 0 4px 18px rgba(23, 43, 77, .06);
+	--zm-focus: 0 0 0 3px rgba(37, 99, 235, .2);
+	--zm-overlay: rgba(15, 23, 42, .55);
+	--zm-scheme: light;
+}
+
+/* Explicit Zabbix themes take precedence over legacy per-module hints. */
+html[theme="dark-theme"],
+html[theme="hc-dark"],
+html:where(:not([theme="blue-theme"]):not([theme="hc-light"]))[color-scheme="dark"],
+html:not([theme]) :is([data-ai-theme="dark"], [data-healthcheck-theme="dark"], [data-nbs-theme="dark"], [data-rebrand-theme="dark"]) {
+	--zm-bg: #151d2b;
+	--zm-surface: #1f293a;
+	--zm-surface-muted: #182232;
+	--zm-surface-raised: #263347;
+	--zm-text: #edf2fa;
+	--zm-muted: #b0bfd4;
+	--zm-border: #3a4a61;
+	--zm-border-strong: #677b98;
+	--zm-accent: #8ab4ff;
+	--zm-accent-hover: #afccff;
+	--zm-accent-soft: #263d60;
+	--zm-on-accent: #10213a;
+	--zm-success: #83d9a7;
+	--zm-success-soft: #193c30;
+	--zm-warning: #f1ce7c;
+	--zm-warning-soft: #413620;
+	--zm-danger: #ff9ca8;
+	--zm-danger-soft: #452832;
+	--zm-shadow: 0 4px 20px rgba(0, 0, 0, .18);
+	--zm-focus: 0 0 0 3px rgba(138, 180, 255, .32);
+	--zm-overlay: rgba(0, 0, 0, .7);
+	--zm-scheme: dark;
+}
+
+/* High contrast keeps borders and secondary text as deliberate strong cues. */
+html[theme="hc-light"] {
+	--zm-bg: #ffffff;
+	--zm-surface: #ffffff;
+	--zm-surface-muted: #f0f0f0;
+	--zm-surface-raised: #ffffff;
+	--zm-text: #000000;
+	--zm-muted: #242424;
+	--zm-border: #555555;
+	--zm-border-strong: #000000;
+	--zm-accent: #0033b3;
+	--zm-accent-hover: #001f75;
+	--zm-accent-soft: #e7edff;
+	--zm-on-accent: #ffffff;
+	--zm-success: #005a2a;
+	--zm-success-soft: #e4f4e9;
+	--zm-warning: #654000;
+	--zm-warning-soft: #fff2c7;
+	--zm-danger: #9f1026;
+	--zm-danger-soft: #ffe8ed;
+	--zm-shadow: none;
+	--zm-focus: 0 0 0 3px #000000;
+	--zm-scheme: light;
+}
+
+html[theme="hc-dark"] {
+	--zm-bg: #000000;
+	--zm-surface: #000000;
+	--zm-surface-muted: #161616;
+	--zm-surface-raised: #202020;
+	--zm-text: #ffffff;
+	--zm-muted: #e6e6e6;
+	--zm-border: #bcbcbc;
+	--zm-border-strong: #ffffff;
+	--zm-accent: #fff06a;
+	--zm-accent-hover: #fff7b0;
+	--zm-accent-soft: #343019;
+	--zm-on-accent: #000000;
+	--zm-success: #96ffb8;
+	--zm-success-soft: #112d1a;
+	--zm-warning: #ffe680;
+	--zm-warning-soft: #322900;
+	--zm-danger: #ffb5be;
+	--zm-danger-soft: #360d17;
+	--zm-shadow: none;
+	--zm-focus: 0 0 0 3px #ffffff;
+	--zm-scheme: dark;
+}
+
+.zm-eyebrow {
+	margin: 0 0 8px;
+	color: var(--zm-accent);
+	font-size: 11px;
+	font-weight: 700;
+	line-height: 1.4;
+	letter-spacing: .12em;
+	text-transform: uppercase;
+}
+
+/* Zabbix's native main has a desktop minimum width. These module pages have
+ * their own responsive grids; let them fit the available workspace. Dashboard
+ * layout and injected reminder banners deliberately do not opt into this. */
+.wrapper:has(:is(.ai-page, .rebrand-page, .hc-page, .nbs-page,
+ #capacity-planning-root, #incident-timeline-root, #network-map-root,
+ .motd-page, .slareport, .veeamreport)) > :is(main, .header-title, footer, output) {
+	min-width: 0;
+}
+
+/* Foundations are scoped; the surrounding Zabbix frontend keeps its theme. */
+:where(.ai-page, .ai-problem-drawer, .ai-config-drawer, .rebrand-page,
+ .hc-page, .nbs-page, .cap-shell, .cap-modal, .incident-shell, .incident-modal,
+ .knm-root, .patch-calendar, .pc-hint, .motd-page, .motd-banner, .slareport, .veeamreport) {
+	color-scheme: var(--zm-scheme);
+	font-family: inherit;
+	font-variant-numeric: tabular-nums;
+	line-height: 1.5;
+}
+
+:is(.ai-page, .ai-problem-drawer, .ai-config-drawer, .rebrand-page,
+ .hc-page, .nbs-page, .cap-shell, .cap-modal, .incident-shell, .incident-modal,
+ .knm-root, .patch-calendar, .pc-hint, .motd-page, .motd-banner, .slareport, .veeamreport)
+ :is(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
+	outline: 2px solid var(--zm-accent);
+	outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	:is(.ai-page, .ai-problem-drawer, .ai-config-drawer, .rebrand-page,
+	 .hc-page, .nbs-page, .cap-shell, .cap-modal, .incident-shell, .incident-modal,
+	 .knm-root, .patch-calendar, .pc-hint, .motd-page, .motd-banner, .slareport, .veeamreport) *,
+	:is(.ai-page, .hc-page, .nbs-page, .cap-shell, .incident-shell, .patch-calendar) *::before,
+	:is(.ai-page, .hc-page, .nbs-page, .cap-shell, .incident-shell, .patch-calendar) *::after {
+		animation-duration: .01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: .01ms !important;
+		scroll-behavior: auto !important;
+	}
+}
+
+@media (forced-colors: active) {
+	:root:root,
+	html:not([theme]) :is([data-ai-theme="dark"], [data-healthcheck-theme="dark"], [data-nbs-theme="dark"], [data-rebrand-theme="dark"]) {
+		--zm-bg: Canvas;
+		--zm-surface: Canvas;
+		--zm-surface-muted: Canvas;
+		--zm-surface-raised: Canvas;
+		--zm-text: CanvasText;
+		--zm-muted: CanvasText;
+		--zm-border: CanvasText;
+		--zm-border-strong: CanvasText;
+		--zm-accent: LinkText;
+		--zm-accent-hover: LinkText;
+		--zm-accent-soft: Canvas;
+		--zm-on-accent: Canvas;
+		--zm-shadow: none;
+	}
+}

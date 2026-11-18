@@ -90,6 +90,7 @@
   },
   "assets": {
     "css": [
+      "module-theme.css",
       "trigger_correlation.css"
     ],
     "js": [

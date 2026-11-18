@@ -46,6 +46,7 @@
   },
   "assets": {
     "css": [
+      "module-theme.css",
       "netboxsync.css"
     ],
     "js": [

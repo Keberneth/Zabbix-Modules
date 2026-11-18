@@ -15,7 +15,8 @@ catch (_) {
 const root = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8').replace(/^\uFEFF/, ''));
 const source = fs.readFileSync(path.join(root, 'assets/js', manifest.assets.js[0]), 'utf8');
-const styles = fs.readFileSync(path.join(root, 'assets/css', manifest.assets.css[0]), 'utf8');
+const styles = manifest.assets.css.map(asset =>
+    fs.readFileSync(path.join(root, 'assets/css', asset), 'utf8')).join('\n');
 // Zabbix 7.0 page skeleton with the layout rules from its themes: <body> is a flex row holding
 // the sidebar and .wrapper (the scrolling page column). CHtmlPage pages put a <main> in .wrapper.
 const zabbixPage = content => '<style>html,body{height:100vh;margin:0}body{display:flex;overflow:hidden}' +

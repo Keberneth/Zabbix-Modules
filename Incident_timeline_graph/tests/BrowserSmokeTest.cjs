@@ -11,7 +11,8 @@ catch (_) { playwright = require(require.resolve('playwright', {paths: [path.res
 const root = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
 const js = fs.readFileSync(path.join(root, 'assets/js', manifest.assets.js[0]), 'utf8');
-const css = fs.readFileSync(path.join(root, 'assets/css', manifest.assets.css[0]), 'utf8');
+const css = manifest.assets.css.map(asset =>
+  fs.readFileSync(path.join(root, 'assets/css', asset), 'utf8')).join('\n');
 const epoch = (date) => Date.parse(date + 'T00:00:00Z') / 1000;
 const reportFrom = epoch('2026-07-15');
 const reportTo = epoch('2026-10-10') + 86399;

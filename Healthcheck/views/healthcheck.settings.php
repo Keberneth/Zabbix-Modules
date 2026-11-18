@@ -133,6 +133,7 @@ ob_start();
      data-i18n-copy-failed="<?= $h(_('Copy failed')) ?>">
     <div class="hc-header">
         <div>
+            <p class="zm-eyebrow"><?= $h(_('Monitoring')) ?></p>
             <h1><?= $h($data['title'] ?? _('Healthcheck settings')) ?></h1>
             <p class="hc-muted">
                 Configure one or more Zabbix health checks. The API token field keeps the existing token when left blank, and you can switch to an environment variable later without exposing the stored value.

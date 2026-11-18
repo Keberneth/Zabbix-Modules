@@ -43,6 +43,7 @@
   },
   "assets": {
     "css": [
+      "module-theme.css",
       "slareport.css",
       "slareport.settings.css"
     ],

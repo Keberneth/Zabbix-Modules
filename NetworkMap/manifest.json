@@ -18,6 +18,7 @@
   },
   "assets": {
     "css": [
+      "module-theme.css",
       "network.map.css"
     ],
     "js": [

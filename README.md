@@ -20,6 +20,22 @@ Frontend modules that extend Zabbix 7.0. Each module lives in its own folder wit
 
 The HANA Dashboard module is maintained in [Zabbix-HANA-Monitoring](https://github.com/Keberneth/Zabbix-HANA-Monitoring).
 
+## Consistent appearance, independent installation
+
+All 12 modules use the same card, control, typography and color system. The
+appearance follows the user's Zabbix theme: **Blue**, **Dark**, **High-contrast
+light**, or **High-contrast dark**. **System default** uses the theme resolved by
+Zabbix; the operating system's dark-mode preference does not override it.
+High-contrast themes use stronger borders and text without decorative shadows.
+Keyboard focus and reduced-motion preferences are supported throughout.
+
+Each module includes its own self-contained `assets/css/module-theme.css`, loaded
+before its component styles. There is no shared runtime folder, cross-module CSS
+import, or extra module to install. Install any one module, any pair, or all of them.
+
+Deploy the complete updated module folder (including its manifest and CSS assets)
+and refresh the frontend to see the new design.
+
 ## Simple Installation Guide
 Download the module folder to the Zabbix Web frontend Server and place in:
 /usr/share/zabbix/modules/

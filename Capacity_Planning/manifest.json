@@ -26,6 +26,7 @@
   },
   "assets": {
     "css": [
+      "module-theme.css",
       "capacity-planning-1.4.3-20261031.3.css"
     ],
     "js": [

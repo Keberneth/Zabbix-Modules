@@ -14,5 +14,11 @@ $root = (new CDiv(_('Loading incident timeline…')))
 
 (new CHtmlPage())
 	->setTitle($data['page_title'])
+	->addItem((new CDiv([
+		(new CTag('p', true, _('Infrastructure insights')))->addClass('zm-eyebrow'),
+		(new CTag('p', true, _('Incident timeline')))->addClass('incident-report-title'),
+		(new CTag('p', true, _('Explore incident patterns, severity and the triggers that need attention.')))
+			->addClass('incident-report-description')
+	]))->addClass('incident-report-head'))
 	->addItem($root)
 	->show();
